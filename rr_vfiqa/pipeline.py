@@ -178,6 +178,8 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
         if bundle.rgb.shape[0] < p.window_frames:
             continue
         wflows = WindowFlows(bundle, backend)
+        # All flows this window's metrics need, in one batched backend call.
+        wflows.precompute()
         pair = cache.get_pair(w.pair)
         wf = WindowFeatures(window=w)
 
@@ -196,8 +198,10 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
                 ("transition", lambda: transition_evaluator.compute_window(bundle, wflows, cfg)),
                 ("character", lambda: character_segmenter.compute_window(bundle, wflows, pair, cfg)),
                 ("thin", lambda: thin_object_detector.compute_window(bundle, wflows, pair, cfg)),
-                ("weapon", lambda: weapon_tracker.compute_window(bundle, wflows, cfg)),
             ]
+        if p.run_tracker:                            # audit-tier point tracking
+            stages.append(("weapon", lambda: weapon_tracker.compute_window(
+                bundle, wflows, cfg, roi_mask=wf.scalars.get("_char_mask"))))
         for name, fn in stages:
             try:                                    # one failing stage must not
                 wf.scalars.update(fn())             # take down the whole window
@@ -206,6 +210,46 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
                 stage_errors[name] += 1
 
         wfs.append(wf)
+
+    # --- tier 3: audit escalation (§10) -------------------------------------
+    # The highest-risk windows get the core metrics recomputed at native
+    # resolution (sharper flows/edges), capped so runtime stays bounded.
+    n_audit = 0
+    if p.audit_top_fraction > 0 and wfs:
+        ranked = sorted(wfs, key=lambda wf: -max(
+            _window_category_errors(wf).values(), default=0.0))
+        n_audit = min(p.audit_max_windows,
+                      max(1, int(round(len(ranked) * p.audit_top_fraction))))
+        say(f"tier-3 audit: re-evaluating top {n_audit} windows at native resolution")
+        for wf in ranked[:n_audit]:
+            try:
+                nb = candidate.read_frames(wf.window.indices, width=None)
+                if nb.rgb.shape[0] < p.window_frames:
+                    continue
+                nw = WindowFlows(nb, backend)
+                nw.precompute()
+                npair = cache.get_pair(wf.window.pair)
+                for name, fn in (
+                    ("composition", lambda: flow_composition_metric.compute(nw, npair, cfg)),
+                    ("cycle", lambda: cycle_reconstruction.compute(nb, nw, cfg)),
+                    ("temporal", lambda: temporal_compensation.compute(nb, nw, cfg)),
+                    ("edges", lambda: edge_structure.compute(nb, nw, cache, npair, cfg)),
+                ):
+                    wf.scalars.update(fn())
+                if p.run_tracker:
+                    wf.scalars.update(weapon_tracker.compute_window(
+                        nb, nw, cfg, roi_mask=wf.scalars.get("_char_mask")))
+                wf.labels["audited"] = True
+            except Exception as exc:
+                wf.labels["error_audit"] = repr(exc)
+
+    audit_notes: list[str] = []
+    if p.run_depth:
+        try:
+            from .models.depth_backend import get_depth_backend
+            get_depth_backend("auto")
+        except NotImplementedError as exc:
+            audit_notes.append(f"depth disabled: {exc}")
 
     CORE_STAGES = {"composition", "cycle", "temporal", "parity", "edges", "gtq"}
     valid_wfs = [wf for wf in wfs
@@ -279,6 +323,8 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
     meta = {
         "status": status,
         "valid_windows": len(valid_wfs),
+        "audited_windows": n_audit,
+        "audit_notes": audit_notes,
         "stage_errors": dict(sorted(stage_errors.items())),
         "stage_error_samples": error_samples,
         "preset": p.name,

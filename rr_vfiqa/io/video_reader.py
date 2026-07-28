@@ -115,34 +115,77 @@ class VideoReader:
 
     def read_frames(self, indices: np.ndarray | list[int], width: int | None = None
                     ) -> FrameBundle:
-        """Decode specific frame indices (seek-based, ascending order)."""
+        """Decode specific frame indices, seeking per contiguous run.
+
+        Seeks land on the keyframe before each run's start time; frames are
+        then matched by timestamp (robust to VFR / B-frame reordering), so a
+        late-window read costs one GOP decode, not a whole-video decode.
+        Any frames the seek path misses fall back to a full counted pass.
+        """
         indices = np.asarray(sorted(set(int(i) for i in indices)), dtype=np.int64)
         n = self.meta.n_frames
         indices = indices[(indices >= 0) & (indices < n)]
 
+        def post(img: np.ndarray) -> np.ndarray:
+            if width is not None and img.shape[1] > width:
+                h = max(2, int(round(img.shape[0] * width / img.shape[1])) // 2 * 2)
+                img = cv2.resize(img, (width, h), interpolation=cv2.INTER_AREA)
+            return img
+
         decoded: dict[int, np.ndarray] = {}
+        frame_dur = 1.0 / max(self.meta.fps, 1e-6)
+        pts_table = self.meta.pts_seconds
         with av.open(self.path) as c:
             stream = c.streams.video[0]
             stream.thread_type = "AUTO"
-            # Frame-exact seeking is unreliable across mp4 muxers/B-frame
-            # patterns, so we do a single filtered decode pass and stop as soon
-            # as every requested index is collected. Windows are small and we
-            # decode at reduced width, so this is cheap in practice.
-            idx = 0
-            wanted = set(int(i) for i in indices)
-            last = int(indices[-1]) if len(indices) else -1
-            for frame in c.decode(stream):
-                if idx in wanted:
-                    img = frame.to_ndarray(format="rgb24")
-                    if width is not None and img.shape[1] > width:
-                        h = max(2, int(round(img.shape[0] * width / img.shape[1])) // 2 * 2)
-                        img = cv2.resize(img, (width, h), interpolation=cv2.INTER_AREA)
-                    decoded[idx] = img
-                    if len(decoded) == len(wanted):
+            tb = float(stream.time_base) if stream.time_base else frame_dur
+
+            for run in _split_runs(indices, gap=32):
+                need = [int(i) for i in run if i not in decoded]
+                if not need:
+                    continue
+                want_times = [float(pts_table[i]) for i in need]
+                target = max(0.0, want_times[0] - frame_dur)
+                try:
+                    c.seek(int(target / tb), stream=stream, backward=True,
+                           any_frame=False)
+                except (av.error.ValueError, av.error.InvalidDataError, OSError):
+                    c.seek(0, stream=stream)
+                ptr = 0
+                tol = frame_dur * 0.6
+                limit = want_times[-1] + tol
+                for frame in c.decode(stream):
+                    if frame.pts is None:
+                        continue
+                    t = frame.pts * tb
+                    if t > limit:
                         break
-                if idx > last:
-                    break
-                idx += 1
+                    while ptr < len(need) and t > want_times[ptr] + tol:
+                        ptr += 1                      # missed — fallback later
+                    if ptr < len(need) and abs(t - want_times[ptr]) <= tol:
+                        decoded[need[ptr]] = post(frame.to_ndarray(format="rgb24"))
+                        ptr += 1
+                    if ptr >= len(need):
+                        break
+
+            # Fallback: counted full pass for anything the seeks missed.
+            missing = {int(i) for i in indices} - set(decoded)
+            if missing:
+                last = max(missing)
+                idx = 0
+                try:
+                    c.seek(0, stream=stream)
+                except (av.error.ValueError, OSError):
+                    pass
+                for frame in c.decode(stream):
+                    if idx in missing:
+                        decoded[idx] = post(frame.to_ndarray(format="rgb24"))
+                        missing.discard(idx)
+                        if not missing:
+                            break
+                    if idx >= last:
+                        break
+                    idx += 1
 
         keep = [i for i in indices if i in decoded]
         if not keep:
@@ -159,3 +202,11 @@ class VideoReader:
 
     def read_one(self, index: int, width: int | None = None) -> np.ndarray:
         return self.read_frames([index], width=width).rgb[0]
+
+
+def _split_runs(indices: np.ndarray, gap: int) -> list[np.ndarray]:
+    """Group sorted indices into runs; a new seek starts after gaps > `gap`."""
+    if len(indices) == 0:
+        return []
+    cuts = np.nonzero(np.diff(indices) > gap)[0] + 1
+    return list(np.split(indices, cuts))

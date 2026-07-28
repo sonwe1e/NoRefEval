@@ -34,21 +34,31 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig,
              for t in range(bundle.rgb.shape[0])]
     h, w = grays[0].shape
 
-    # Prefer corners inside the character region; fall back to the central
-    # frame area (weapons are usually near the character, not in UI corners).
-    mask_u8 = None
+    # Prefer corners inside the character region (passed from the character
+    # branch — without it this measures generic central corners, §3.7); fall
+    # back to the central frame area.
     if roi_mask is not None and roi_mask.sum() > 100:
         mask_u8 = cv2.dilate(roi_mask.astype(np.uint8), np.ones((11, 11), np.uint8))
     else:
         mask_u8 = np.zeros((h, w), np.uint8)
         mask_u8[h // 4: 3 * h // 4, w // 4: 3 * w // 4] = 1
     pts = _corner_points(grays[1], mask_u8)
-    out: dict[str, float] = {"weapon_n_points": float(len(pts))}
+    out: dict[str, float] = {"weapon_n_points": float(len(pts)),
+                             "weapon_has_char_roi": float(roi_mask is not None
+                                                          and roi_mask.sum() > 100)}
     if len(pts) < 12:
         out.update({"weapon_dev_p90": float("nan"), "weapon_dir_change_p90": float("nan")})
         return out
 
-    tracks, vis = tracker.track(grays, pts)          # (5, N, 2)
+    # Points live on frame 1 (X_i): track forward through 2,3,4 and backward
+    # to 0, then stitch. (The old code handed frame-1 points to a tracker
+    # that assumed frame 0 — the trajectory started in the wrong frame.)
+    tracks = np.full((5, len(pts), 2), np.nan, np.float32)
+    vis = np.zeros((5, len(pts)), bool)
+    fwd_t, fwd_v = tracker.track(grays[1:], pts)
+    tracks[1:], vis[1:] = fwd_t, fwd_v
+    back_t, back_v = tracker.track(grays[1::-1], pts)
+    tracks[0], vis[0] = back_t[1], back_v[1]
     # Body-relative positions: subtract the per-frame median of visible points.
     rel = np.full_like(tracks, np.nan, dtype=np.float64)
     for t in range(tracks.shape[0]):

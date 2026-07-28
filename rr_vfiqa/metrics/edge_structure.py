@@ -33,10 +33,20 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cache: SourceCache,
     out: dict[str, float] = {}
 
     # --- support map from endpoint edges ------------------------------------
-    e0 = cache.get_edges(pair.pair).edges
-    e1 = cache.get_edges(pair.pair + 1).edges
-    g0 = cache.get_edges(pair.pair).grad_energy
-    g1 = cache.get_edges(pair.pair + 1).grad_energy
+    # Cached at flow resolution; bring everything to the window resolution so
+    # the branch works at native resolution in audit tier too.
+    import cv2 as _cv2
+
+    def _to_res(arr: np.ndarray) -> np.ndarray:
+        if arr.shape[:2] == (h, w):
+            return arr
+        interp = _cv2.INTER_NEAREST if arr.dtype == np.uint8 else _cv2.INTER_LINEAR
+        return _cv2.resize(arr, (w, h), interpolation=interp)
+
+    e0 = _to_res(cache.get_edges(pair.pair).edges)
+    e1 = _to_res(cache.get_edges(pair.pair + 1).edges)
+    g0 = _to_res(cache.get_edges(pair.pair).grad_energy)
+    g1 = _to_res(cache.get_edges(pair.pair + 1).grad_energy)
     f_01 = resize_flow(pair.f_01, h, w)
     f_10 = resize_flow(pair.f_10, h, w)
 

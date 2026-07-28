@@ -28,6 +28,10 @@ class FlowBackend(ABC):
         """Bidirectional flows as a tuple (f_ab, f_ba)."""
         return self.flow(a_rgb, b_rgb), self.flow(b_rgb, a_rgb)
 
+    def flow_many(self, pairs: list[tuple[np.ndarray, np.ndarray]]) -> list[np.ndarray]:
+        """Batch of directed flows. Base implementation: sequential."""
+        return [self.flow(a, b) for a, b in pairs]
+
     def release(self) -> None:
         pass
 
@@ -62,21 +66,37 @@ class RaftBackend(FlowBackend):
         self._model = raft_small(weights=weights).to(self.device).eval()
 
     def flow(self, a_rgb: np.ndarray, b_rgb: np.ndarray) -> np.ndarray:
+        return self.flow_many([(a_rgb, b_rgb)])[0]
+
+    def flow_many(self, pairs: list[tuple[np.ndarray, np.ndarray]]) -> list[np.ndarray]:
+        """One batched model call per (up to 16) directed pairs."""
+        if not pairs:
+            return []
         torch = self._torch
-        h, w = a_rgb.shape[:2]
+        h, w = pairs[0][0].shape[:2]
         ph = (16 - h % 16) % 16
         pw = (16 - w % 16) % 16
-        a = np.pad(a_rgb, ((0, ph), (0, pw), (0, 0)), mode="edge")
-        b = np.pad(b_rgb, ((0, ph), (0, pw), (0, 0)), mode="edge")
-        # transforms() takes CHW uint8 images to [-1, 1] float CHW tensors.
-        ta = torch.from_numpy(a.transpose(2, 0, 1))
-        tb = torch.from_numpy(b.transpose(2, 0, 1))
-        ta, tb = self._transforms(ta, tb)
-        with torch.no_grad():
-            flow = self._model(ta[None].to(self.device),
-                               tb[None].to(self.device))[-1][0].cpu().numpy()
-        flow = flow[:, :h, :w]
-        return np.transpose(flow, (1, 2, 0)).astype(np.float32)  # (H, W, 2)
+        out: list[np.ndarray] = []
+        chunk = 16
+        for start in range(0, len(pairs), chunk):
+            batch = pairs[start:start + chunk]
+            imgs_a, imgs_b = [], []
+            for a, b in batch:
+                imgs_a.append(np.pad(a, ((0, ph), (0, pw), (0, 0)), mode="edge")
+                              .transpose(2, 0, 1))
+                imgs_b.append(np.pad(b, ((0, ph), (0, pw), (0, 0)), mode="edge")
+                              .transpose(2, 0, 1))
+            ta = torch.from_numpy(np.stack(imgs_a))
+            tb = torch.from_numpy(np.stack(imgs_b))
+            # Same normalization as weights.transforms(): uint8 → [-1, 1].
+            fa = ta.to(torch.float32).div(127.5).sub(1.0)
+            fb = tb.to(torch.float32).div(127.5).sub(1.0)
+            with torch.no_grad():
+                flows = self._model(fa.to(self.device), fb.to(self.device))[-1]
+            flows = flows[:, :, :h, :w].cpu().numpy()
+            for i in range(len(batch)):
+                out.append(np.transpose(flows[i], (1, 2, 0)).astype(np.float32))
+        return out
 
     def release(self) -> None:
         del self._model

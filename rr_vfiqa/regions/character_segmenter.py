@@ -55,6 +55,9 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, pair: SourcePairData,
     hat = clean_mask(hat, min_area=48, close_k=5)
 
     out["char_expected_frac"] = float(hat.mean())
+    # Character mask on the X_i grid for downstream branches (weapon tracker
+    # point selection). "_"-prefixed keys are stripped from feature export.
+    out["_char_mask"] = s0
     if hat.mean() < 0.002:
         out.update({"char_missing_frac": float("nan"), "char_extra_frac": float("nan"),
                     "char_chamfer": float("nan")})

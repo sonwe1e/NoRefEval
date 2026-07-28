@@ -51,8 +51,8 @@ def test_score_ordering():
 
 
 def test_calibrator_monotone(tmp_path):
-    lgbm = pytest.importorskip("lightgbm")
-    from rr_vfiqa.fusion.monotonic_calibrator import MonotonicCalibrator, FEATURE_ORDER
+    pytest.importorskip("lightgbm")
+    from rr_vfiqa.fusion.monotonic_calibrator import FEATURE_ORDER, MonotonicCalibrator
 
     rng = np.random.default_rng(0)
     X = rng.uniform(0, 0.8, (240, len(FEATURE_ORDER)))
@@ -65,9 +65,30 @@ def test_calibrator_monotone(tmp_path):
     base = cal.predict_quality(feats)
     feats["A_motion"] = 0.7
     worse = cal.predict_quality(feats)
-    assert worse <= base + 1e-6       # monotone: more error never raises score
+    # Monotone AND unsaturated: the old ×100 bug pinned both values at 100.
+    assert worse < base
+    assert 0.0 < worse < 100.0 and 0.0 < base < 100.0
 
     p = tmp_path / "cal.pkl"
     cal.save(p)
     cal2 = MonotonicCalibrator.load(p)
     assert abs(cal2.predict_quality(feats) - worse) < 1e-6
+
+
+def test_calibrator_pairwise_ranks_winner_first():
+    pytest.importorskip("lightgbm")
+    from rr_vfiqa.fusion.monotonic_calibrator import FEATURE_ORDER, MonotonicCalibrator
+
+    rng = np.random.default_rng(1)
+    n = 120
+    d = len(FEATURE_ORDER)
+    X_win = rng.uniform(0.0, 0.3, (n, d))     # winners: low errors
+    X_lose = rng.uniform(0.4, 0.8, (n, d))    # losers: high errors
+    cal = MonotonicCalibrator().fit_pairwise(X_win, X_lose, num_boost_round=200)
+
+    win_feats = {k: 0.1 for k in FEATURE_ORDER}
+    lose_feats = {k: 0.6 for k in FEATURE_ORDER}
+    q_win = cal.predict_quality(win_feats)
+    q_lose = cal.predict_quality(lose_feats)
+    assert q_win > q_lose
+    assert 0.0 < q_win <= 100.0 and 0.0 <= q_lose < 100.0
