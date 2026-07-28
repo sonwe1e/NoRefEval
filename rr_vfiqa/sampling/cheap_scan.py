@@ -61,18 +61,13 @@ class CheapScan:
 
 
 def _phash64(gray: np.ndarray) -> np.int64:
-    small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA).astype(np.float32)
-    dct = cv2.dct(small)[:8, :8]
-    med = np.median(dct[1:, 1:])  # drop DC
-    bits = (dct > med).ravel()
-    h = np.uint64(0)
-    for b in bits:
-        h = np.uint64((np.uint64(h) << np.uint64(1)) | np.uint64(int(b)))
-    return np.int64(h.astype(np.uint64) >> np.uint64(1))  # back to signed-safe range
+    from ..imutils import phash64
+    return phash64(gray)
 
 
 def _hamming(a: np.int64, b: np.int64) -> int:
-    return int(np.uint64(np.uint64(a) ^ np.uint64(b))).bit_count()
+    from ..imutils import hamming64
+    return hamming64(a, b)
 
 
 def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:

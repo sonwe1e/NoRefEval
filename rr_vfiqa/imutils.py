@@ -53,6 +53,22 @@ def bbox_of(mask: np.ndarray) -> list[int] | None:
     return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
 
 
+def phash64(gray: np.ndarray) -> np.int64:
+    """64-bit DCT perceptual hash (motion-tolerant, structure-sensitive)."""
+    small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA).astype(np.float32)
+    dct = cv2.dct(small)[:8, :8]
+    med = np.median(dct[1:, 1:])
+    bits = (dct > med).ravel()
+    h = np.uint64(0)
+    for b in bits:
+        h = np.uint64((np.uint64(h) << np.uint64(1)) | np.uint64(int(b)))
+    return np.int64(np.uint64(h) >> np.uint64(1))
+
+
+def hamming64(a: np.int64, b: np.int64) -> int:
+    return int(np.uint64(np.uint64(a) ^ np.uint64(b))).bit_count()
+
+
 def alpha_blend_fit(xi: np.ndarray, xm: np.ndarray, xj: np.ndarray
                     ) -> tuple[np.ndarray, np.ndarray]:
     """Per-pixel optimal α of M ≈ α·X_i + (1−α)·X_j via RGB least squares.

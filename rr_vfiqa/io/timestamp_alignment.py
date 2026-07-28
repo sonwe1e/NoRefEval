@@ -53,22 +53,55 @@ def detect_offset(source_meta: VideoMeta, cand_meta: VideoMeta) -> tuple[int, fl
 
 
 def detect_scene_cuts(reader: VideoReader, width: int = 256,
-                      min_z: float = 8.0, abs_floor: float = 14.0) -> np.ndarray:
-    """Frame indices (decode order) where a hard cut is likely."""
-    prev = None
+                      diff_z: float = 8.0, diff_floor: float = 14.0,
+                      hash_z: float = 6.0, hash_floor: float = 8.0,
+                      hist_z: float = 8.0, hist_floor: float = 0.35) -> np.ndarray:
+    """Frame indices where a hard cut is likely.
+
+    Three fused signals — none is sufficient alone on game content:
+    * luma difference: good on static scenes, diluted by constant motion;
+    * perceptual-hash hamming: structure change, but rotation also moves it;
+    * color-histogram Bhattacharyya: motion preserves the global palette,
+      a cut destroys it — the decisive signal here.
+    """
+    import cv2
+
+    from ..imutils import hamming64, phash64
+
+    def hist(img_rgb: np.ndarray) -> np.ndarray:
+        h = cv2.calcHist([img_rgb], [0, 1, 2], None, [16, 16, 16], [0, 256] * 3)
+        return cv2.normalize(h, None).flatten()
+
+    prev_gray = None
+    prev_hash = None
+    prev_hist = None
     diffs: list[float] = []
+    hdist: list[float] = []
+    bhatt: list[float] = []
     idxs: list[int] = []
     for idx, img in reader.iter_frames(width=width):
-        gray = np.mean(img.astype(np.float32), axis=-1)
-        if prev is not None and gray.shape == prev.shape:
-            diffs.append(float(np.mean(np.abs(gray - prev))))
+        gray = np.mean(img.astype(np.float32), axis=-1).astype(np.float32)
+        h = phash64(gray.astype(np.uint8))
+        hg = hist(img)
+        if prev_gray is not None and gray.shape == prev_gray.shape:
+            diffs.append(float(np.mean(np.abs(gray - prev_gray))))
+            hdist.append(float(hamming64(h, prev_hash)))
+            bhatt.append(float(cv2.compareHist(prev_hist, hg,
+                                               cv2.HISTCMP_BHATTACHARYYA)))
             idxs.append(idx)
-        prev = gray
+        prev_gray = gray
+        prev_hash = h
+        prev_hist = hg
     if len(diffs) < 8:
         return np.zeros(0, np.int32)
     d = np.asarray(diffs)
-    z = robust_z(d)
-    cuts = [idxs[i] for i in range(len(d)) if z[i] > min_z and d[i] > abs_floor]
+    hd = np.asarray(hdist)
+    bh = np.asarray(bhatt)
+    zd, zh, zb = robust_z(d), robust_z(hd), robust_z(bh)
+    cuts = [idxs[i] for i in range(len(d))
+            if ((zd[i] > diff_z and d[i] > diff_floor)
+                or (zh[i] > hash_z and hd[i] > hash_floor)
+                or (zb[i] > hist_z and bh[i] > hist_floor))]
     return np.asarray(cuts, np.int32)
 
 

@@ -2,13 +2,18 @@
 
 Renders a deterministic scene with camera motion (translation + rotation),
 a textured background, a world-fixed thin pole, an independently moving
-character, and screen-static UI. From the 120 FPS render:
+striped character with a sword, and screen-static UI (HP panel, skill ring,
+text blocks). From the 120 FPS render:
 
 * source  = every 2nd frame (the 60 FPS anchors)
 * truth   = the removed odd frames (pseudo ground truth, USERPLAN §12.1)
 * good    = perfect interleaving
-* bad     = interleaving with segment-local degradations (blur / ghost /
-            freeze) that mimic real interpolation failures
+* bad     = interleaving with segment-local degradations
+
+Defect library (USERPLAN §6/§12.3): blur, crossfade ghost, freeze, rotation
+tear, head erasure, pole motion-attribution error, sword flicker, UI subpixel
+drift, text-stroke merging, shop state double-exposure, disocclusion fill,
+plus scene-cut splice, frame-offset and dropped-frame corpus variants.
 
 Also usable to build calibration corpora: compute full-reference metrics on
 `truth` vs endpoint-reference features on `bad` and learn the mapping.
@@ -16,6 +21,7 @@ Also usable to build calibration corpora: compute full-reference metrics on
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import av
@@ -23,55 +29,75 @@ import cv2
 import numpy as np
 
 
+@dataclass
+class SceneMeta:
+    """Per-120FPS-frame ground truth used to craft precise defects."""
+
+    camera: np.ndarray      # (N, 2, 3) canvas→frame affine matrices
+    char_pos: np.ndarray    # (N, 2) character body center (cx, cy)
+    pole_pts: np.ndarray    # (N, 2, 2) pole line endpoints in frame coords
+    w: int
+    h: int
+
+    @property
+    def n(self) -> int:
+        return len(self.char_pos)
+
+
+# ---------------------------------------------------------------------------
+# rendering
+# ---------------------------------------------------------------------------
+
 def _bg_canvas(rng: np.random.Generator, w2: int, h2: int) -> np.ndarray:
     canvas = np.zeros((h2, w2, 3), np.uint8)
-    # smooth gradient base
     grad = np.linspace(40, 110, h2, dtype=np.uint8)
     canvas[..., :] = grad[:, None, None]
-    # random structures for parallax texture
     for _ in range(500):
         x, y = rng.integers(0, w2 - 40), rng.integers(0, h2 - 40)
         bw, bh = rng.integers(12, 64), rng.integers(12, 64)
         color = tuple(int(c) for c in rng.integers(30, 230, 3))
         cv2.rectangle(canvas, (x, y), (x + bw, y + bh), color, -1)
-    # fine checker texture so flow always locks
     yy, xx = np.mgrid[0:h2, 0:w2]
     checker = (((xx // 8) + (yy // 8)) % 2).astype(np.int16) * 18
     canvas = np.clip(canvas.astype(np.int16) + checker[..., None], 0, 255).astype(np.uint8)
     return canvas
 
 
-def _draw_pole(frame: np.ndarray, mat: np.ndarray, w2: int, h2: int) -> None:
-    """World-fixed vertical pole, projected through the camera affine."""
+def _draw_pole(frame: np.ndarray, mat: np.ndarray, w2: int, h2: int) -> np.ndarray:
+    """World-fixed vertical pole; returns its projected endpoints."""
     x = int(w2 * 0.64)
     pts = np.float32([[x, 0], [x, h2]]).reshape(-1, 1, 2)
     proj = cv2.transform(pts, mat).reshape(-1, 2)
-    cv2.line(frame, tuple(proj[0].astype(int)), tuple(proj[1].astype(int)),
-             (25, 20, 20), 5, cv2.LINE_AA)
-    cv2.line(frame, tuple(proj[0].astype(int)), tuple(proj[1].astype(int)),
-             (70, 65, 60), 2, cv2.LINE_AA)
+    p0, p1 = tuple(proj[0].astype(int)), tuple(proj[1].astype(int))
+    cv2.line(frame, p0, p1, (25, 20, 20), 5, cv2.LINE_AA)
+    cv2.line(frame, p0, p1, (70, 65, 60), 2, cv2.LINE_AA)
+    return proj
 
 
-def _draw_character(frame: np.ndarray, cx: float, cy: float) -> None:
+def _char_center(t: int, n_frames: int, w: int, h: int) -> tuple[float, float]:
+    ph = t / n_frames
+    cx = w * 0.30 + (w * 0.42) * ph + 14 * np.sin(4 * np.pi * ph)
+    cy = h * 0.52 + 12 * np.sin(6 * np.pi * ph)
+    return cx, cy
+
+
+def _draw_character(frame: np.ndarray, cx: float, cy: float,
+                    draw_sword: bool = True) -> None:
     cxi, cyi = int(cx), int(cy)
-    # body
     cv2.rectangle(frame, (cxi - 18, cyi - 10), (cxi + 18, cyi + 46), (200, 60, 60), -1)
-    for s in range(-10, 46, 8):   # stripes → trackable internal texture
+    for s in range(-10, 46, 8):
         cv2.line(frame, (cxi - 18, cyi + s), (cxi + 18, cyi + s), (240, 220, 90), 2)
-    # head
     cv2.circle(frame, (cxi, cyi - 26), 16, (235, 200, 170), -1)
-    # sword — a thin moving appendage
-    cv2.line(frame, (cxi + 14, cyi), (cxi + 52, cyi - 40), (210, 210, 220), 3,
-             cv2.LINE_AA)
+    if draw_sword:
+        cv2.line(frame, (cxi + 14, cyi), (cxi + 52, cyi - 40), (210, 210, 220), 3,
+                 cv2.LINE_AA)
 
 
 def _draw_ui(frame: np.ndarray, t: int, w: int, h: int) -> None:
-    # top-left HP panel (slowly draining bar)
     cv2.rectangle(frame, (14, 12), (150, 44), (20, 20, 25), -1)
     cv2.rectangle(frame, (16, 14), (148, 42), (70, 70, 80), 1)
     frac = max(0.15, 0.9 - 0.12 * (t // 120))
     cv2.rectangle(frame, (18, 20), (int(18 + 128 * frac), 36), (60, 210, 90), -1)
-    # bottom-right skill ring (screen-static geometry)
     cc = (w - 52, h - 52)
     cv2.circle(frame, cc, 34, (30, 30, 35), -1)
     cv2.circle(frame, cc, 34, (220, 220, 230), 2)
@@ -79,28 +105,26 @@ def _draw_ui(frame: np.ndarray, t: int, w: int, h: int) -> None:
         a = np.deg2rad(ang)
         p2 = (int(cc[0] + 26 * np.cos(a)), int(cc[1] + 26 * np.sin(a)))
         cv2.line(frame, cc, p2, (160, 160, 170), 2)
-    # text-like strokes top-right
-    for i, x0 in enumerate(range(w - 170, w - 30, 16)):
+    for x0 in range(w - 170, w - 30, 16):
         cv2.rectangle(frame, (x0, 16), (x0 + 9, 30), (235, 235, 235), -1)
         cv2.rectangle(frame, (x0 + 2, 20), (x0 + 7, 26), (20, 20, 25), -1)
 
 
 def render_scene(n_frames: int = 480, w: int = 640, h: int = 360, fps: int = 120,
-                 seed: int = 7) -> np.ndarray:
-    """(N, H, W, 3) uint8 RGB at the requested fps."""
+                 seed: int = 7, return_meta: bool = False):
+    """(N, H, W, 3) uint8 RGB at the requested fps; optionally (+SceneMeta)."""
     rng = np.random.default_rng(seed)
-    # Canvas oversized to cover the camera excursion without border artifacts.
     w2, h2 = int(w * 2.8), int(h * 2.4)
     canvas = _bg_canvas(rng, w2, h2)
     frames = np.empty((n_frames, h, w, 3), np.uint8)
-    cx0, cy0 = w * 0.30, h * 0.52
+    cam = np.empty((n_frames, 2, 3), np.float64)
+    chars = np.empty((n_frames, 2), np.float64)
+    poles = np.empty((n_frames, 2, 2), np.float64)
 
-    pan_x = 1.4 * w        # total camera pan over the clip (≈0.9 px/frame @640w)
+    pan_x = 1.4 * w
     amp_y = 0.35 * h
     for t in range(n_frames):
         ph = t / n_frames
-        # View center traverses the canvas; margins guarantee the window
-        # never samples outside it (window half-size ≤ distance to border).
         ang = 9.0 * np.sin(2 * np.pi * ph)
         center = (w2 / 2.0, h2 / 2.0)
         rot = cv2.getRotationMatrix2D(center, ang, 1.0)
@@ -108,13 +132,16 @@ def render_scene(n_frames: int = 480, w: int = 640, h: int = 360, fps: int = 120
         rot[1, 2] += (h2 / 2.0 - h / 2.0) + amp_y * np.sin(2 * np.pi * ph)
         frame = cv2.warpAffine(canvas, rot, (w, h), flags=cv2.INTER_LINEAR,
                                borderMode=cv2.BORDER_REFLECT_101)
-        _draw_pole(frame, rot, w2, h2)
-        cx = cx0 + (w * 0.42) * ph + 14 * np.sin(4 * np.pi * ph)
-        cy = cy0 + 12 * np.sin(6 * np.pi * ph)
+        poles[t] = _draw_pole(frame, rot, w2, h2)
+        cx, cy = _char_center(t, n_frames, w, h)
+        chars[t] = (cx, cy)
         _draw_character(frame, cx, cy)
         _draw_ui(frame, t, w, h)
         frames[t] = frame
-    return frames
+        cam[t] = rot
+
+    meta = SceneMeta(camera=cam, char_pos=chars, pole_pts=poles, w=w, h=h)
+    return (frames, meta) if return_meta else frames
 
 
 # ---------------------------------------------------------------------------
@@ -142,11 +169,10 @@ def write_video(path: str | Path, frames: np.ndarray, fps: float,
 
 
 # ---------------------------------------------------------------------------
-# candidates
+# candidates and defects
 # ---------------------------------------------------------------------------
 
 def make_source_and_truth(frames120: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """(source_60 = even frames, truth_mids = odd frames)."""
     return frames120[0::2].copy(), frames120[1::2].copy()
 
 
@@ -158,44 +184,127 @@ def interleave(source: np.ndarray, mids: np.ndarray) -> np.ndarray:
     return out
 
 
-def make_bad_mids(source: np.ndarray, truth: np.ndarray
-                  ) -> tuple[np.ndarray, dict[str, tuple[int, int]]]:
-    """Apply segment-local degradations to the mid frames.
+def _segments(n_mids: int, count: int) -> list[tuple[int, int]]:
+    """Evenly spaced non-overlapping defect segments (mid-frame indices)."""
+    step = n_mids // (count + 1)
+    length = max(4, step // 3)
+    return [(k * step, k * step + length) for k in range(1, count + 1)]
 
-    Segments (in mid-frame indices): blur, crossfade ghost, freeze-copy.
-    Even frames (anchors) are never touched.
+
+def _inpaint_circle(frame: np.ndarray, cx: int, cy: int, r: int) -> None:
+    h, w = frame.shape[:2]
+    m = np.zeros((h, w), np.uint8)
+    cv2.circle(m, (int(cx), int(cy)), int(r), 1, -1)
+    frame[:] = cv2.inpaint(frame, m, 5, cv2.INPAINT_TELEA)
+
+
+def _inpaint_line(frame: np.ndarray, p0, p1, thickness: int) -> None:
+    m = np.zeros(frame.shape[:2], np.uint8)
+    cv2.line(m, tuple(np.asarray(p0, int)), tuple(np.asarray(p1, int)), 1, thickness)
+    frame[:] = cv2.inpaint(frame, m, 5, cv2.INPAINT_TELEA)
+
+
+DEFECTS = ("blur", "ghost", "freeze", "rotation_tear", "head_erase",
+           "pole_wrong_motion", "sword_flicker", "ui_drift", "text_merge",
+           "shop_jump", "disocc_fill")
+
+
+def make_defective_mids(source: np.ndarray, truth: np.ndarray, meta: SceneMeta,
+                        defects: list[str] | None = None, seed: int = 11
+                        ) -> tuple[np.ndarray, dict[str, tuple[int, int]]]:
+    """Apply one segment per requested defect to the mid frames.
+
+    Segments and returned dict are in MID-frame indices (candidate index of
+    mid i is 2i+1). Even frames (anchors) are never touched.
     """
+    defects = list(defects) if defects is not None else ["blur", "ghost", "freeze"]
+    for d in defects:
+        if d not in DEFECTS:
+            raise ValueError(f"unknown defect {d!r}; choose from {DEFECTS}")
     n = len(truth)
     mids = truth.copy()
-    segs = {"blur": (n // 8, n // 8 + n // 12),
-            "ghost": (3 * n // 8, 3 * n // 8 + n // 12),
-            "freeze": (6 * n // 8, 6 * n // 8 + n // 12)}
+    segs = dict(zip(defects, _segments(n, len(defects))))
 
-    a, b = segs["blur"]
-    for i in range(a, min(b, n)):
-        mids[i] = cv2.GaussianBlur(mids[i], (0, 0), 3.0)
-
-    a, b = segs["ghost"]
-    for i in range(a, min(b, n)):
-        xi = source[i].astype(np.float32)
-        xj = source[min(i + 1, len(source) - 1)].astype(np.float32)
-        mids[i] = np.clip(0.5 * xi + 0.5 * xj, 0, 255).astype(np.uint8)
-
-    a, b = segs["freeze"]
-    for i in range(a, min(b, n)):
-        mids[i] = source[i]
-
+    for name, (a, b) in segs.items():
+        b = min(b, n)
+        for i in range(a, b):
+            m = 2 * i + 1                       # 120fps index of this mid
+            xi, xj = source[i], source[min(i + 1, len(source) - 1)]
+            f = mids[i]
+            cx, cy = meta.char_pos[m]
+            if name == "blur":
+                mids[i] = cv2.GaussianBlur(f, (0, 0), 3.0)
+            elif name == "ghost":
+                mids[i] = np.clip(0.5 * xi.astype(np.float32)
+                                  + 0.5 * xj.astype(np.float32), 0, 255).astype(np.uint8)
+            elif name == "freeze":
+                mids[i] = xi.copy()
+            elif name == "rotation_tear":
+                # Left half frozen at X_i, right half from X_{i+1}: under
+                # camera rotation the halves are mutually inconsistent — the
+                # seam plus opposing rotations is a background tear.
+                torn = xi.copy()
+                torn[:, f.shape[1] // 2:] = xj[:, f.shape[1] // 2:]
+                mids[i] = torn
+            elif name == "head_erase":
+                _inpaint_circle(f, cx, cy - 26, 18)
+            elif name == "pole_wrong_motion":
+                # Erase the pole where it should be, redraw it where X_i had
+                # it: the pole no longer carries its own motion (§8.3).
+                _inpaint_line(f, meta.pole_pts[m, 0], meta.pole_pts[m, 1], 9)
+                p0, p1 = meta.pole_pts[2 * i]
+                cv2.line(f, tuple(p0.astype(int)), tuple(p1.astype(int)),
+                         (45, 40, 38), 5, cv2.LINE_AA)
+            elif name == "sword_flicker":
+                if i % 2 == 0:                  # sword gone on alternating mids
+                    cxi, cyi = int(cx), int(cy)
+                    _inpaint_line(f, (cxi + 12, cyi + 2), (cxi + 56, cyi - 44), 8)
+            elif name == "ui_drift":
+                # 2 px screen-space shift of both HUD elements.
+                for (x0, y0, x1, y1) in ((10, 8, 154, 48),
+                                         (meta.w - 94, meta.h - 94, meta.w - 8, meta.h - 8)):
+                    patch = f[y0:y1, x0:x1].copy()
+                    pw = x1 - x0
+                    f[y0:y1, x0:x1] = 0
+                    f[y0:y1, x0 + 2:x1] = patch[:, :pw - 2]
+            elif name == "text_merge":
+                x0, y0, x1, y1 = meta.w - 174, 12, meta.w - 26, 34
+                patch = cv2.cvtColor(f[y0:y1, x0:x1], cv2.COLOR_RGB2GRAY)
+                dark = (patch < 128).astype(np.uint8)
+                dark = cv2.dilate(dark, np.ones((3, 3), np.uint8))
+                rgb = f[y0:y1, x0:x1]
+                rgb[dark > 0] = (rgb[dark > 0].astype(np.float32) * 0.35
+                                 + 15).astype(np.uint8)
+            elif name == "shop_jump":
+                # Discrete UI state switch shown as a double exposure: the
+                # panel shows a mixed state with both bars visible (§8.6).
+                cv2.rectangle(f, (18, 20), (146, 36), (210, 70, 70), -1)
+                panel = f[8:50, 10:156].astype(np.float32)
+                prev = xi[8:50, 10:156].astype(np.float32)
+                f[8:50, 10:156] = np.clip(0.5 * panel + 0.5 * prev, 0, 255).astype(np.uint8)
+            elif name == "disocc_fill":
+                # Newly exposed band (camera pans content leftward → exposure
+                # on the right) filled with flat color: structure vanishes.
+                band = 26
+                fill = np.median(f[:, -band - 8:-band].reshape(-1, 3), 0)
+                f[:, -band:] = fill.astype(np.uint8)
     return mids, segs
 
 
+# ---------------------------------------------------------------------------
+# corpus variants
+# ---------------------------------------------------------------------------
+
 def build_test_set(out_dir: str | Path, n_frames: int = 480, w: int = 640,
-                   h: int = 360, seed: int = 7) -> dict[str, Path]:
-    """Render + encode the full synthetic test corpus. Returns paths."""
+                   h: int = 360, seed: int = 7,
+                   defects: list[str] | None = None) -> dict[str, Path]:
+    """Render + encode the synthetic corpus. Returns paths."""
     out_dir = Path(out_dir)
-    frames = render_scene(n_frames=n_frames, w=w, h=h, seed=seed)
+    frames, meta = render_scene(n_frames=n_frames, w=w, h=h, seed=seed,
+                                return_meta=True)
     source, truth = make_source_and_truth(frames)
     good = frames
-    bad_mids, _ = make_bad_mids(source, truth)
+    bad_mids, _ = make_defective_mids(source, truth, meta, defects)
     bad = interleave(source, bad_mids)
 
     return {
@@ -204,3 +313,41 @@ def build_test_set(out_dir: str | Path, n_frames: int = 480, w: int = 640,
         "good": write_video(out_dir / "candidate_good_120.mp4", good, 120),
         "bad": write_video(out_dir / "candidate_bad_120.mp4", bad, 120),
     }
+
+
+def build_scene_cut_set(out_dir: str | Path, n_frames: int = 480, w: int = 640,
+                        h: int = 360) -> dict[str, Path]:
+    """Two distinct scenes spliced at the midpoint; the candidate carries a
+    2-frame crossfade at the cut (a common interpolation failure there)."""
+    out_dir = Path(out_dir)
+    half = n_frames // 2
+    a = render_scene(n_frames=half, w=w, h=h, seed=7)
+    b = render_scene(n_frames=n_frames - half, w=w, h=h, seed=99)
+    frames120 = np.concatenate([a, b], 0)
+    frames120[half] = np.clip(0.5 * a[-1].astype(np.float32)
+                              + 0.5 * b[0].astype(np.float32), 0, 255).astype(np.uint8)
+    source, _ = make_source_and_truth(frames120)
+    return {
+        "source": write_video(out_dir / "cut_source_60.mp4", source, 60),
+        "candidate": write_video(out_dir / "cut_candidate_120.mp4", frames120, 120),
+        "cut_candidate_frame": half,
+    }
+
+
+def build_offset_candidate(source_path: str | Path, good_frames: np.ndarray,
+                           out_dir: str | Path) -> Path:
+    """Candidate shifted by one frame: anchors land on odd positions, so the
+    alignment layer must detect the offset (§2.1)."""
+    shifted = np.concatenate([good_frames[1:2], good_frames[:-1]], 0)
+    return write_video(Path(out_dir) / "candidate_offset_120.mp4", shifted, 120)
+
+
+def build_dropped_candidate(good_frames: np.ndarray, out_dir: str | Path,
+                            drop_fractions: tuple[float, ...] = (0.25, 0.55, 0.79)
+                            ) -> Path:
+    """Candidate with frames deleted mid-stream (dropped-frame corruption)."""
+    n = len(good_frames)
+    keep = np.ones(n, bool)
+    keep[[min(n - 1, int(f * n)) for f in drop_fractions]] = False
+    return write_video(Path(out_dir) / "candidate_dropped_120.mp4",
+                       good_frames[keep], 120)
