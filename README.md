@@ -98,14 +98,23 @@ resolution; `meta.audited_windows` reports the count.
 python -m rr_vfiqa.calibration.validate --synthetic --workdir cal_run
 # → SRCC / PLCC / pairwise accuracy of overall_score vs full-reference PSNR
 
+# per-defect-category localization: recall / precision / F1 of worst-window
+# labels against ground-truth defect segments
+python -m rr_vfiqa.calibration.detection_eval --workdir det_run
+python -m rr_vfiqa.calibration.detection_eval --defects blur ghost freeze \
+    rotation_tear head_erase pole_wrong_motion sword_flicker ui_drift \
+    text_merge shop_jump card_freeze disocc_fill
+
 # timing, cache speedup, peak VRAM across candidates
 python -m rr_vfiqa.benchmark --source src.mp4 --candidates a.mp4 b.mp4 --flow-backend raft
 ```
 
-Bootstrap numbers on synthetic content (4 s 640×360, fast/RAFT/RTX 4090):
-~14 s per candidate, ~0.9 GB peak VRAM, PLCC ≈ 0.96 vs FR-PSNR on the
-severity ladder. Real acceptance targets (SRCC ≥ 0.8 leave-one-game-out,
-≥ 80% A/B accuracy, worst-10% recall ≥ 90%) require the §P3 data:
+Bootstrap numbers on synthetic content (RTX 4090): severity-ladder
+correlation PLCC ≈ 0.96 / SRCC 0.7 / pairwise 0.8 vs FR-PSNR; defect
+localization recall 1.0 / F1 0.67 across six defect types at standard preset;
+60 s 1080p timing in `docs/BENCHMARKS.md`. Real acceptance targets
+(SRCC ≥ 0.8 leave-one-game-out, ≥ 80% A/B accuracy, worst-10% recall ≥ 90%)
+require the §P3 data:
 
 1. real 120/240 FPS pseudo-GT (the harness in `rr_vfiqa.calibration`
    measures SRCC/PLCC/pairwise once you supply it);
@@ -124,11 +133,12 @@ RR_VFIQA_TEST_FLOW=raft python -m pytest    # RAFT (GPU)
 ```
 
 Coverage includes deterministic warp-convention math tests, per-defect
-response tests over an 11-type synthetic defect corpus (blur, ghost, freeze,
+response tests over a 12-type synthetic defect corpus (blur, ghost, freeze,
 rotation tear, head erasure, pole misattribution, sword flicker, UI drift,
 text merging, shop double-exposure, disocclusion fill, card freeze), scene
 cuts, frame-offset/dropped-frame robustness, fail-closed behavior, calibrator
-monotonicity + pairwise ranking, and the calibration harness self-test.
+monotonicity + pairwise ranking, calibration-harness self-tests, and a
+per-defect localization recall test (freeze-copy and card-flip included).
 
 ```python
 from rr_vfiqa.testing.synth import build_test_set, DEFECTS  # corpus generator

@@ -32,7 +32,7 @@ from .regions import (card_tracker, character_segmenter, text_evaluator,
 from .regions.ui_detector import UIDetector
 from .report import (export_badcase_clips, render_timeline_md, render_timeline_png,
                      save_error_heatmap, write_json_report)
-from .sampling.cheap_scan import scan_candidate
+from .sampling.cheap_scan import scan_candidate, scene_cuts_from_scan
 from .sampling.window_selector import select_windows, window_times
 from .schema import Report, WindowFeatures, WorstWindow
 
@@ -153,16 +153,18 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
     source = VideoReader(source_video)
     candidate = VideoReader(candidate_video)
 
+    say("tier-1 cheap full-frame scan")
+    cheap = scan_candidate(candidate, width=p.scan_width)
+    scene_cuts = scene_cuts_from_scan(cheap)
+
     say("aligning candidate to source (PTS + anchors)")
-    alignment = build_alignment(cfg, source, candidate)
+    alignment = build_alignment(cfg, source, candidate,
+                                scene_cuts_cand=scene_cuts)
 
     say("anchor integrity + color baseline")
     anchor_feats, color_tf, anchor_warnings = anchor_integrity.evaluate_anchors(
         cfg, source, candidate, alignment)
     alignment.warnings.extend(anchor_warnings)
-
-    say("tier-1 cheap full-frame scan")
-    cheap = scan_candidate(candidate, width=p.scan_width)
 
     say("selecting windows")
     windows, risk, _ = select_windows(cfg, candidate.meta, alignment, cheap)

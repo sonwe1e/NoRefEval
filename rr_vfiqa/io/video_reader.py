@@ -44,7 +44,9 @@ class VideoReader:
             for packet in container.demux(stream):
                 if packet.pts is not None:
                     pts_list.append(packet.pts * time_base)
-        except av.error.InvalidDataError:
+        except (av.error.InvalidDataError, av.error.ArgumentError, OSError):
+            # Broken/VFR containers can fail mid-demux (EINVAL on some mp4
+            # layouts); fall back to decode-counted synthetic pts.
             pts_list = []
 
         container.close()
@@ -146,27 +148,31 @@ class VideoReader:
                     continue
                 want_times = [float(pts_table[i]) for i in need]
                 target = max(0.0, want_times[0] - frame_dur)
-                try:
-                    c.seek(int(target / tb), stream=stream, backward=True,
-                           any_frame=False)
-                except (av.error.ValueError, av.error.InvalidDataError, OSError):
-                    c.seek(0, stream=stream)
                 ptr = 0
                 tol = frame_dur * 0.6
                 limit = want_times[-1] + tol
-                for frame in c.decode(stream):
-                    if frame.pts is None:
-                        continue
-                    t = frame.pts * tb
-                    if t > limit:
-                        break
-                    while ptr < len(need) and t > want_times[ptr] + tol:
-                        ptr += 1                      # missed — fallback later
-                    if ptr < len(need) and abs(t - want_times[ptr]) <= tol:
-                        decoded[need[ptr]] = post(frame.to_ndarray(format="rgb24"))
-                        ptr += 1
-                    if ptr >= len(need):
-                        break
+                try:
+                    c.seek(int(target / tb), stream=stream, backward=True,
+                           any_frame=False)
+                    for frame in c.decode(stream):
+                        if frame.pts is None:
+                            continue
+                        t = frame.pts * tb
+                        if t > limit:
+                            break
+                        while ptr < len(need) and t > want_times[ptr] + tol:
+                            ptr += 1                  # missed — fallback later
+                        if ptr < len(need) and abs(t - want_times[ptr]) <= tol:
+                            decoded[need[ptr]] = post(frame.to_ndarray(format="rgb24"))
+                            ptr += 1
+                        if ptr >= len(need):
+                            break
+                except (av.error.ArgumentError, av.error.ValueError,
+                        av.error.InvalidDataError, OSError):
+                    # Seek or decode failed for this run (EINVAL on some mp4
+                    # layouts after seeking); the counted fallback below
+                    # recovers the missing frames.
+                    pass
 
             # Fallback: counted full pass for anything the seeks missed.
             missing = {int(i) for i in indices} - set(decoded)

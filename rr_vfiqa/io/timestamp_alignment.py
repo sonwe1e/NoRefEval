@@ -53,16 +53,17 @@ def detect_offset(source_meta: VideoMeta, cand_meta: VideoMeta) -> tuple[int, fl
 
 
 def detect_scene_cuts(reader: VideoReader, width: int = 256,
-                      diff_z: float = 8.0, diff_floor: float = 14.0,
                       hash_z: float = 6.0, hash_floor: float = 8.0,
                       hist_z: float = 8.0, hist_floor: float = 0.35) -> np.ndarray:
-    """Frame indices where a hard cut is likely.
+    """Frame indices where a hard cut is likely (standalone fallback when no
+    tier-1 scan exists).
 
-    Three fused signals — none is sufficient alone on game content:
-    * luma difference: good on static scenes, diluted by constant motion;
-    * perceptual-hash hamming: structure change, but rotation also moves it;
+    Structure-based triggers only:
+    * perceptual-hash hamming: robust structural change signal;
     * color-histogram Bhattacharyya: motion preserves the global palette,
-      a cut destroys it — the decisive signal here.
+      a cut destroys it — the decisive signal under constant camera motion.
+    A pure luma-diff trigger is deliberately absent: it fires on abrupt
+    defects inside a scene and is diluted by constant motion.
     """
     import cv2
 
@@ -75,7 +76,6 @@ def detect_scene_cuts(reader: VideoReader, width: int = 256,
     prev_gray = None
     prev_hash = None
     prev_hist = None
-    diffs: list[float] = []
     hdist: list[float] = []
     bhatt: list[float] = []
     idxs: list[int] = []
@@ -84,7 +84,6 @@ def detect_scene_cuts(reader: VideoReader, width: int = 256,
         h = phash64(gray.astype(np.uint8))
         hg = hist(img)
         if prev_gray is not None and gray.shape == prev_gray.shape:
-            diffs.append(float(np.mean(np.abs(gray - prev_gray))))
             hdist.append(float(hamming64(h, prev_hash)))
             bhatt.append(float(cv2.compareHist(prev_hist, hg,
                                                cv2.HISTCMP_BHATTACHARYYA)))
@@ -92,21 +91,19 @@ def detect_scene_cuts(reader: VideoReader, width: int = 256,
         prev_gray = gray
         prev_hash = h
         prev_hist = hg
-    if len(diffs) < 8:
+    if len(hdist) < 8:
         return np.zeros(0, np.int32)
-    d = np.asarray(diffs)
     hd = np.asarray(hdist)
     bh = np.asarray(bhatt)
-    zd, zh, zb = robust_z(d), robust_z(hd), robust_z(bh)
-    cuts = [idxs[i] for i in range(len(d))
-            if ((zd[i] > diff_z and d[i] > diff_floor)
-                or (zh[i] > hash_z and hd[i] > hash_floor)
+    zh, zb = robust_z(hd), robust_z(bh)
+    cuts = [idxs[i] for i in range(len(hdist))
+            if ((zh[i] > hash_z and hd[i] > hash_floor)
                 or (zb[i] > hist_z and bh[i] > hist_floor))]
     return np.asarray(cuts, np.int32)
 
 
-def build_alignment(cfg: EvalConfig, source: VideoReader, candidate: VideoReader
-                    ) -> Alignment:
+def build_alignment(cfg: EvalConfig, source: VideoReader, candidate: VideoReader,
+                    scene_cuts_cand: np.ndarray | None = None) -> Alignment:
     sm, cm = source.meta, candidate.meta
     warnings: list[str] = []
 
@@ -163,7 +160,11 @@ def build_alignment(cfg: EvalConfig, source: VideoReader, candidate: VideoReader
                             f"color range issue)")
 
     # --- scene cuts, mapped to source pair indices ---
-    cuts_cand = detect_scene_cuts(candidate, width=max(192, cfg.preset.scan_width // 2))
+    # Reuse the tier-1 scan's statistics when available (the pipeline passes
+    # them); only pay for a dedicated decode pass when called standalone.
+    cuts_cand = (np.asarray(scene_cuts_cand, np.int32) if scene_cuts_cand is not None
+                 else detect_scene_cuts(candidate,
+                                        width=max(192, cfg.preset.scan_width // 2)))
     pair_cuts = sorted({int(pair_of[k]) for k in cuts_cand
                         if 0 <= k < n_cand and pair_of[k] >= 0})
     # A cut AT an anchor means pair (i-1) spans the cut as well.

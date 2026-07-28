@@ -27,6 +27,7 @@ class CheapScan:
     hash64: np.ndarray              # (N,) uint64 perceptual hashes
     hash_dist: np.ndarray           # (N,) hamming distance to previous frame
     frame_diff: np.ndarray          # (N,) mean |Y_k - Y_{k-1}| at scan res
+    hist_dist: np.ndarray           # (N,) per-channel Bhattacharyya to previous
 
     def parity_sharpness_gap(self) -> np.ndarray:
         """|sharpness_even - local trend| — systematic odd-frame blur shows up
@@ -60,6 +61,25 @@ class CheapScan:
         return np.maximum(zh, zd)
 
 
+def scene_cuts_from_scan(scan: "CheapScan", hash_z: float = 6.0,
+                         hash_floor: float = 8.0, hist_z: float = 8.0,
+                         hist_floor: float = 0.20) -> np.ndarray:
+    """Cut frames from scan statistics, reusing the scan's decode pass
+    (§5: the candidate must not be decoded twice).
+
+    Structure-based triggers only (hash / color histogram): a luma-diff
+    trigger would fire on abrupt *defects* inside one scene (ghost segment
+    onsets, tears), whereas real cuts change structure and palette.
+    """
+    from ..schema import robust_z
+
+    hd = scan.hash_dist.astype(np.float64)
+    hg = scan.hist_dist.astype(np.float64)
+    zh, zhg = robust_z(hd), robust_z(hg)
+    cut = ((zh > hash_z) & (hd > hash_floor)) | ((zhg > hist_z) & (hg > hist_floor))
+    return scan.indices[cut]
+
+
 def _phash64(gray: np.ndarray) -> np.int64:
     from ..imutils import phash64
     return phash64(gray)
@@ -73,7 +93,8 @@ def _hamming(a: np.int64, b: np.int64) -> int:
 def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:
     idxs, lmean, lstd, sharp, grad, edgef, hashes = [], [], [], [], [], [], []
     prev_gray = None
-    hdist, fdiff = [0.0], [0.0]
+    prev_hist = None
+    hdist, fdiff, hgdist = [0.0], [0.0], [0.0]
 
     for idx, img in reader.iter_frames(width=width):
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
@@ -82,6 +103,8 @@ def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         edges = cv2.Canny(gray, 60, 160)
+        hist = [_norm_hist(cv2.calcHist([img], [c], None, [32], [0, 256]))
+                for c in range(3)]
         idxs.append(idx)
         lmean.append(float(gf.mean()))
         lstd.append(float(gf.std()))
@@ -92,7 +115,11 @@ def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:
         if prev_gray is not None and prev_gray.shape == gray.shape:
             hdist.append(float(_hamming(hashes[-1], hashes[-2])))
             fdiff.append(float(np.abs(gf - prev_gray.astype(np.float32)).mean()))
+            hgdist.append(float(np.mean([
+                cv2.compareHist(p, h, cv2.HISTCMP_BHATTACHARYYA)
+                for p, h in zip(prev_hist, hist)])))
         prev_gray = gray
+        prev_hist = hist
 
     n = len(idxs)
     return CheapScan(
@@ -106,4 +133,9 @@ def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:
         hash64=np.asarray(hashes, np.int64),
         hash_dist=np.asarray(hdist + [0.0] * (n - len(hdist)), np.float32)[:n],
         frame_diff=np.asarray(fdiff + [0.0] * (n - len(fdiff)), np.float32)[:n],
+        hist_dist=np.asarray(hgdist + [0.0] * (n - len(hgdist)), np.float32)[:n],
     )
+
+
+def _norm_hist(h: np.ndarray) -> np.ndarray:
+    return cv2.normalize(h, None, alpha=1.0, norm_type=cv2.NORM_L1)

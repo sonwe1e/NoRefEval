@@ -16,7 +16,8 @@ from ..io.video_reader import VideoReader
 from ..schema import Alignment, percentiles
 
 _EVAL_WIDTH = 640
-_MAX_ANCHORS = 24
+_MAX_ANCHORS = 12        # probed anchors (was 24 — decode-bound at 1080p, §5)
+_SHIFT_PROBES = 4        # of those, how many also test ±1-frame misalignment
 
 
 def _channel_errors(src: np.ndarray, cand: np.ndarray) -> dict[str, float]:
@@ -63,7 +64,7 @@ def evaluate_anchors(cfg: EvalConfig, source: VideoReader, candidate: VideoReade
     errs = {k: [] for k in ("y_l1", "chroma_l1", "grad_l1")}
     errs_shift = []
     shift_better = 0
-    for k in pick:
+    for n_probe, k in enumerate(pick):
         i = int(alignment.anchor_of_candidate[k])
         s = source.read_one(i, width=_EVAL_WIDTH)
         c = candidate.read_one(int(k), width=_EVAL_WIDTH)
@@ -72,22 +73,25 @@ def evaluate_anchors(cfg: EvalConfig, source: VideoReader, candidate: VideoReade
         for kk, v in e.items():
             errs[kk].append(v)
         # Would the neighbouring candidate frame match better? => misalignment.
-        best_shift = e["y_l1"]
-        for dk in (-1, 1):
-            k2 = int(k) + dk
-            if 0 <= k2 < candidate.meta.n_frames:
-                c2 = candidate.read_one(k2, width=_EVAL_WIDTH)
-                e2 = _channel_errors(s, color.apply(c2))
-                best_shift = min(best_shift, e2["y_l1"])
-        errs_shift.append(best_shift)
-        if best_shift < 0.6 * e["y_l1"] and e["y_l1"] > 3.0:
-            shift_better += 1
+        # Only the first few anchors pay for the extra ±1 reads.
+        if n_probe < _SHIFT_PROBES:
+            best_shift = e["y_l1"]
+            for dk in (-1, 1):
+                k2 = int(k) + dk
+                if 0 <= k2 < candidate.meta.n_frames:
+                    c2 = candidate.read_one(k2, width=_EVAL_WIDTH)
+                    e2 = _channel_errors(s, color.apply(c2))
+                    best_shift = min(best_shift, e2["y_l1"])
+            errs_shift.append(best_shift)
+            if best_shift < 0.6 * e["y_l1"] and e["y_l1"] > 3.0:
+                shift_better += 1
 
     feats: dict[str, float] = {}
     for kk, vals in errs.items():
         feats.update({f"anchor_{kk}_{p}": v
                       for p, v in percentiles(np.asarray(vals), (50, 90)).items()})
-    shift_gain = 1.0 - (np.median(errs_shift) / max(np.median(errs["y_l1"]), 1e-6))
+    shift_gain = (1.0 - (np.median(errs_shift) / max(np.median(errs["y_l1"]), 1e-6))
+                  if errs_shift else 0.0)
     feats["anchor_shift_gain"] = float(np.clip(shift_gain, 0.0, 1.0))
     feats["anchor_shift_better_frac"] = float(shift_better / max(len(pick), 1))
     feats["anchor_color_residual"] = float(color.residual)
