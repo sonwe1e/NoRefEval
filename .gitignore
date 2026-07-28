@@ -10,3 +10,5 @@ _std/
 *.mp4
 runs/
 .venv/
+_b1080/
+_deteval*/
