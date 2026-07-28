@@ -39,12 +39,13 @@ CATEGORY_FEATURES: dict[str, list[str]] = {
         "thin_count_odd_even_ratio", "weapon_dev_p90", "weapon_dir_change_p90",
     ],
     "ui": [
-        "ui_static_l1", "ui_static_grad", "ui_static_edge_f", "ui_gen_drift",
+        "ui_static_l1", "ui_static_grad", "ui_static_edge_f",
+        "ui_comp_drift_p90", "ui_gen_drift",
         "ui_dyn_blend_frac", "ui_dyn_out_of_range_frac", "ui_dyn_regression",
         "text_edge_f", "text_grad_loss", "text_comp_ratio",
     ],
     "transition": [
-        "event_ghost_frac", "event_regression",
+        "event_ghost_frac", "event_regression", "card_flip_err",
     ],
     "global": [
         "gtq_blockiness", "gtq_noise",

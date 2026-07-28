@@ -122,6 +122,16 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
         out["ui_static_edge_f"] = _edge_fscore(
             cv2.cvtColor(xm.astype(np.uint8), cv2.COLOR_RGB2GRAY),
             cv2.cvtColor(xi.astype(np.uint8), cv2.COLOR_RGB2GRAY), mask)
+        # Per-component drift: a single element (cooldown number, bar) can
+        # shift while the mask-wide average L1 stays small (§4: component
+        # level, not whole-HUD average).
+        n_lab, labels, stats_cc, _ = cv2.connectedComponentsWithStats(
+            mask.astype(np.uint8), 8)
+        drifts = [float(np.abs(xm - xi)[labels == lab].mean())
+                  for lab in range(1, n_lab)
+                  if stats_cc[lab, cv2.CC_STAT_AREA] >= 40]
+        if drifts:
+            out["ui_comp_drift_p90"] = float(np.percentile(drifts, 90))
         # Cross-generated drift: M_{i-1} vs M_i inside UI (persistent drift).
         if bundle.rgb.shape[0] >= 5:
             out["ui_gen_drift"] = float(

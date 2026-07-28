@@ -31,7 +31,7 @@ def defect_videos(tmp_path_factory):
     flick_mids, _ = make_defective_mids(
         source, truth, meta,
         ["blur", "ghost", "freeze", "ui_drift", "text_merge", "shop_jump",
-         "sword_flicker"])
+         "sword_flicker", "card_freeze"])
     return {
         "source": write_video(d / "source_60.mp4", source, 60),
         "good": write_video(d / "candidate_good_120.mp4", frames, 120),

@@ -36,6 +36,7 @@ class SceneMeta:
     camera: np.ndarray      # (N, 2, 3) canvas→frame affine matrices
     char_pos: np.ndarray    # (N, 2) character body center (cx, cy)
     pole_pts: np.ndarray    # (N, 2, 2) pole line endpoints in frame coords
+    card: np.ndarray        # (N, 4) card cx, cy, half_width, face_sign(±1)
     w: int
     h: int
 
@@ -93,6 +94,28 @@ def _draw_character(frame: np.ndarray, cx: float, cy: float,
                  cv2.LINE_AA)
 
 
+def _card_state(t: int, n_frames: int, w: int, h: int) -> tuple[float, float, float, int]:
+    """Flipping card: width ∝ |cos| simulates a 3D flip, 2 flips per clip."""
+    ph = t / n_frames
+    c = np.cos(2 * np.pi * ph * 2)
+    cx, cy = w * 0.52, h * 0.80
+    half_w = max(4.0, 27.0 * abs(c))
+    face = 1 if c >= 0 else -1
+    return cx, cy, half_w, face
+
+
+def _draw_card(frame: np.ndarray, cx: float, cy: float, half_w: float,
+               face: int) -> None:
+    color = (230, 215, 80) if face > 0 else (70, 110, 220)
+    x0, x1 = int(cx - half_w), int(cx + half_w)
+    y0, y1 = int(cy - 20), int(cy + 20)
+    cv2.rectangle(frame, (x0, y0), (x1, y1), color, -1)
+    cv2.rectangle(frame, (x0, y0), (x1, y1), (30, 30, 35), 2)
+    if half_w > 12:
+        cc = (int(cx), int(cy))
+        cv2.circle(frame, cc, 7, (30, 30, 35), -1)
+
+
 def _draw_ui(frame: np.ndarray, t: int, w: int, h: int) -> None:
     cv2.rectangle(frame, (14, 12), (150, 44), (20, 20, 25), -1)
     cv2.rectangle(frame, (16, 14), (148, 42), (70, 70, 80), 1)
@@ -120,6 +143,7 @@ def render_scene(n_frames: int = 480, w: int = 640, h: int = 360, fps: int = 120
     cam = np.empty((n_frames, 2, 3), np.float64)
     chars = np.empty((n_frames, 2), np.float64)
     poles = np.empty((n_frames, 2, 2), np.float64)
+    cards = np.empty((n_frames, 4), np.float64)
 
     pan_x = 1.4 * w
     amp_y = 0.35 * h
@@ -136,11 +160,15 @@ def render_scene(n_frames: int = 480, w: int = 640, h: int = 360, fps: int = 120
         cx, cy = _char_center(t, n_frames, w, h)
         chars[t] = (cx, cy)
         _draw_character(frame, cx, cy)
+        ccx, ccy, chw, cface = _card_state(t, n_frames, w, h)
+        cards[t] = (ccx, ccy, chw, cface)
+        _draw_card(frame, ccx, ccy, chw, cface)
         _draw_ui(frame, t, w, h)
         frames[t] = frame
         cam[t] = rot
 
-    meta = SceneMeta(camera=cam, char_pos=chars, pole_pts=poles, w=w, h=h)
+    meta = SceneMeta(camera=cam, char_pos=chars, pole_pts=poles, card=cards,
+                     w=w, h=h)
     return (frames, meta) if return_meta else frames
 
 
@@ -206,7 +234,7 @@ def _inpaint_line(frame: np.ndarray, p0, p1, thickness: int) -> None:
 
 DEFECTS = ("blur", "ghost", "freeze", "rotation_tear", "head_erase",
            "pole_wrong_motion", "sword_flicker", "ui_drift", "text_merge",
-           "shop_jump", "disocc_fill")
+           "shop_jump", "disocc_fill", "card_freeze")
 
 
 def make_defective_mids(source: np.ndarray, truth: np.ndarray, meta: SceneMeta,
@@ -288,6 +316,16 @@ def make_defective_mids(source: np.ndarray, truth: np.ndarray, meta: SceneMeta,
                 band = 26
                 fill = np.median(f[:, -band - 8:-band].reshape(-1, 3), 0)
                 f[:, -band:] = fill.astype(np.uint8)
+            elif name == "card_freeze":
+                # The flip is frozen at the previous state: erase the real
+                # (mid-flip) card and redraw the full-width front face.
+                ccx, ccy = meta.card[m, 0], meta.card[m, 1]
+                x0, x1 = int(ccx - 32), int(ccx + 32)
+                y0, y1 = int(ccy - 24), int(ccy + 24)
+                mask = np.zeros(f.shape[:2], np.uint8)
+                mask[y0:y1, x0:x1] = 1
+                f[:] = cv2.inpaint(f, mask, 5, cv2.INPAINT_TELEA)
+                _draw_card(f, ccx, ccy, 27.0, 1)
     return mids, segs
 
 

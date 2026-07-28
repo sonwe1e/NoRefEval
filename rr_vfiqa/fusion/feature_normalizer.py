@@ -70,6 +70,7 @@ FEATURE_SCALES: dict[str, tuple] = {
     "ui_static_l1": (6.0, False),
     "ui_static_grad": (20.0, False),
     "ui_static_edge_f": (0.85, 0.35, True),
+    "ui_comp_drift_p90": (8.0, False),
     "ui_gen_drift": (6.0, False),
     "ui_dyn_blend_frac": (0.15, False),
     "ui_dyn_out_of_range_frac": (0.15, False),
@@ -80,6 +81,7 @@ FEATURE_SCALES: dict[str, tuple] = {
     # transition defects
     "event_ghost_frac": (0.15, False),
     "event_regression": (0.20, False),
+    "card_flip_err": (0.50, False),
     # global technical
     "gtq_blockiness": (0.60, False),            # ~1.0 is clean; excess is blocking
     "gtq_noise": (16.0, False),

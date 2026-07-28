@@ -25,8 +25,9 @@ from .metrics import (anchor_integrity, cycle_reconstruction, edge_structure,
                       flow_composition_metric, global_technical_quality,
                       parity_frequency, temporal_compensation, WindowFlows)
 from .motion.flow_estimator import get_flow_backend
-from .regions import (character_segmenter, text_evaluator, thin_object_detector,
-                      transition_evaluator, ui_detector, weapon_tracker)
+from .regions import (card_tracker, character_segmenter, text_evaluator,
+                      thin_object_detector, transition_evaluator, ui_detector,
+                      weapon_tracker)
 from .regions.ui_detector import UIDetector
 from .report import (export_badcase_clips, render_timeline_md, render_timeline_png,
                      save_error_heatmap, write_json_report)
@@ -101,7 +102,10 @@ def _classify_window(wf: WindowFeatures, conf_base: float) -> WorstWindow | None
                 if "text_edge_f" in s else None
             types.append("text_degraded" if (te_err or 0) > 0.5 else "ui_unstable")
         elif cat == "transition":
-            types.append("transition_ghost")
+            if (s.get("card_flip_err") or 0) > 0.5:
+                types.append("card_flip_error")
+            if (s.get("event_ghost_frac") or 0) > 0.08 or not types:
+                types.append("transition_ghost")
     if not types:
         return None
     severity = float(np.clip(max(cat_err.values()) / 1.2, 0, 1))
@@ -196,6 +200,7 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
                 ("ui", lambda: ui_detector.compute_window(bundle, ui, cfg)),
                 ("text", lambda: text_evaluator.compute_window(bundle, ui, cfg)),
                 ("transition", lambda: transition_evaluator.compute_window(bundle, wflows, cfg)),
+                ("card", lambda: card_tracker.compute_window(bundle, cfg)),
                 ("character", lambda: character_segmenter.compute_window(bundle, wflows, pair, cfg)),
                 ("thin", lambda: thin_object_detector.compute_window(bundle, wflows, pair, cfg)),
             ]
@@ -320,11 +325,27 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
         for k, v in wf.labels.items():
             if k.startswith("error_") and k not in error_samples:
                 error_samples[k] = v
+    # Honest capability declaration (USERPLAN §P2): these branches are
+    # classical heuristics until learned game-domain backends are registered;
+    # their scores are proxy evidence, not semantic ground truth.
+    proxy_branches = {
+        "character": "classic_motion_segmenter",
+        "thin_object": "lsd_line_heuristic",
+        "weapon": "klt_local_corners",
+        "ui": "static_mask_template",
+        "text": "stroke_edge_topology",
+        "card": "saturation_area_progression",
+    }
+    if not p.run_region_branches:
+        proxy_branches = {k: v + " (disabled by preset)"
+                          for k, v in proxy_branches.items()}
+
     meta = {
         "status": status,
         "valid_windows": len(valid_wfs),
         "audited_windows": n_audit,
         "audit_notes": audit_notes,
+        "proxy_branches": proxy_branches,
         "stage_errors": dict(sorted(stage_errors.items())),
         "stage_error_samples": error_samples,
         "preset": p.name,

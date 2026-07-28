@@ -52,6 +52,23 @@ def test_flicker_defects_lower_temporal_and_ui(defect_videos, cache_dir,
     assert bad.overall_score < good.overall_score
     assert bad.scores["temporal_stability"] < good.scores["temporal_stability"]
     assert bad.scores["ui_text"] < good.scores["ui_text"]
+    # Card freeze + shop jump attack the transition branch. On this short
+    # corpus the P90-weighted subscore moves marginally, so assert the direct
+    # branch evidence: card flip progression error and/or double exposure.
+    f = bad.features
+    assert f.get("card_flip_err", 0.0) > 0.5 or f.get("event_ghost_frac", 0.0) > 0.1
+    types = {t for w in bad.worst_windows for t in w.types}
+    assert types & {"card_flip_error", "transition_ghost", "ui_unstable",
+                    "parity_flicker", "temporal_instability"}
+
+
+def test_proxy_branches_declared(videos, cache_dir, flow_backend):
+    """The report must declare which branches are heuristic proxies (§P2)."""
+    rep = _eval(videos["source"], videos["good"], cache_dir + "/proxy",
+                flow_backend, preset="standard")
+    proxies = rep.meta["proxy_branches"]
+    assert proxies["character"] == "classic_motion_segmenter"
+    assert proxies["card"] == "saturation_area_progression"
 
 
 def test_scene_cut_is_marked_not_scored(cut_videos, cache_dir, flow_backend):
