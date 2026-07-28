@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rr-vfiqa"
+version = "0.1.0"
+description = "Endpoint-Referenced / Reduced-Reference VFI Quality Assessment for 60->120 FPS game frame interpolation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "scipy>=1.10",
+    "av>=11.0",
+]
+
+[project.optional-dependencies]
+torch = ["torch>=2.1", "torchvision>=0.16"]
+fusion = ["lightgbm>=4.0"]
+viz = ["matplotlib>=3.7"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+rr-vfiqa = "rr_vfiqa.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["rr_vfiqa*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
