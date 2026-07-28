@@ -20,6 +20,7 @@ dependencies = [
 torch = ["torch>=2.1", "torchvision>=0.16"]
 fusion = ["lightgbm>=4.0"]
 viz = ["matplotlib>=3.7"]
+audit = ["cotracker>=0.3"]     # audit-tier point tracker (USERPLAN §8.5)
 dev = ["pytest>=7.0"]
 
 [project.scripts]

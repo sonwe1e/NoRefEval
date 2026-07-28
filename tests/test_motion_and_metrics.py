@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 
@@ -183,6 +184,26 @@ def test_edge_fscore_cross_distance():
     assert _edge_fscore(shifted, ref, mask) < 0.7   # buggy version was exactly 1.0
     flat = np.full_like(ref, 128)
     assert np.isnan(_edge_fscore(flat, ref, mask))
+
+
+def test_audit_tracker_degrades_to_klt():
+    """Without the optional cotracker package, the audit tier must fall back
+    to KLT with an explanatory note — never crash (§P2 optional dependency)."""
+    from rr_vfiqa.models.tracker_backend import TrackerBackend, get_audit_tracker
+    backend, note = get_audit_tracker(device="cpu")
+    assert isinstance(backend, TrackerBackend)
+    assert note in ("cotracker",) or "fell back" in note
+
+    # The fallback (or real) tracker must actually track a translating dot.
+    frames = []
+    for t in range(5):
+        f = np.zeros((64, 96), np.uint8)
+        cv2.circle(f, (30 + 4 * t, 32), 4, 255, -1)
+        frames.append(f)
+    tracks, vis = backend.track(frames, np.float32([[30, 32]]))
+    assert tracks.shape == (5, 1, 2)
+    assert vis[-1, 0]
+    assert abs(tracks[-1, 0, 0] - 46) < 4
 
 
 def test_alpha_blend_fit():

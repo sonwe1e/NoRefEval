@@ -22,6 +22,7 @@ CATEGORY_FEATURES: dict[str, list[str]] = {
     "temporal": [
         "mct_lag1_mean", "mct_lag1_p90", "mct_anchor_vs_gen_ratio",
         "cycle_resid_mean", "cycle_resid_p90", "cycle_sharp_loss",
+        "freeze_copy_score",
         "parity_window_sharp_gap", "parity_lag2_gen_vs_anchor",
         "parity_sharp_e_pi_block_max", "parity_sharp_mean_gap",
         "edge_count_odd_even_ratio", "gtq_sharp_odd_even_ratio",

@@ -24,6 +24,7 @@ from .io.video_reader import VideoReader
 from .metrics import (anchor_integrity, cycle_reconstruction, edge_structure,
                       flow_composition_metric, global_technical_quality,
                       parity_frequency, temporal_compensation, WindowFlows)
+from .models.tracker_backend import get_audit_tracker
 from .motion.flow_estimator import get_flow_backend
 from .regions import (card_tracker, character_segmenter, text_evaluator,
                       thin_object_detector, transition_evaluator, ui_detector,
@@ -74,7 +75,13 @@ def _classify_window(wf: WindowFeatures, conf_base: float) -> WorstWindow | None
     cat_err = _window_category_errors(wf)
     types: list[str] = []
     s = wf.scalars
-    # Only the three loudest categories may label a window.
+    # High-confidence specific labels bypass the category cap — they are
+    # precise signals that the top-3-by-error rule would otherwise crowd out.
+    if (s.get("card_flip_err") or 0) > 0.5:
+        types.append("card_flip_error")
+    if (s.get("freeze_copy_score") or 0) > 0.5:
+        types.append("freeze_copy")
+    # Only the three loudest categories may label a window further.
     firing = sorted(((c, t) for c, t in _TYPE_THRESHOLDS
                      if cat_err.get(c, 0.0) >= t),
                     key=lambda ct: -cat_err[ct[0]])[:3]
@@ -84,6 +91,7 @@ def _classify_window(wf: WindowFeatures, conf_base: float) -> WorstWindow | None
                          else "motion_inconsistent")
         elif cat == "temporal":
             # parity_flicker needs direct alternation evidence, else generic
+            # (freeze_copy is handled as a high-confidence special label).
             par = normalize_error("parity_window_sharp_gap",
                                   s.get("parity_window_sharp_gap", float("nan"))) or 0
             types.append("parity_flicker" if par > 0.35 else "temporal_instability")
@@ -102,13 +110,13 @@ def _classify_window(wf: WindowFeatures, conf_base: float) -> WorstWindow | None
                 if "text_edge_f" in s else None
             types.append("text_degraded" if (te_err or 0) > 0.5 else "ui_unstable")
         elif cat == "transition":
-            if (s.get("card_flip_err") or 0) > 0.5:
-                types.append("card_flip_error")
             if (s.get("event_ghost_frac") or 0) > 0.08 or not types:
                 types.append("transition_ghost")
     if not types:
         return None
-    severity = float(np.clip(max(cat_err.values()) / 1.2, 0, 1))
+    types = list(dict.fromkeys(types))[:4]
+    sev_special = max(s.get("card_flip_err") or 0.0, s.get("freeze_copy_score") or 0.0)
+    severity = float(np.clip(max(max(cat_err.values()), sev_special) / 1.2, 0, 1))
     boxes = []
     for inst in (s.get("_thin_instances") or [])[:3]:
         boxes.append(inst["box"])
@@ -173,6 +181,8 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
     say("tier-2 core window metrics")
     wfs: list[WindowFeatures] = []
     stage_errors: dict[str, int] = collections.Counter()
+    audit_tracker, tracker_note = (get_audit_tracker(cfg.device)
+                                   if p.run_tracker else (None, None))
     for n, w in enumerate(windows):
         if n % max(1, len(windows) // 10) == 0:
             say(f"window {n + 1}/{len(windows)}")
@@ -206,7 +216,8 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
             ]
         if p.run_tracker:                            # audit-tier point tracking
             stages.append(("weapon", lambda: weapon_tracker.compute_window(
-                bundle, wflows, cfg, roi_mask=wf.scalars.get("_char_mask"))))
+                bundle, wflows, cfg, tracker=audit_tracker,
+                roi_mask=wf.scalars.get("_char_mask"))))
         for name, fn in stages:
             try:                                    # one failing stage must not
                 wf.scalars.update(fn())             # take down the whole window
@@ -249,6 +260,8 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
                 wf.labels["error_audit"] = repr(exc)
 
     audit_notes: list[str] = []
+    if tracker_note is not None and "fell back" in tracker_note:
+        audit_notes.append(tracker_note)
     if p.run_depth:
         try:
             from .models.depth_backend import get_depth_backend
@@ -336,6 +349,8 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
         "text": "stroke_edge_topology",
         "card": "saturation_area_progression",
     }
+    if p.run_tracker and tracker_note == "cotracker":
+        proxy_branches["weapon"] = "cotracker2"   # learned tracker, not a proxy
     if not p.run_region_branches:
         proxy_branches = {k: v + " (disabled by preset)"
                           for k, v in proxy_branches.items()}

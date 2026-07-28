@@ -37,6 +37,7 @@ FEATURE_SCALES: dict[str, tuple] = {
     "mct_lag2_mean": (30.0, False),
     "mct_anchor_vs_gen_ratio": (1.5, False),   # >1 means center off-trajectory
     # parity — the strongest tell for systematic odd-frame degradation
+    "freeze_copy_score": (0.50, False),
     "parity_window_sharp_gap": (0.25, False),
     "parity_lag2_gen_vs_anchor": (1.5, False),
     "parity_sharp_e_pi": (0.30, False),

@@ -1,0 +1,83 @@
+{
+  "per_defect": {
+    "blur": {
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "parity_flicker",
+        "structure_loss",
+        "temporal_instability"
+      ]
+    },
+    "freeze": {
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "freeze_copy",
+        "parity_flicker",
+        "temporal_instability"
+      ]
+    },
+    "rotation_tear": {
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "background_tear",
+        "motion_inconsistent",
+        "structure_loss"
+      ]
+    },
+    "head_erase": {
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "character_missing"
+      ]
+    },
+    "card_freeze": {
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "detected": true,
+      "typed_windows_in_segment": 2,
+      "expected_types": [
+        "card_flip_error"
+      ]
+    },
+    "ui_drift": {
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "detected": true,
+      "typed_windows_in_segment": 3,
+      "expected_types": [
+        "text_degraded",
+        "ui_unstable"
+      ]
+    }
+  },
+  "recall": 1.0,
+  "precision": 0.5,
+  "f1": 0.6667,
+  "fired_windows": 18
+}
+
+recall=1.0  precision=0.5  f1=0.6667

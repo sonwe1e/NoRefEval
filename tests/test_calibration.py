@@ -35,3 +35,19 @@ def test_synthetic_validation_tracks_fr(tmp_path, flow_backend):
     assert out["srcc_overall_vs_psnr"] >= 0.7
     assert out["plcc_overall_vs_psnr"] >= 0.8
     assert out["pairwise_accuracy"] >= 0.8
+
+
+def test_defect_localization_recall(tmp_path, flow_backend):
+    """Each single-defect candidate must be localized with a correct label
+    in its ground-truth segment (§P3: 各坏例类别 F1, worst-case recall)."""
+    from rr_vfiqa.calibration import run_detection_eval
+
+    out = run_detection_eval(tmp_path, defects=["blur", "freeze", "rotation_tear",
+                                                "head_erase", "card_freeze",
+                                                "ui_drift"],
+                             preset="standard", flow_backend=flow_backend,
+                             device="cuda")
+    assert out["recall"] >= 0.8        # at most one missed category
+    assert out["f1"] >= 0.5
+    assert out["per_defect"]["freeze"]["detected"]       # direct copy check
+    assert out["per_defect"]["card_freeze"]["detected"]  # flip progression

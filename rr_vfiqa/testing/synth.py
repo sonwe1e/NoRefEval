@@ -133,18 +133,15 @@ def _draw_ui(frame: np.ndarray, t: int, w: int, h: int) -> None:
         cv2.rectangle(frame, (x0 + 2, 20), (x0 + 7, 26), (20, 20, 25), -1)
 
 
-def render_scene(n_frames: int = 480, w: int = 640, h: int = 360, fps: int = 120,
-                 seed: int = 7, return_meta: bool = False):
-    """(N, H, W, 3) uint8 RGB at the requested fps; optionally (+SceneMeta)."""
+def _iter_frames(n_frames: int, w: int, h: int, seed: int):
+    """Yield (t, frame, camera_mat, char_xy, pole_pts, card_state) per frame.
+
+    Generator core shared by in-memory and streaming renderers — no full-video
+    buffer, so 60 s / 1080p corpora can be written frame by frame.
+    """
     rng = np.random.default_rng(seed)
     w2, h2 = int(w * 2.8), int(h * 2.4)
     canvas = _bg_canvas(rng, w2, h2)
-    frames = np.empty((n_frames, h, w, 3), np.uint8)
-    cam = np.empty((n_frames, 2, 3), np.float64)
-    chars = np.empty((n_frames, 2), np.float64)
-    poles = np.empty((n_frames, 2, 2), np.float64)
-    cards = np.empty((n_frames, 4), np.float64)
-
     pan_x = 1.4 * w
     amp_y = 0.35 * h
     for t in range(n_frames):
@@ -156,20 +153,70 @@ def render_scene(n_frames: int = 480, w: int = 640, h: int = 360, fps: int = 120
         rot[1, 2] += (h2 / 2.0 - h / 2.0) + amp_y * np.sin(2 * np.pi * ph)
         frame = cv2.warpAffine(canvas, rot, (w, h), flags=cv2.INTER_LINEAR,
                                borderMode=cv2.BORDER_REFLECT_101)
-        poles[t] = _draw_pole(frame, rot, w2, h2)
+        pole = _draw_pole(frame, rot, w2, h2)
         cx, cy = _char_center(t, n_frames, w, h)
-        chars[t] = (cx, cy)
         _draw_character(frame, cx, cy)
         ccx, ccy, chw, cface = _card_state(t, n_frames, w, h)
-        cards[t] = (ccx, ccy, chw, cface)
         _draw_card(frame, ccx, ccy, chw, cface)
         _draw_ui(frame, t, w, h)
+        yield t, frame, rot, (cx, cy), pole, (ccx, ccy, chw, cface)
+
+
+def render_scene(n_frames: int = 480, w: int = 640, h: int = 360, fps: int = 120,
+                 seed: int = 7, return_meta: bool = False):
+    """(N, H, W, 3) uint8 RGB at the requested fps; optionally (+SceneMeta)."""
+    frames = np.empty((n_frames, h, w, 3), np.uint8)
+    cam = np.empty((n_frames, 2, 3), np.float64)
+    chars = np.empty((n_frames, 2), np.float64)
+    poles = np.empty((n_frames, 2, 2), np.float64)
+    cards = np.empty((n_frames, 4), np.float64)
+    for t, frame, rot, cxy, pole, card in _iter_frames(n_frames, w, h, seed):
         frames[t] = frame
         cam[t] = rot
-
+        chars[t] = cxy
+        poles[t] = pole
+        cards[t] = card
     meta = SceneMeta(camera=cam, char_pos=chars, pole_pts=poles, card=cards,
                      w=w, h=h)
     return (frames, meta) if return_meta else frames
+
+
+def render_streaming(source_path: str | Path, candidate_path: str | Path,
+                     n_frames: int = 7200, w: int = 1920, h: int = 1080,
+                     fps: int = 120, seed: int = 7,
+                     odd_defect=None) -> None:
+    """Write source (even frames, fps/2) and candidate (all frames, fps)
+    directly to disk — constant memory at any resolution/duration.
+
+    ``odd_defect(t, frame, last_even)`` may mutate/replace each odd frame in
+    place to inject stateless defects (blur, freeze-copy of last_even, …).
+    """
+    source_path, candidate_path = Path(source_path), Path(candidate_path)
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    with av.open(str(candidate_path), "w") as oc, av.open(str(source_path), "w") as osrc:
+        sc = oc.add_stream("h264", rate=fps)
+        ss = osrc.add_stream("h264", rate=fps // 2)
+        for st in (sc, ss):
+            st.width, st.height, st.pix_fmt = w, h, "yuv420p"
+            st.options = {"crf": "18", "preset": "medium"}
+        last_even = None
+        for t, frame, _rot, _c, _p, _card in _iter_frames(n_frames, w, h, seed):
+            if t % 2 == 0:
+                last_even = frame.copy()
+                _mux(osrc, ss, frame)
+            elif odd_defect is not None:
+                frame = odd_defect(t, frame, last_even)
+            _mux(oc, sc, frame)
+        for st, out in ((sc, oc), (ss, osrc)):
+            for packet in st.encode():
+                out.mux(packet)
+
+
+def _mux(container, stream, frame_rgb: np.ndarray) -> None:
+    frame = av.VideoFrame.from_ndarray(frame_rgb, format="rgb24")
+    for packet in stream.encode(frame):
+        container.mux(packet)
 
 
 # ---------------------------------------------------------------------------

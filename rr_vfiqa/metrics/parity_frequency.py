@@ -12,7 +12,7 @@ import numpy as np
 
 from ..config import EvalConfig
 from ..sampling.cheap_scan import CheapScan
-from ..schema import FrameBundle, backward_warp, warp_flow
+from ..schema import FrameBundle, backward_warp, flow_magnitude, warp_flow
 from .window_flows import WindowFlows
 
 
@@ -102,4 +102,22 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
         out["parity_lag2_gen_vs_anchor"] = float(gen_lag2 / anchor_lag2)
     else:
         out["parity_lag2_gen_vs_anchor"] = float("nan")
+
+    # Freeze / copy detection: a frozen M_i equals X_i even in regions that
+    # MUST change (|F_{01}| > 2 px), where a true mid differs from X_i by
+    # about half the endpoint difference. Window-local statistics alone look
+    # plausible for a freeze — this is the direct check.
+    f_01 = flow.forward(1, 3)
+    moving = flow_magnitude(f_01) > 2.0
+    if moving.sum() > 200:
+        xi = bundle.rgb[1].astype(np.float32)
+        xj = bundle.rgb[3].astype(np.float32)
+        xm = bundle.rgb[2].astype(np.float32)
+        full = np.abs(xj - xi)[moving].mean()
+        prev = np.median(np.abs(xm - xi)[moving])   # robust to edge outliers
+        # full > 8 keeps codec noise (~2–3 Y) well below the half-difference
+        # of genuinely moving pixels, so a clean mid scores near 0.
+        out["freeze_copy_score"] = float(
+            np.clip(1.0 - prev / (0.5 * full + 1e-6), 0.0, 1.0)) if full > 8.0 \
+            else float("nan")
     return out
