@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (core + dev + fusion)
+        run: pip install -e ".[dev,fusion]"
+
+      - name: Import check
+        run: python -c "import rr_vfiqa; from rr_vfiqa import evaluate_vfi, compare_models; print('import OK', rr_vfiqa.__version__)"
+
+      - name: CPU test suite (Farneback path)
+        env:
+          RR_VFIQA_TEST_FLOW: farneback
+        run: python -m pytest tests/ -v
+
+  gpu:
+    # Opt-in GPU job: set repository variable RUN_GPU_CI=true and provide a
+    # self-hosted CUDA runner label via GPU_RUNNER_LABEL.
+    if: vars.RUN_GPU_CI == 'true'
+    runs-on: ${{ vars.GPU_RUNNER_LABEL || 'self-hosted' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (core + torch + dev + fusion)
+        run: pip install -e ".[dev,fusion,torch]"
+
+      - name: GPU test suite (RAFT path)
+        env:
+          RR_VFIQA_TEST_FLOW: raft
+        run: python -m pytest tests/ -v

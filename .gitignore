@@ -4,8 +4,9 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
-cache/
+/cache/
 _smoke/
 _std/
 *.mp4
 runs/
+.venv/
