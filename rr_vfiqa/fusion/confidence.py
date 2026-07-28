@@ -15,9 +15,23 @@ from ..schema import Alignment, WindowFeatures
 
 
 def compute_confidence(windows: list[WindowFeatures], alignment: Alignment,
-                       n_frames: int, anchor_error: float) -> tuple[float, float]:
-    """Returns (confidence 0..1, event_ambiguity 0..1)."""
+                       n_frames: int, anchor_error: float,
+                       valid_windows: int | None = None,
+                       total_windows: int | None = None) -> tuple[float, float]:
+    """Returns (confidence 0..1, event_ambiguity 0..1).
+
+    Fail-closed (§7): an evaluation in which no window produced core metrics
+    gets near-zero confidence; partial stage failures scale it down.
+    """
+    if total_windows is not None and valid_windows is not None:
+        if total_windows > 0 and valid_windows == 0:
+            return 0.02, float(np.clip(np.mean(
+                [wf.scalars.get("event_ambiguity", 0.0) for wf in windows] or [0.0]), 0, 1))
+
     penalties = []
+
+    if total_windows and valid_windows is not None:
+        penalties.append(1.0 - valid_windows / total_windows)
 
     # Visibility coverage across windows.
     cov = [wf.scalars.get("comp_visible_fraction") for wf in windows]

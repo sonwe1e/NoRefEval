@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 
 from ..config import EvalConfig
-from ..schema import FrameBundle, charbonnier, percentiles, warp_image
+from ..schema import FrameBundle, charbonnier, forward_splat, percentiles
 from .window_flows import WindowFlows
 
 # The reconstructor itself is imperfect; subtract a small baseline measured on
@@ -27,14 +27,17 @@ DEFAULT_CYCLE_BASELINE = 2.0
 def _half_warp_blend(img_a: np.ndarray, img_b: np.ndarray,
                      f_ab: np.ndarray, f_ba: np.ndarray
                      ) -> tuple[np.ndarray, np.ndarray]:
-    """Blend warp(a, +0.5 f_ab) with warp(b, -0.5 f_ba); returns (blend, weight)."""
-    wa = warp_image(img_a.astype(np.float32), 0.5 * f_ab)
-    wb = warp_image(img_b.astype(np.float32), -0.5 * f_ba)
-    # Visibility weights from the cycle error of each half.
-    cyc_a = np.linalg.norm(0.5 * f_ab + warp_image(0.5 * f_ba, 0.5 * f_ab), axis=-1)
-    cyc_b = np.linalg.norm(0.5 * f_ba + warp_image(0.5 * f_ab, -0.5 * f_ba), axis=-1)
-    va = np.exp(-(cyc_a / 3.0) ** 2)
-    vb = np.exp(-(cyc_b / 3.0) ** 2)
+    """Reconstruct the mid instant from both sides via FORWARD splatting.
+
+    f_ab / f_ba are forward flows; half of each moves the endpoint content
+    toward the mid grid. Splat coverage is the visibility weight — holes
+    (occluded/disoccluded mid pixels) get zero weight instead of fabricated
+    content. Returns (blend, weight).
+    """
+    wa, ca = forward_splat(img_a.astype(np.float32), 0.5 * f_ab)
+    wb, cb = forward_splat(img_b.astype(np.float32), 0.5 * f_ba)
+    va = np.clip(ca, 0, 1)
+    vb = np.clip(cb, 0, 1)
     wsum = va + vb + 1e-6
     blend = (wa * va[..., None] + wb * vb[..., None]) / wsum[..., None]
     weight = np.clip(wsum / 2.0, 0, 1)

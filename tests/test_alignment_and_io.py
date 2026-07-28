@@ -40,6 +40,19 @@ def test_color_transform_identity(videos):
     assert tf.is_trivial()
 
 
+def test_color_transform_inverts_to_source_space():
+    """apply() must map candidate→source: fitted cand = 1.1·src + 6."""
+    rng = np.random.default_rng(1)
+    src = rng.integers(20, 235, (64, 96, 3), np.uint8)
+    cand = np.clip(1.1 * src.astype(np.float32) + 6.0, 0, 255).astype(np.uint8)
+    tf = estimate_color_transform(src, cand)
+    assert not tf.is_trivial()
+    rec = tf.apply(cand)                       # candidate → source space
+    assert np.abs(rec.astype(int) - src.astype(int)).mean() < 2.0
+    fwd = tf.apply_forward(src)                # source → candidate direction
+    assert np.abs(fwd.astype(int) - cand.astype(int)).mean() < 2.0
+
+
 def test_random_access_consistency(videos):
     cand = VideoReader(str(videos["good"]))
     seq = cand.decode_all(width=160)

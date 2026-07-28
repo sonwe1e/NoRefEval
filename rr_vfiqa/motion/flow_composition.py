@@ -73,21 +73,29 @@ def bidirectional_composition(f_01: np.ndarray, f_10: np.ndarray,
                               f_m1: np.ndarray, f_1m: np.ndarray,
                               conf_01: np.ndarray | None = None,
                               occ_01: np.ndarray | None = None,
+                              conf_10: np.ndarray | None = None,
+                              occ_10: np.ndarray | None = None,
                               tau_px: float = 4.0
                               ) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
     """Both composition directions; returns merged stats.
 
-    Forward uses the confidence/occlusion of the 0->1 cycle; backward the same
-    masks (symmetric role). Final score = mean of both plus the worst-side P90.
+    Each direction lives on its own endpoint grid: forward on X_i (weights
+    conf_01/occ_01), backward on X_{i+1} (weights conf_10/occ_10). Using the
+    same mask for both would map occlusion boundaries into the wrong space.
     """
-    w = None
+    w_fwd = None
     if conf_01 is not None:
-        w = conf_01.astype(np.float32)
+        w_fwd = conf_01.astype(np.float32)
         if occ_01 is not None:
-            w = w * (1.0 - occ_01.astype(np.float32))
+            w_fwd = w_fwd * (1.0 - occ_01.astype(np.float32))
+    w_bwd = None
+    if conf_10 is not None:
+        w_bwd = conf_10.astype(np.float32)
+        if occ_10 is not None:
+            w_bwd = w_bwd * (1.0 - occ_10.astype(np.float32))
 
-    fwd = composition_error(f_01, f_0m, f_m1, weight=w, tau_px=tau_px)
-    bwd = composition_error(f_10, f_1m, f_m0, weight=w, tau_px=tau_px)
+    fwd = composition_error(f_01, f_0m, f_m1, weight=w_fwd, tau_px=tau_px)
+    bwd = composition_error(f_10, f_1m, f_m0, weight=w_bwd, tau_px=tau_px)
 
     out = {}
     out.update(fwd.stats("comp_fwd"))

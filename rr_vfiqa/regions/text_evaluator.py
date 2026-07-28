@@ -35,15 +35,17 @@ def _text_roi(gray: np.ndarray, ui_mask: np.ndarray) -> np.ndarray:
 
 
 def _stroke_components(gray: np.ndarray, roi: np.ndarray) -> int:
-    """Ink-pixel connected components inside the ROI (binarized strokes)."""
+    """Ink-pixel connected components inside the ROI (binarized strokes).
+
+    The Otsu threshold is computed on ROI pixels only — a whole-image
+    threshold is dominated by the scene, not the text panel.
+    """
     if roi.sum() < 32:
         return 0
-    vals = gray[roi]
-    # Otsu within the ROI; ink = whichever side is smaller (text is usually a
-    # minority of its bounding UI panel).
-    thr, binv = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    ink = binv.astype(bool)
-    if ink[roi].mean() > 0.5:
+    roi_vals = gray[roi].copy()
+    thr_val, _ = cv2.threshold(roi_vals, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    ink = gray <= thr_val
+    if ink[roi].mean() > 0.5:       # ink = minority side (text on a panel)
         ink = ~ink
     n, _ = cv2.connectedComponents((ink & roi).astype(np.uint8), 8)
     return n - 1

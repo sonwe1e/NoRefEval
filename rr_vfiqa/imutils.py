@@ -51,3 +51,22 @@ def bbox_of(mask: np.ndarray) -> list[int] | None:
     if len(xs) == 0:
         return None
     return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+
+
+def alpha_blend_fit(xi: np.ndarray, xm: np.ndarray, xj: np.ndarray
+                    ) -> tuple[np.ndarray, np.ndarray]:
+    """Per-pixel optimal α of M ≈ α·X_i + (1−α)·X_j via RGB least squares.
+
+    Returns (alpha clipped to [0,1], residual mean-abs error per pixel).
+    Real alpha mixing (crossfade ghosts, partial blends) shows α strictly
+    inside (0,1) with a SMALL residual; a correct mid frame has new content
+    (large residual) and a hard switch sits at α≈0/1 (USERPLAN §8.6).
+    """
+    d = xi.astype(np.float32) - xj.astype(np.float32)
+    m = xm.astype(np.float32) - xj.astype(np.float32)
+    denom = (d * d).sum(-1) + 1e-6
+    alpha = np.clip((m * d).sum(-1) / denom, 0.0, 1.0)
+    fitted = alpha[..., None] * xi.astype(np.float32) \
+        + (1.0 - alpha[..., None]) * xj.astype(np.float32)
+    resid = np.abs(xm.astype(np.float32) - fitted).mean(-1)
+    return alpha.astype(np.float32), resid.astype(np.float32)

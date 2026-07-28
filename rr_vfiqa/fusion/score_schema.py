@@ -40,7 +40,7 @@ CATEGORY_FEATURES: dict[str, list[str]] = {
     ],
     "ui": [
         "ui_static_l1", "ui_static_grad", "ui_static_edge_f", "ui_gen_drift",
-        "ui_dyn_double_exposure", "ui_dyn_out_of_range_frac", "ui_dyn_regression",
+        "ui_dyn_blend_frac", "ui_dyn_out_of_range_frac", "ui_dyn_regression",
         "text_edge_f", "text_grad_loss", "text_comp_ratio",
     ],
     "transition": [
@@ -108,7 +108,13 @@ def build_category_errors(windows: list[WindowFeatures],
 
 def compute_scores(cfg: EvalConfig, cat_errors: dict[str, list[float]]
                    ) -> tuple[float, dict[str, float], dict[str, float]]:
-    """Returns (overall, subscores, per-category A_c)."""
+    """Returns (overall, subscores, per-category A_c).
+
+    Fail-closed (§7): categories without measurements are NaN, never a default
+    error. The overall score renormalizes weights over available categories,
+    and is NaN outright when the core categories (motion/temporal/structure)
+    are missing — an incomplete evaluation must not look like a good result.
+    """
     weights = cfg.preset.score_weights
     A: dict[str, float] = {}
     for cat in CATEGORY_FEATURES:
@@ -119,19 +125,36 @@ def compute_scores(cfg: EvalConfig, cat_errors: dict[str, list[float]]
         a = A[cat]
         subscores[key] = float(100.0 * np.exp(-_SCORE_K * a)) if a == a else float("nan")
 
-    # §11.3 weighted exponent; character+thin share the 0.15 bucket.
-    def g(cat: str, default: float = 0.15) -> float:
+    core = ("motion", "temporal", "structure")
+    if any(A[c] != A[c] for c in core):
+        return float("nan"), subscores, A
+
+    # §11.3 weighted exponent over available categories; character+thin share
+    # one bucket when both are available, else whichever exists.
+    a_char = A.get("character", float("nan"))
+    a_thin = A.get("thin_weapon", float("nan"))
+    if a_char == a_char and a_thin == a_thin:
+        a_charthin, w_charthin = 0.5 * a_char + 0.5 * a_thin, weights["character_thin"]
+    elif a_char == a_char:
+        a_charthin, w_charthin = a_char, weights["character_thin"]
+    elif a_thin == a_thin:
+        a_charthin, w_charthin = a_thin, weights["character_thin"]
+    else:
+        a_charthin, w_charthin = float("nan"), 0.0
+
+    terms = [("motion", weights["motion"]), ("temporal", weights["temporal"]),
+             ("structure", weights["structure"]), ("ui", weights["ui"]),
+             ("transition", weights["transition"]), ("global", weights["global"])]
+    num = w_num = 0.0
+    for cat, w in terms:
         v = A.get(cat, float("nan"))
-        return v if v == v else default
-    a_charthin = 0.5 * g("character") + 0.5 * g("thin_weapon")
-    exponent = (weights["motion"] * g("motion")
-                + weights["temporal"] * g("temporal")
-                + weights["structure"] * g("structure")
-                + weights["character_thin"] * a_charthin
-                + weights["ui"] * g("ui")
-                + weights["transition"] * g("transition")
-                + weights["global"] * g("global"))
-    overall = float(100.0 * np.exp(-exponent))
+        if v == v:
+            num += w * v
+            w_num += w
+    if a_charthin == a_charthin:
+        num += w_charthin * a_charthin
+        w_num += w_charthin
+    overall = float(100.0 * np.exp(-num / w_num)) if w_num > 0 else float("nan")
     return overall, subscores, A
 
 

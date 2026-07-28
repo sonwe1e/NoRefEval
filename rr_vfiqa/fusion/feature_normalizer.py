@@ -57,7 +57,7 @@ FEATURE_SCALES: dict[str, tuple] = {
     "char_extra_frac": (0.30, False),
     "char_chamfer": (150.0, False),
     "char_components_delta": (3.0, False),
-    "char_leak_mean": (12.0, False),
+    "char_leak_mean": (10.0, 10.0, True),       # inverted: small leak = copy-like
     "char_ring_edge_frac": (0.35, False),
     # thin objects / weapons
     "thin_layer_err": (0.50, False),
@@ -71,9 +71,9 @@ FEATURE_SCALES: dict[str, tuple] = {
     "ui_static_grad": (20.0, False),
     "ui_static_edge_f": (0.85, 0.35, True),
     "ui_gen_drift": (6.0, False),
-    "ui_dyn_double_exposure": (0.15, False),
+    "ui_dyn_blend_frac": (0.15, False),
     "ui_dyn_out_of_range_frac": (0.15, False),
-    "ui_dyn_regression": (0.40, False),
+    "ui_dyn_regression": (0.20, False),
     "text_edge_f": (0.80, 0.40, True),
     "text_grad_loss": (0.30, False),
     "text_comp_ratio": (0.0, False),            # special-cased

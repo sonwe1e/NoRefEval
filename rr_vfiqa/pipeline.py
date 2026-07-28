@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import collections
 import time
 from pathlib import Path
 from typing import Callable
@@ -167,6 +168,7 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
 
     say("tier-2 core window metrics")
     wfs: list[WindowFeatures] = []
+    stage_errors: dict[str, int] = collections.Counter()
     for n, w in enumerate(windows):
         if n % max(1, len(windows) // 10) == 0:
             say(f"window {n + 1}/{len(windows)}")
@@ -201,8 +203,14 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
                 wf.scalars.update(fn())             # take down the whole window
             except Exception as exc:
                 wf.labels[f"error_{name}"] = repr(exc)
+                stage_errors[name] += 1
 
         wfs.append(wf)
+
+    CORE_STAGES = {"composition", "cycle", "temporal", "parity", "edges", "gtq"}
+    valid_wfs = [wf for wf in wfs
+                 if not any(k.startswith("error_") and k[len("error_"):] in CORE_STAGES
+                            for k in wf.labels)]
 
     say("global features + fusion")
     global_feats: dict[str, float] = {}
@@ -213,12 +221,15 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
     cat_errors = build_category_errors(wfs, global_feats)
     overall, subscores, A = compute_scores(cfg, cat_errors)
     conf, event_amb = compute_confidence(wfs, alignment, candidate.meta.n_frames,
-                                         alignment.anchor_error)
+                                         alignment.anchor_error,
+                                         valid_windows=len(valid_wfs),
+                                         total_windows=len(wfs))
 
-    # Optional trained calibrator (§11.4).
+    # Optional trained calibrator (§11.4) — never overrides a fail-closed NaN.
     calibrator = maybe_load(calibrator_path or p.calibrator_path)
-    if calibrator is not None:
-        feats = {f"A_{cat}": A.get(cat, 0.15) for cat in CATEGORY_FEATURES}
+    if calibrator is not None and overall == overall:
+        feats = {f"A_{cat}": A.get(cat, float("nan")) for cat in CATEGORY_FEATURES}
+        feats = {k: (v if v == v else 0.0) for k, v in feats.items()}
         feats["confidence"] = conf
         feats["event_ambiguity"] = event_amb
         overall = calibrator.predict_quality(feats)
@@ -257,7 +268,19 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
         if v == v:
             feat_out[f"global_{k}"] = round(float(v), 5)
 
+    status = ("failed" if overall != overall
+              else "degraded" if stage_errors or len(valid_wfs) < len(wfs)
+              else "ok")
+    error_samples = {}
+    for wf in wfs:
+        for k, v in wf.labels.items():
+            if k.startswith("error_") and k not in error_samples:
+                error_samples[k] = v
     meta = {
+        "status": status,
+        "valid_windows": len(valid_wfs),
+        "stage_errors": dict(sorted(stage_errors.items())),
+        "stage_error_samples": error_samples,
         "preset": p.name,
         "flow_backend": getattr(backend, "name", cfg.flow_backend),
         "device": cfg.device,
@@ -281,7 +304,7 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
         "elapsed_seconds": round(time.perf_counter() - t_start, 2),
     }
 
-    report = Report(overall_score=overall if overall == overall else 0.0,
+    report = Report(overall_score=overall,
                     confidence=conf, scores=subscores,
                     event_ambiguity=event_amb, worst_windows=worst,
                     features=feat_out, meta=meta)

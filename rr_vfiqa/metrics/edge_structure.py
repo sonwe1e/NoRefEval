@@ -13,7 +13,7 @@ import numpy as np
 
 from ..cache.source_cache import SourceCache, SourcePairData
 from ..config import EvalConfig
-from ..schema import FrameBundle, resize_flow, warp_image
+from ..schema import FrameBundle, forward_splat, resize_flow
 from .window_flows import WindowFlows
 
 _TEXTURE_GRAD = 10.0          # gradient-energy floor for "textured" pixels
@@ -40,9 +40,13 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cache: SourceCache,
     f_01 = resize_flow(pair.f_01, h, w)
     f_10 = resize_flow(pair.f_10, h, w)
 
-    s0 = warp_image(e0.astype(np.float32), 0.5 * f_01) > 0.5
-    s1 = warp_image(e1.astype(np.float32), -0.5 * f_10) > 0.5
-    support = (s0 | s1).astype(np.uint8)
+    # Endpoint edges are carried to the mid grid by FORWARD splatting half of
+    # each endpoint's forward flow (f_01: X_i→X_{i+1}, f_10: X_{i+1}→X_i).
+    # Threshold the splatted VALUE: background zeros also flow, so coverage
+    # alone cannot say an edge arrived — but splat mass from edge pixels does.
+    s0, _ = forward_splat(e0.astype(np.float32), 0.5 * f_01)
+    s1, _ = forward_splat(e1.astype(np.float32), 0.5 * f_10)
+    support = ((s0 > 0.25) | (s1 > 0.25)).astype(np.uint8)
 
     tex = ((g0 + g1) * 0.5 > _TEXTURE_GRAD).astype(bool)
 

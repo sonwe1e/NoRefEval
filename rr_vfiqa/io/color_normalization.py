@@ -14,6 +14,12 @@ import numpy as np
 
 @dataclass
 class ColorTransform:
+    """Fitted cand ≈ gain · src + offset (source as independent variable).
+
+    ``apply`` maps CANDIDATE pixels into the source color space — the
+    inverse — which is what anchor comparison needs.
+    """
+
     gain: np.ndarray      # (3,) float32
     offset: np.ndarray    # (3,) float32
     residual: float       # fit residual in 0..255 units
@@ -22,8 +28,14 @@ class ColorTransform:
     def identity() -> "ColorTransform":
         return ColorTransform(np.ones(3, np.float32), np.zeros(3, np.float32), 0.0)
 
-    def apply(self, rgb: np.ndarray) -> np.ndarray:
-        out = rgb.astype(np.float32) * self.gain + self.offset
+    def apply(self, cand_rgb: np.ndarray) -> np.ndarray:
+        """Normalize candidate → source space: (cand − offset) / gain."""
+        out = (cand_rgb.astype(np.float32) - self.offset) / np.clip(self.gain, 0.25, 4.0)
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+    def apply_forward(self, src_rgb: np.ndarray) -> np.ndarray:
+        """Source → candidate direction (the fitted relationship itself)."""
+        out = src_rgb.astype(np.float32) * self.gain + self.offset
         return np.clip(out, 0, 255).astype(np.uint8)
 
     def is_trivial(self, tol: float = 0.5) -> bool:

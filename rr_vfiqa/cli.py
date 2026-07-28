@@ -50,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
             flow_backend=args.flow_backend, export_clips=not args.no_clips,
             calibrator_path=args.calibrator, progress=progress)
         print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
-        return 0
+        # Non-zero exit on a fail-closed evaluation so the CLI can gate CI.
+        return 1 if report.meta.get("status") == "failed" else 0
 
     if args.cmd == "compare":
         results = compare_models(

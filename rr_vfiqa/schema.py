@@ -220,19 +220,40 @@ class Report:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "overall_score": round(float(self.overall_score), 2),
-            "confidence": round(float(self.confidence), 4),
-            "event_ambiguity": round(float(self.event_ambiguity), 4),
-            "scores": {k: round(float(v), 2) for k, v in self.scores.items()},
+            "overall_score": _num_or_none(self.overall_score, ndigits=2),
+            "confidence": _num_or_none(self.confidence, ndigits=4),
+            "event_ambiguity": _num_or_none(self.event_ambiguity, ndigits=4),
+            "scores": {k: _num_or_none(v, ndigits=2) for k, v in self.scores.items()},
             "worst_windows": [w.to_dict() for w in self.worst_windows],
-            "features": self.features,
-            "meta": self.meta,
+            "features": _sanitize(self.features),
+            "meta": _sanitize(self.meta),
         }
 
 
 # ---------------------------------------------------------------------------
 # Small numerics helpers shared across modules
 # ---------------------------------------------------------------------------
+
+def _num_or_none(v, ndigits: int = 4):
+    """NaN/inf are not valid JSON — failed measurements serialize as null."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return round(f, ndigits)
+
+
+def _sanitize(obj):
+    """Recursively map NaN/inf floats to None for JSON output."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, float):
+        return _num_or_none(obj)
+    return obj
 
 def charbonnier(x: np.ndarray, tau: float = 4.0) -> np.ndarray:
     """sqrt(x^2 + tau^2) - tau, ~|x| for large x, smooth near 0."""
@@ -253,24 +274,78 @@ def percentiles(values: np.ndarray, ps: tuple[float, ...] = (50, 90, 99)) -> dic
     return {f"p{p}": float(q) for p, q in zip(ps, qs)}
 
 
-def warp_image(img: np.ndarray, flow: np.ndarray) -> np.ndarray:
-    """Backward-warp `img` by `flow`: out(x) = img(x + flow(x)).
+def backward_warp(img: np.ndarray, target_to_source_flow: np.ndarray) -> np.ndarray:
+    """Backward sampling on the TARGET grid: out(x) = img(x + flow(x)).
 
-    img: (H, W) or (H, W, C) float32. flow: (H, W, 2) in pixels (dx, dy).
+    `flow` must be defined on the output (target) grid and point from target
+    pixels to their source location — e.g. the b→a flow when resampling
+    image a onto b's grid. NEVER pass a forward a→b flow here.
     """
     import cv2
 
-    h, w = flow.shape[:2]
-    base_x, base_y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
-    map_x = base_x + flow[..., 0]
-    map_y = base_y + flow[..., 1]
+    h, w = target_to_source_flow.shape[:2]
+    base_x, base_y = np.meshgrid(np.arange(w, dtype=np.float32),
+                                 np.arange(h, dtype=np.float32))
+    map_x = base_x + target_to_source_flow[..., 0]
+    map_y = base_y + target_to_source_flow[..., 1]
     return cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_LINEAR,
                      borderMode=cv2.BORDER_REFLECT_101)
 
 
+def forward_splat(img: np.ndarray, source_to_target_flow: np.ndarray,
+                  target_shape: tuple[int, int] | None = None
+                  ) -> tuple[np.ndarray, np.ndarray]:
+    """Forward warping by bilinear splatting.
+
+    `flow` is defined on the SOURCE grid and points each source pixel at its
+    target location (e.g. the a→b flow when moving image a toward b's grid —
+    the right tool for half-time projections of endpoint content).
+    Returns (out, coverage): the resampled image on the target grid and the
+    accumulated splat weights (>0 where target pixels received content).
+    """
+    h, w = source_to_target_flow.shape[:2]
+    th, tw = target_shape if target_shape is not None else (h, w)
+    imgf = img.astype(np.float32)
+    chan = imgf.ndim == 3
+
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    tx = xx + source_to_target_flow[..., 0]
+    ty = yy + source_to_target_flow[..., 1]
+    inb = (tx >= 0) & (tx <= tw - 1.001) & (ty >= 0) & (ty <= th - 1.001)
+    x0 = np.floor(tx).astype(np.int64)
+    y0 = np.floor(ty).astype(np.int64)
+    wx = tx - x0
+    wy = ty - y0
+
+    acc = np.zeros((th, tw) + imgf.shape[2:], np.float64)
+    cov = np.zeros((th, tw), np.float64)
+    for dx in (0, 1):
+        for dy in (0, 1):
+            wgt = (wx if dx else 1.0 - wx) * (wy if dy else 1.0 - wy)
+            wgt = np.where(inb, wgt, 0.0)
+            xv = np.clip(x0 + dx, 0, tw - 1)
+            yv = np.clip(y0 + dy, 0, th - 1)
+            np.add.at(cov, (yv, xv), wgt)
+            if chan:
+                np.add.at(acc, (yv, xv), wgt[..., None] * imgf)
+            else:
+                np.add.at(acc, (yv, xv), wgt * imgf)
+    out = np.zeros_like(acc, dtype=np.float32)
+    valid = cov > 1e-6
+    if chan:
+        out[valid] = (acc[valid] / cov[valid][..., None]).astype(np.float32)
+    else:
+        out[valid] = (acc[valid] / cov[valid]).astype(np.float32)
+    return out, cov.astype(np.float32)
+
+
 def warp_flow(f_ab: np.ndarray, f_bc: np.ndarray) -> np.ndarray:
-    """Compose flows: f_ac(x) = f_ab(x) + f_bc(x + f_ab(x))."""
-    warped = warp_image(f_bc, f_ab)
+    """Compose forward flows: f_ac(x) = f_ab(x) + f_bc(x + f_ab(x)).
+
+    The gather of f_bc at displaced positions is the standard forward-flow
+    chain rule, not an image warp.
+    """
+    warped = backward_warp(f_bc, f_ab)
     return f_ab + warped
 
 

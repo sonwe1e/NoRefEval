@@ -67,3 +67,30 @@ def test_out_dir_reports(videos, cache_dir, flow_backend, tmp_path):
     assert (tmp_path / "badcases").exists()
     clips = list((tmp_path / "badcases").glob("*.mp4"))
     assert len(clips) >= 1
+
+
+def test_fail_closed_on_core_failures(videos, cache_dir, flow_backend, monkeypatch):
+    """A broken core stage must not silently yield a good score (USERPLAN §7)."""
+    from rr_vfiqa.metrics import (cycle_reconstruction, edge_structure,
+                                  flow_composition_metric,
+                                  global_technical_quality, parity_frequency,
+                                  temporal_compensation)
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated stage failure")
+
+    for mod in (flow_composition_metric, cycle_reconstruction,
+                temporal_compensation, edge_structure):
+        monkeypatch.setattr(mod, "compute", boom)
+    monkeypatch.setattr(parity_frequency, "compute_window", boom)
+    monkeypatch.setattr(global_technical_quality, "compute_window", boom)
+
+    rep = evaluate_vfi(str(videos["source"]), str(videos["good"]), preset="fast",
+                       cache_dir=cache_dir, device="cuda", flow_backend=flow_backend,
+                       out_dir=None, export_clips=False)
+    d = rep.to_dict()
+    assert d["meta"]["status"] == "failed"
+    assert d["overall_score"] is None            # NaN must not become a number
+    assert d["confidence"] < 0.05
+    assert d["meta"]["stage_errors"]
+    assert d["meta"]["stage_error_samples"]

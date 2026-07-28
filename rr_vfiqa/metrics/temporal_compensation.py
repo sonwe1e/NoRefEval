@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from ..config import EvalConfig
-from ..schema import FrameBundle, charbonnier, percentiles, warp_image
+from ..schema import FrameBundle, backward_warp, charbonnier, percentiles, warp_flow
 from .window_flows import WindowFlows
 
 _LAG_POSITIONS = {1: (1, 3), 2: (0, 4)}       # lag in candidate frames
@@ -45,9 +45,8 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
         if pos == center:
             continue
         f_cj = flow.forward(center, pos)     # center-grid flow center -> j
-        warped = warp_image(yc[pos], f_cj)
-        cyc = np.linalg.norm(
-            f_cj + warp_image(flow.forward(pos, center), f_cj), axis=-1)
+        warped = backward_warp(yc[pos], f_cj)    # resample j onto center grid
+        cyc = np.linalg.norm(warp_flow(f_cj, flow.forward(pos, center)), axis=-1)
         vis = cyc < cfg.occlusion_cycle_threshold
 
         y_res = np.abs(warped - yc[center])

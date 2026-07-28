@@ -12,7 +12,7 @@ import numpy as np
 
 from ..config import EvalConfig
 from ..sampling.cheap_scan import CheapScan
-from ..schema import FrameBundle, warp_image
+from ..schema import FrameBundle, backward_warp, warp_flow
 from .window_flows import WindowFlows
 
 
@@ -84,8 +84,10 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
         ya = bundle.y_channel()[a]
         yb = bundle.y_channel()[b]
         f_ab, f_ba = flow.pair(a, b)
-        warped = warp_image(yb, f_ab)
-        cyc = np.linalg.norm(f_ab + warp_image(f_ba, f_ab), axis=-1)
+        # Resample b onto a's grid: target a, source b, so the target→source
+        # flow is f_ab (a→b) itself.
+        warped = backward_warp(yb, f_ab)
+        cyc = np.linalg.norm(warp_flow(f_ab, f_ba), axis=-1)
         vis = cyc < cfg.occlusion_cycle_threshold
         if vis.sum() < 64:
             return float("nan")

@@ -11,12 +11,14 @@ from __future__ import annotations
 import numpy as np
 
 from ..config import EvalConfig
+from ..imutils import alpha_blend_fit
 from ..metrics.window_flows import WindowFlows
-from ..schema import FrameBundle, flow_magnitude, warp_image
+from ..schema import FrameBundle, flow_magnitude, warp_flow
 
 _CHANGE_TAU = 24.0     # per-pixel endpoint change that counts as "switched"
 _SIDE_TAU = 10.0       # closeness to one endpoint state
 _MOTION_GATE = 1.5     # px; low-motion pixels are excluded from "changed"
+_BLEND_RESID = 8.0     # alpha-fit residual under which M is a true mixture
 
 
 def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
@@ -46,9 +48,12 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
     close_to_side = np.minimum(d0, d1) < _SIDE_TAU
     out["event_discrete_score"] = float(close_to_side[c].mean())
 
-    # Double exposure: M_i close to BOTH endpoint states at once.
-    double = (d0 < _SIDE_TAU) & (d1 < _SIDE_TAU)
-    out["event_ghost_frac"] = float(double[c].mean())
+    # Ghosting / partial mixing: M_i fits α·Xi + (1−α)·Xj with α strictly
+    # inside (0,1) and a small residual. (The old d0<τ & d1<τ with
+    # diff01>3τ was impossible by the triangle inequality — §3.5.)
+    alpha, resid = alpha_blend_fit(xi, xm, xj)
+    mix = c & (resid < _BLEND_RESID) & (alpha > 0.15) & (alpha < 0.85)
+    out["event_ghost_frac"] = float(mix.sum() / max(int(c.sum()), 1))
 
     # State regression: M_{i+1} returns toward X_i by more than 20% of the
     # endpoint gap — going backwards after a switch. (Plain "closer to X_i"
@@ -62,7 +67,7 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
     # Continuous-motion contrast: a real flip keeps moving monotonically; use
     # motion-compensated continuity of M_{i-1}->M_i->M_{i+1} as counter-signal.
     f_ab, f_ba = flow.pair(0, 2)
-    cyc = np.linalg.norm(f_ab + warp_image(f_ba, f_ab), axis=-1)
+    cyc = np.linalg.norm(warp_flow(f_ab, f_ba), axis=-1)
     out["event_continuity_vis"] = float((cyc < cfg.occlusion_cycle_threshold).mean())
 
     out["event_ambiguity"] = float(np.clip(

@@ -26,17 +26,20 @@ def compute(flow: WindowFlows, pair: SourcePairData, cfg: EvalConfig
     # Cached source flows → window resolution.
     f_01 = resize_flow(pair.f_01, h, w)
     f_10 = resize_flow(pair.f_10, h, w)
-    conf = _resize_mask(pair.occ.conf_ab, h, w)
-    occ = _resize_mask(pair.occ.occ_ab.astype(np.float32), h, w) > 0.5
+    conf_01 = _resize_mask(pair.occ.conf_ab, h, w)
+    occ_01 = _resize_mask(pair.occ.occ_ab.astype(np.float32), h, w) > 0.5
+    conf_10 = _resize_mask(pair.occ.conf_ba, h, w)
+    occ_10 = _resize_mask(pair.occ.occ_ba.astype(np.float32), h, w) > 0.5
 
     # Candidate half-leg flows, both directions.
     f_0m, f_m0 = flow.pair(1, 2)
     f_m1, f_1m = flow.pair(2, 3)
 
-    weight = conf * (1.0 - occ.astype(np.float32))
+    weight = conf_01 * (1.0 - occ_01.astype(np.float32))
     stats, fwd_map, bwd_map = bidirectional_composition(
         f_01, f_10, f_0m, f_m0, f_m1, f_1m,
-        conf_01=conf, occ_01=occ.astype(np.uint8),
+        conf_01=conf_01, occ_01=occ_01.astype(np.uint8),
+        conf_10=conf_10, occ_10=occ_10.astype(np.uint8),
         tau_px=cfg.charbonnier_tau,
     )
 

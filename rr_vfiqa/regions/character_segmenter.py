@@ -14,13 +14,19 @@ from ..cache.source_cache import SourcePairData
 from ..config import EvalConfig
 from ..metrics.window_flows import WindowFlows
 from ..models.segmentation_backend import SegmentationBackend, get_segmentation_backend
-from ..schema import FrameBundle, flow_magnitude, resize_flow, warp_image
+from ..schema import FrameBundle, flow_magnitude, forward_splat, resize_flow
 from ._common import bbox_of, clean_mask, luma, mask_chamfer
 
 
-def _warp_mask(mask: np.ndarray, flow: np.ndarray) -> np.ndarray:
-    w = warp_image(mask.astype(np.float32), flow)
-    return (w > 0.5).astype(np.uint8)
+def _splat_mask(mask: np.ndarray, source_to_target_flow: np.ndarray) -> np.ndarray:
+    """Carry a binary mask along a FORWARD flow.
+
+    Thresholds the splatted value (fraction of splat mass coming from mask
+    pixels): background zeros flow too, so raw coverage cannot distinguish
+    "mask arrived" from "background arrived".
+    """
+    out, _ = forward_splat(mask.astype(np.float32), source_to_target_flow)
+    return (out > 0.25).astype(np.uint8)
 
 
 def compute_window(bundle: FrameBundle, flow: WindowFlows, pair: SourcePairData,
@@ -42,9 +48,10 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, pair: SourcePairData,
     s1 = segmenter.segment(bundle.rgb[3], {"residual_flow": res_1})
     sm = segmenter.segment(bundle.rgb[2], {"residual_flow": flow.forward(1, 2) - 0.5 * cam_flow})
 
-    # Expected mid mask: half-warp both endpoint masks and fuse (union — the
-    # character may grow into disoccluded areas).
-    hat = np.maximum(_warp_mask(s0, 0.5 * f_01), _warp_mask(s1, -0.5 * f_10))
+    # Expected mid mask: forward-splat both endpoint masks halfway (f_01 is
+    # X_i→X_{i+1}, f_10 is X_{i+1}→X_i) and fuse by union — the character may
+    # grow into disoccluded areas.
+    hat = np.maximum(_splat_mask(s0, 0.5 * f_01), _splat_mask(s1, 0.5 * f_10))
     hat = clean_mask(hat, min_area=48, close_k=5)
 
     out["char_expected_frac"] = float(hat.mean())
@@ -68,14 +75,23 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, pair: SourcePairData,
 
     # Endpoint leak (§8.2 E_leak): how much M_i looks like a plain copy of one
     # endpoint inside the character region — combined with double edges this
-    # is strong ghosting evidence.
+    # is strong ghosting evidence. Endpoint luma is forward-splatted onto the
+    # M_i grid; unsupported pixels are excluded from the statistic.
     f_0m = flow.forward(1, 2)
     f_1m = flow.forward(3, 2)
-    xi_to_m = warp_image(luma(bundle.rgb[1]), f_0m)
-    xj_to_m = warp_image(luma(bundle.rgb[3]), f_1m)
+    xi_to_m, ci = forward_splat(luma(bundle.rgb[1]), f_0m)
+    xj_to_m, cj = forward_splat(luma(bundle.rgb[3]), f_1m)
     ym = luma(bundle.rgb[2])
+    supported = (ci > 0.5) | (cj > 0.5)
     leak = np.minimum(np.abs(ym - xi_to_m), np.abs(ym - xj_to_m))
-    out["char_leak_mean"] = float(leak[hb].mean()) if hb.any() else float("nan")
+    m = hb & supported
+    # A SMALL leak means M_i resembles a plain copy of one endpoint — the bad
+    # case — so fusion normalizes this inverted. Without local motion a copy
+    # is legitimate (static character), hence the motion gate.
+    if m.any() and hb.any() and float(np.median(flow_magnitude(f_01)[hb])) > 2.0:
+        out["char_leak_mean"] = float(leak[m].mean())
+    else:
+        out["char_leak_mean"] = float("nan")
 
     # Double-contour ratio around the character (halo / second silhouette).
     band = cv2.dilate(hat, np.ones((7, 7), np.uint8)) > 0

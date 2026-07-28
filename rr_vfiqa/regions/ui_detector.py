@@ -16,6 +16,7 @@ import numpy as np
 
 from ..config import EvalConfig
 from ..io.video_reader import VideoReader
+from ..imutils import alpha_blend_fit
 from ..schema import FrameBundle
 from ._common import clean_mask, luma
 
@@ -67,18 +68,27 @@ class UIDetector:
                            interpolation=cv2.INTER_NEAREST) > 0.5).astype(np.uint8)
 
 
-def _edge_fscore(a_gray: np.ndarray, b_gray: np.ndarray, mask: np.ndarray,
-                 tol_px: float = 2.0) -> float:
-    ea = cv2.Canny(a_gray, 60, 160) > 0
-    eb = cv2.Canny(b_gray, 60, 160) > 0
-    da = cv2.distanceTransform((ea == 0).astype(np.uint8), cv2.DIST_L2, 3)
-    db = cv2.distanceTransform((eb == 0).astype(np.uint8), cv2.DIST_L2, 3)
+def _edge_fscore(candidate_gray: np.ndarray, reference_gray: np.ndarray,
+                 mask: np.ndarray, tol_px: float = 2.0) -> float:
+    """Edge F-score of candidate against reference inside the mask.
+
+    recall    = fraction of REFERENCE edges within tol of a candidate edge;
+    precision = fraction of CANDIDATE edges within tol of a reference edge.
+    (The previous version measured each edge set against its OWN distance
+    transform, which is trivially zero distance — F degraded to a constant 1.)
+    """
+    e_cand = cv2.Canny(candidate_gray, 60, 160) > 0
+    e_ref = cv2.Canny(reference_gray, 60, 160) > 0
+    dist_to_cand = cv2.distanceTransform((e_cand == 0).astype(np.uint8),
+                                         cv2.DIST_L2, 3)
+    dist_to_ref = cv2.distanceTransform((e_ref == 0).astype(np.uint8),
+                                        cv2.DIST_L2, 3)
     m = mask.astype(bool)
-    if m.sum() < 16 or eb[m].sum() == 0:
+    if m.sum() < 16 or (e_ref & m).sum() == 0 or (e_cand & m).sum() == 0:
         return float("nan")
-    prec = float(np.mean(db[eb & m] <= tol_px)) if (eb & m).any() else float("nan")
-    rec = float(np.mean(da[ea & m] <= tol_px)) if (ea & m).any() else float("nan")
-    if prec != prec or rec != rec or prec + rec < 1e-6:
+    rec = float(np.mean(dist_to_cand[e_ref & m] <= tol_px))
+    prec = float(np.mean(dist_to_ref[e_cand & m] <= tol_px))
+    if prec + rec < 1e-6:
         return float("nan")
     return 2 * prec * rec / (prec + rec)
 
@@ -118,22 +128,30 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
                 np.abs(bundle.rgb[0].astype(np.float32) - xm)[m].mean())
     else:
         # §8.4 dynamic UI / §8.6 discrete events: only penalize mixing defects.
-        d0 = np.abs(xm - xi)
-        d1 = np.abs(xm - xj)
-        diff01 = np.abs(xi - xj)
-        tau = 8.0
-        out_of_range = ((xm < np.minimum(xi, xj) - tau) |
-                        (xm > np.maximum(xi, xj) + tau)).any(-1)
-        out["ui_dyn_out_of_range_frac"] = float(np.mean(out_of_range & m))
-        double_exp = ((d0.mean(-1) < tau) & (d1.mean(-1) < tau) &
-                      (diff01.mean(-1) > 3 * tau))
-        out["ui_dyn_double_exposure"] = float(np.mean(double_exp & m))
-        # State regression between consecutive generated frames (goes backward).
+        d0 = np.abs(xm - xi).mean(-1)
+        d1 = np.abs(xm - xj).mean(-1)
+        diff01m = np.abs(xi - xj).mean(-1)
+        ch = diff01m > 12.0
+        n_ch = max(int(ch.sum()), 1)
+
+        # Alpha-mixing evidence: M fits α·Xi + (1−α)·Xj with α strictly inside
+        # (0,1) and tiny residual — impossible for a correct hard switch, and
+        # not tripped by the triangle-inequality-violating old d0<τ & d1<τ.
+        alpha, resid = alpha_blend_fit(xi, xm, xj)
+        blend = ch & (resid < 6.0) & (alpha > 0.15) & (alpha < 0.85)
+        out["ui_dyn_blend_frac"] = float(blend.sum() / n_ch)
+        out["ui_dyn_blend_resid"] = float(resid[ch].mean()) if ch.any() else float("nan")
+
+        out_of_range = ((xm < np.minimum(xi, xj) - 8.0) |
+                        (xm > np.maximum(xi, xj) + 8.0)).any(-1)
+        out["ui_dyn_out_of_range_frac"] = float((out_of_range & ch).sum() / n_ch)
+
+        # State regression (§3.6 fixed sign): M_i returns TOWARD X_i relative
+        # to the previous generated frame — normal forward progression has
+        # M_i FURTHER from X_i than M_{i-1}, so only a shrink counts.
         if bundle.rgb.shape[0] >= 5:
             m_prev = bundle.rgb[0].astype(np.float32)
-            sim_prev_to_xi = float(np.abs(m_prev - xi)[m].mean())
-            sim_cur_to_xi = float(np.abs(xm - xi)[m].mean())
-            out["ui_dyn_regression"] = float(
-                np.clip((sim_cur_to_xi - sim_prev_to_xi) / max(endpoint_change, 1e-3),
-                        0, 2))
+            d0_prev = np.abs(m_prev - xi).mean(-1)
+            back = ch & (d0 < d0_prev - 0.2 * diff01m)
+            out["ui_dyn_regression"] = float(back.sum() / n_ch)
     return out
