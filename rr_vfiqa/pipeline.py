@@ -14,11 +14,13 @@ from typing import Callable
 import numpy as np
 
 from .cache.source_cache import SourceCache
+from .calibration.provenance import report_provenance
 from .config import EvalConfig
 from .fusion import (build_category_errors, compute_confidence, compute_scores,
                      maybe_load)
+from .fusion.feature_registry import feature_contract_hash
 from .fusion.feature_normalizer import normalize_error
-from .fusion.score_schema import CATEGORY_FEATURES
+from .fusion.score_schema import CATEGORY_FEATURES, category_window_valid
 from .io.timestamp_alignment import build_alignment
 from .io.video_reader import VideoReader
 from .metrics import (anchor_integrity, cycle_reconstruction, edge_structure,
@@ -415,13 +417,33 @@ def evaluate_endpoint_reference(
                       "warnings": alignment.warnings},
         "windows_evaluated": len(wfs),
         "windows_selected": len(windows),
-        "coverage_fraction": round(len(wfs) * p.window_frames /
-                                   max(candidate.meta.n_frames, 1), 5),
+        "coverage_fraction": round(
+            len({
+                int(frame)
+                for wf in valid_wfs
+                for frame in wf.window.indices
+            }) / max(candidate.meta.n_frames, 1),
+            5,
+        ),
         "category_errors": {k: round(v, 4) if v == v else None
                             for k, v in A.items()},
+        "category_valid_windows": {
+            category: sum(
+                1 for wf in wfs if category_window_valid(wf, category))
+            for category in CATEGORY_FEATURES
+        },
         "calibrator": "lightgbm" if calibrator else "formula",
         "elapsed_seconds": round(time.perf_counter() - t_start, 2),
     }
+    meta.update(report_provenance(
+        mode="endpoint-2x",
+        score_schema="endpoint-reduced-reference-v1",
+        metric_contract="endpoint-metrics-v2",
+        preset_contract=f"endpoint-{p.name}-v1",
+        feature_contract_hash=feature_contract_hash("endpoint-2x"),
+        backend_contract={"flow": backend.cache_identity()},
+        calibration_id=("lightgbm-external" if calibrator else None),
+    ))
 
     report = Report(overall_score=overall,
                     confidence=conf, scores=subscores,

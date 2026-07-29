@@ -123,6 +123,7 @@ class EvalConfig:
     cache_dir: str = "./cache"
     device: str = "cuda"                  # "cuda" | "cpu" | "npu"
     flow_backend: str = "auto"            # "auto" | "raft" | "farneback"
+    geometry_policy: str = "strict"        # FR: strict | resize-candidate | common-resolution
     out_dir: str | None = None
     seed: int = 0
 
@@ -149,12 +150,14 @@ class EvalConfig:
         cls,
         candidate_video: str,
         reference_video: str | None = None,
-        mode: str | EvaluationMode = EvaluationMode.NO_REFERENCE,
+        mode: str | EvaluationMode | None = None,
         preset: str = "standard",
         **overrides,
     ) -> "EvalConfig":
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
+        if mode is None:
+            raise ValueError("mode must be explicitly specified")
         parsed_mode = parse_mode(mode)
         if parsed_mode is EvaluationMode.NO_REFERENCE:
             if reference_video is not None:
@@ -171,6 +174,11 @@ class EvalConfig:
             if not hasattr(cfg, k):
                 raise ValueError(f"unknown config override {k!r}")
             setattr(cfg, k, v)
+        if cfg.geometry_policy not in (
+                "strict", "resize-candidate", "common-resolution"):
+            raise ValueError(
+                "geometry_policy must be 'strict', 'resize-candidate', "
+                "or 'common-resolution'")
         return cfg
 
     @property

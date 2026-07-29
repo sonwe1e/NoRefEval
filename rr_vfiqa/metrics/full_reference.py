@@ -10,8 +10,8 @@ from ..schema import FrameBundle, backward_warp, flow_magnitude
 from .window_flows import WindowFlows
 
 
-def _ssim(a: np.ndarray, b: np.ndarray) -> float:
-    """Global SSIM on luma, dependency-free and deterministic."""
+def _global_ssim_proxy(a: np.ndarray, b: np.ndarray) -> float:
+    """Whole-image statistics retained as a diagnostic proxy only."""
     a = a.astype(np.float64)
     b = b.astype(np.float64)
     c1 = (0.01 * 255.0) ** 2
@@ -23,11 +23,34 @@ def _ssim(a: np.ndarray, b: np.ndarray) -> float:
                  ((ma * ma + mb * mb + c1) * (va + vb + c2)))
 
 
-def _edge_metrics(reference: np.ndarray, candidate: np.ndarray) -> tuple[float, float]:
+def _local_ssim(a: np.ndarray, b: np.ndarray) -> float:
+    """Standard local SSIM with an 11x11 Gaussian window."""
+    a, b = a.astype(np.float32), b.astype(np.float32)
+    c1, c2 = (0.01 * 255.0) ** 2, (0.03 * 255.0) ** 2
+    mu_a = cv2.GaussianBlur(a, (11, 11), 1.5)
+    mu_b = cv2.GaussianBlur(b, (11, 11), 1.5)
+    sigma_a = cv2.GaussianBlur(a * a, (11, 11), 1.5) - mu_a * mu_a
+    sigma_b = cv2.GaussianBlur(b * b, (11, 11), 1.5) - mu_b * mu_b
+    sigma_ab = cv2.GaussianBlur(a * b, (11, 11), 1.5) - mu_a * mu_b
+    value = ((2 * mu_a * mu_b + c1) * (2 * sigma_ab + c2)) / (
+        (mu_a * mu_a + mu_b * mu_b + c1)
+        * (sigma_a + sigma_b + c2) + 1e-6)
+    return float(np.clip(np.mean(value), -1.0, 1.0))
+
+
+def _edge_metrics(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+    mask: np.ndarray | None = None,
+) -> tuple[float, float, float, float]:
     er = cv2.Canny(reference.astype(np.uint8), 60, 160) > 0
     ec = cv2.Canny(candidate.astype(np.uint8), 60, 160) > 0
+    if mask is not None:
+        region = mask.astype(bool)
+        er = er & region
+        ec = ec & region
     if not er.any() and not ec.any():
-        return 1.0, 0.0
+        return 1.0, 1.0, 1.0, 0.0
     dist_c = cv2.distanceTransform((~ec).astype(np.uint8), cv2.DIST_L2, 3)
     dist_r = cv2.distanceTransform((~er).astype(np.uint8), cv2.DIST_L2, 3)
     recall = float(np.mean(dist_c[er] <= 2.0)) if er.any() else 1.0
@@ -38,19 +61,73 @@ def _edge_metrics(reference: np.ndarray, candidate: np.ndarray) -> tuple[float, 
         chamfer_parts.append(float(np.mean(dist_c[er])))
     if ec.any():
         chamfer_parts.append(float(np.mean(dist_r[ec])))
-    return float(f1), float(np.mean(chamfer_parts))
+    return recall, precision, float(f1), float(np.mean(chamfer_parts))
 
 
 def _multiscale_luma_error(a: np.ndarray, b: np.ndarray) -> float:
     values: list[float] = []
     aa, bb = a, b
     for _ in range(3):
-        values.append(float(np.mean(np.abs(aa - bb))) / 255.0)
+        luma_error = float(np.mean(np.abs(aa - bb))) / 255.0
+        ga_x = cv2.Sobel(aa, cv2.CV_32F, 1, 0, ksize=3)
+        ga_y = cv2.Sobel(aa, cv2.CV_32F, 0, 1, ksize=3)
+        gb_x = cv2.Sobel(bb, cv2.CV_32F, 1, 0, ksize=3)
+        gb_y = cv2.Sobel(bb, cv2.CV_32F, 0, 1, ksize=3)
+        gradient_error = float(np.mean(np.abs(
+            np.hypot(ga_x, ga_y) - np.hypot(gb_x, gb_y)))) / 255.0
+        values.append(0.7 * luma_error + 0.3 * gradient_error)
         if min(aa.shape[:2]) < 16:
             break
         aa = cv2.pyrDown(aa)
         bb = cv2.pyrDown(bb)
     return float(np.mean(values))
+
+
+def _reference_rois(reference_y: np.ndarray) -> dict[str, np.ndarray]:
+    """Short-window screen, text, salient and moving-region proxy masks."""
+    n, h, w = reference_y.shape
+    edges = np.stack([
+        cv2.Canny(frame.astype(np.uint8), 60, 160) > 0
+        for frame in reference_y
+    ])
+    band = np.zeros((h, w), bool)
+    band[:max(1, h // 5)] = True
+    band[-max(1, h // 5):] = True
+    persistent = edges.mean(0) >= 0.35
+    ui = band & cv2.dilate(
+        persistent.astype(np.uint8), np.ones((7, 7), np.uint8)
+    ).astype(bool)
+    density = cv2.blur(
+        edges[0].astype(np.float32), (15, 15),
+        borderType=cv2.BORDER_REFLECT)
+    text = ui & (density >= 0.10)
+
+    median_y = np.median(reference_y, axis=0).astype(np.float32)
+    gx = cv2.Sobel(median_y, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(median_y, cv2.CV_32F, 0, 1, ksize=3)
+    gradient = np.hypot(gx, gy)
+    salient_threshold = float(np.percentile(gradient, 75))
+    salient = gradient >= max(salient_threshold, 8.0)
+
+    motion = np.zeros((h, w), np.float32)
+    if n > 1:
+        motion = np.mean(np.abs(np.diff(reference_y, axis=0)), axis=0)
+    motion_threshold = float(np.percentile(motion, 75))
+    center = np.zeros((h, w), bool)
+    center[h // 5:4 * h // 5, w // 5:4 * w // 5] = True
+    moving = center & (motion >= max(motion_threshold, 2.0))
+    return {"ui": ui, "text": text, "salient": salient, "motion": moving}
+
+
+def _masked_l1(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+    mask: np.ndarray,
+) -> float:
+    return (
+        float(np.mean(np.abs(candidate[:, mask] - reference[:, mask])))
+        if mask.sum() >= 32 else float("nan")
+    )
 
 
 def compute_window(
@@ -70,20 +147,43 @@ def compute_window(
     l1: list[float] = []
     psnr: list[float] = []
     ssim: list[float] = []
+    global_ssim_proxy: list[float] = []
     perceptual: list[float] = []
+    rgb_l1: list[float] = []
+    rgb_charbonnier: list[float] = []
+    edge_recall: list[float] = []
+    edge_precision: list[float] = []
     edge_f1: list[float] = []
     edge_chamfer: list[float] = []
-    for a, b in zip(yr, yc):
+    for index, (a, b) in enumerate(zip(yr, yc)):
         diff = a - b
         mse = float(np.mean(diff * diff))
         l1.append(float(np.mean(np.abs(diff))))
+        rgb_diff = (
+            candidate.rgb[index].astype(np.float32)
+            - reference.rgb[index].astype(np.float32)
+        )
+        rgb_l1.append(float(np.mean(np.abs(rgb_diff))))
+        rgb_charbonnier.append(float(np.mean(
+            np.sqrt(rgb_diff * rgb_diff + cfg.charbonnier_tau ** 2)
+            - cfg.charbonnier_tau)))
         psnr.append(100.0 if mse <= 1e-12
                     else float(20.0 * np.log10(255.0 / np.sqrt(mse))))
-        ssim.append(_ssim(a, b))
+        ssim.append(_local_ssim(a, b))
+        global_ssim_proxy.append(_global_ssim_proxy(a, b))
         perceptual.append(_multiscale_luma_error(a, b))
-        ef, ec = _edge_metrics(a, b)
+        er, ep, ef, ec = _edge_metrics(a, b)
+        edge_recall.append(er)
+        edge_precision.append(ep)
         edge_f1.append(ef)
         edge_chamfer.append(ec)
+
+    rois = _reference_rois(yr)
+    text_edge_f1: list[float] = []
+    if rois["text"].sum() >= 32:
+        for a, b in zip(yr, yc):
+            _, _, f1, _ = _edge_metrics(a, b, rois["text"])
+            text_edge_f1.append(f1)
 
     temporal_diff: list[float] = []
     flow_error: list[float] = []
@@ -127,11 +227,22 @@ def compute_window(
 
     return {
         "fr_l1_y": float(np.mean(l1)),
+        "fr_l1_rgb": float(np.mean(rgb_l1)),
+        "fr_charbonnier_rgb": float(np.mean(rgb_charbonnier)),
         "fr_psnr": float(np.mean(psnr)),
         "fr_ssim": float(np.mean(ssim)),
-        "fr_multiscale_perceptual": float(np.mean(perceptual)),
+        "fr_global_ssim_proxy": float(np.mean(global_ssim_proxy)),
+        "fr_multiscale_luma_gradient_l1": float(np.mean(perceptual)),
+        "fr_edge_recall": float(np.mean(edge_recall)),
+        "fr_edge_precision": float(np.mean(edge_precision)),
         "fr_edge_f1": float(np.mean(edge_f1)),
         "fr_edge_chamfer": float(np.mean(edge_chamfer)),
+        "fr_ui_roi_l1": _masked_l1(yr, yc, rois["ui"]),
+        "fr_text_roi_edge_f1": (
+            float(np.mean(text_edge_f1))
+            if text_edge_f1 else float("nan")),
+        "fr_salient_roi_l1": _masked_l1(yr, yc, rois["salient"]),
+        "fr_motion_roi_l1": _masked_l1(yr, yc, rois["motion"]),
         "fr_temporal_diff_error": float(np.mean(temporal_diff)) if temporal_diff else float("nan"),
         "fr_flow_error": float(np.mean(flow_error)) if flow_error else float("nan"),
         "fr_trajectory_deviation": float(np.mean(trajectory)) if trajectory else float("nan"),

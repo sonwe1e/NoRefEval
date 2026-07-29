@@ -11,10 +11,15 @@ __all__ = [
     "compute_confidence", "MonotonicCalibrator", "maybe_load",
     "SCHEMA_IDS", "compute_mode_confidence", "compute_mode_scores",
     "window_category_errors",
+    "FeatureDefinition", "definitions", "feature_contract_hash",
+    "required_features",
 ]
 from .mode_score_schemas import (
     SCHEMA_IDS,
     compute_mode_confidence,
     compute_mode_scores,
     window_category_errors,
+)
+from .feature_registry import (
+    FeatureDefinition, definitions, feature_contract_hash, required_features,
 )

@@ -189,6 +189,42 @@ class WindowFeatures:
         self.scalars[key] = float(value)
 
 
+@dataclass
+class MetricResult:
+    """Uniform metric-stage result and validity contract."""
+
+    scalars: dict[str, float] = field(default_factory=dict)
+    maps: dict[str, np.ndarray] = field(default_factory=dict)
+    instances: list[dict[str, Any]] = field(default_factory=list)
+    coverage: float = 1.0
+    confidence: float = 1.0
+    warnings: list[str] = field(default_factory=list)
+    status: str = "ok"
+
+    @classmethod
+    def from_scalars(
+        cls,
+        scalars: dict[str, float],
+        *,
+        required: tuple[str, ...] = (),
+        coverage: float = 1.0,
+    ) -> "MetricResult":
+        missing = [
+            key for key in required
+            if key not in scalars or not np.isfinite(scalars[key])
+        ]
+        status = "failed" if missing else "ok"
+        return cls(
+            scalars=scalars,
+            coverage=float(np.clip(coverage, 0.0, 1.0)),
+            confidence=0.0 if missing else 1.0,
+            warnings=(
+                [f"missing required metric feature(s): {', '.join(missing)}"]
+                if missing else []),
+            status=status,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------

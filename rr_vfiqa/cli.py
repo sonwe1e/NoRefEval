@@ -35,9 +35,13 @@ def main(argv: list[str] | None = None) -> int:
     pe.add_argument("--out", default=None, help="report output directory")
     pe.add_argument("--no-clips", action="store_true")
     pe.add_argument("--calibrator", default=None, help="trained LightGBM pickle")
-    pe.add_argument("--vqa-backend", default="auto",
-                    choices=["auto", "none", "pyiqa-niqe"],
+    pe.add_argument("--vqa-backend", default="none",
+                    choices=["none", "pyiqa-niqe"],
                     help="weak learned prior for no-reference mode")
+    pe.add_argument("--geometry-policy", default="strict",
+                    choices=[
+                        "strict", "resize-candidate", "common-resolution"],
+                    help="full-reference frame geometry policy")
     _add_common(pe)
 
     pc = sub.add_parser("compare", help="rank candidates within one evaluation mode")
@@ -47,8 +51,13 @@ def main(argv: list[str] | None = None) -> int:
     pc.add_argument("--candidates", nargs="+", required=True)
     pc.add_argument("--labels", nargs="*", default=None)
     pc.add_argument("--out", default=None)
-    pc.add_argument("--vqa-backend", default="auto",
-                    choices=["auto", "none", "pyiqa-niqe"])
+    pc.add_argument("--vqa-backend", default="none",
+                    choices=["none", "pyiqa-niqe"])
+    pc.add_argument("--geometry-policy", default="strict",
+                    choices=[
+                        "strict", "resize-candidate", "common-resolution"])
+    pc.add_argument("--allow-cross-content", action="store_true",
+                    help="NR only: emit independent reports without ranking")
     _add_common(pc)
 
     args = parser.parse_args(argv)
@@ -64,6 +73,8 @@ def main(argv: list[str] | None = None) -> int:
             extra["vqa_backend"] = args.vqa_backend
         elif args.mode == EvaluationMode.ENDPOINT_2X.value:
             extra["calibrator_path"] = args.calibrator
+        elif args.mode == EvaluationMode.FULL_REFERENCE.value:
+            extra["geometry_policy"] = args.geometry_policy
         report = evaluate(
             candidate_video=args.candidate,
             reference_video=args.reference,
@@ -89,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         compare_extra = {}
         if args.mode == EvaluationMode.NO_REFERENCE.value:
             compare_extra["vqa_backend"] = args.vqa_backend
+        elif args.mode == EvaluationMode.FULL_REFERENCE.value:
+            compare_extra["geometry_policy"] = args.geometry_policy
         results = compare(
             args.candidates,
             reference_video=args.reference,
@@ -100,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
             labels=args.labels,
             flow_backend=args.flow_backend,
             progress=progress,
+            allow_cross_content=args.allow_cross_content,
             **compare_extra,
         )
         print(f"{'rank':<5}{'model':<28}{'overall':>9}{'relative':>10}{'conf':>7}")

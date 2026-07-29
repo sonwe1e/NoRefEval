@@ -7,9 +7,12 @@ import time
 from pathlib import Path
 from typing import Callable
 
+import cv2
 import numpy as np
 
 from .config import EvalConfig, EvaluationMode, parse_mode
+from .calibration.provenance import report_provenance
+from .fusion.feature_registry import feature_contract_hash, required_features
 from .fusion.mode_score_schemas import (
     SCHEMA_IDS,
     compute_mode_confidence,
@@ -31,10 +34,24 @@ from .report import (
 )
 from .sampling.cheap_scan import scan_candidate, scene_cuts_from_scan
 from .sampling.time_window_selector import select_time_windows
+from .sampling.temporal_plan import FlowPairPlan, TemporalLagPlan
+from .sampling.full_reference_scan import scan_full_reference
 from .sampling.window_selector import window_times
-from .schema import Report, WindowFeatures, WorstWindow
+from .schema import FrameBundle, MetricResult, Report, WindowFeatures, WorstWindow
 
 ProgressFn = Callable[[str], None]
+
+
+def _unique_coverage(
+    windows: list[WindowFeatures],
+    n_frames: int,
+) -> float:
+    if not windows:
+        return 0.0
+    covered = np.unique(np.concatenate([
+        wf.window.indices for wf in windows
+    ]))
+    return float(len(covered) / max(n_frames, 1))
 
 
 def _feature_summary(windows: list[WindowFeatures]) -> dict[str, float]:
@@ -51,6 +68,31 @@ def _feature_summary(windows: list[WindowFeatures]) -> dict[str, float]:
         if values:
             output[key] = round(float(np.median(values)), 5)
     return output
+
+
+def _resize_bundle(
+    bundle: FrameBundle,
+    *,
+    width: int,
+    height: int,
+) -> FrameBundle:
+    if (bundle.width, bundle.height) == (width, height):
+        return bundle
+    interpolation = (
+        cv2.INTER_AREA
+        if width <= bundle.width and height <= bundle.height
+        else cv2.INTER_LINEAR)
+    rgb = np.stack([
+        cv2.resize(frame, (width, height), interpolation=interpolation)
+        for frame in bundle.rgb
+    ])
+    return FrameBundle(
+        indices=bundle.indices,
+        times=bundle.times,
+        rgb=rgb,
+        width=width,
+        height=height,
+    )
 
 
 def _worst_windows(
@@ -136,7 +178,7 @@ def evaluate_no_reference(
     device: str = "cuda",
     out_dir: str | None = None,
     flow_backend: str = "auto",
-    vqa_backend: str = "auto",
+    vqa_backend: str = "none",
     export_clips: bool = True,
     progress: ProgressFn | None = None,
 ) -> Report:
@@ -151,6 +193,10 @@ def evaluate_no_reference(
         device=device,
         flow_backend=flow_backend,
     )
+    if vqa_backend == "auto":
+        raise ValueError(
+            "vqa_backend='auto' is not reproducible; choose 'none' or "
+            "'pyiqa-niqe' explicitly")
     say("opening no-reference candidate")
     candidate = VideoReader(candidate_video)
     fps_supported = (
@@ -188,31 +234,30 @@ def evaluate_no_reference(
             bundle = candidate.read_frames(
                 window.indices, width=cfg.preset.flow_width)
             flows = WindowFlows(bundle, backend)
-            flows.precompute()
-            wf.scalars.update(no_reference.compute_window(
-                bundle, flows, cfg, vqa_backend=learned))
+            lag_plan = TemporalLagPlan.build(bundle.times)
+            flow_plan = FlowPairPlan.for_no_reference(lag_plan)
+            flows.precompute(flow_plan.unique_pairs())
+            metric = MetricResult.from_scalars(
+                no_reference.compute_window(
+                    bundle, flows, cfg, vqa_backend=learned),
+                required=required_features(EvaluationMode.NO_REFERENCE),
+            )
+            wf.scalars.update(metric.scalars)
+            wf.labels["metric_status"] = metric.status
+            wf.labels["metric_warnings"] = metric.warnings
         except Exception as exc:
             wf.labels["error_no_reference"] = repr(exc)
             stage_errors["no_reference"] += 1
         window_features.append(wf)
 
-    required = (
-        "nr_self_comp_mean",
-        "nr_self_cycle_mean",
-        "nr_mct_short_mean",
-        "nr_phase_sharp_gap",
-    )
+    required = required_features(EvaluationMode.NO_REFERENCE)
     valid = [
         wf for wf in window_features
         if all(np.isfinite(wf.scalars.get(key, float("nan"))) for key in required)
     ]
     overall, subscores, category_errors = compute_mode_scores(
         EvaluationMode.NO_REFERENCE, valid)
-    coverage = min(
-        1.0,
-        sum(len(wf.window.indices) for wf in valid)
-        / max(candidate.meta.n_frames, 1),
-    )
+    coverage = _unique_coverage(valid, candidate.meta.n_frames)
     confidence = compute_mode_confidence(
         valid_windows=len(valid),
         total_windows=len(window_features),
@@ -237,10 +282,12 @@ def evaluate_no_reference(
         confidence,
         cfg.preset.temporal_nms_seconds,
     )
+    score_schema = SCHEMA_IDS[EvaluationMode.NO_REFERENCE] + (
+        "+niqe" if learned is not None else "")
     meta = {
         "mode": EvaluationMode.NO_REFERENCE.value,
         "status": status,
-        "score_schema": SCHEMA_IDS[EvaluationMode.NO_REFERENCE],
+        "score_schema": score_schema,
         "score_semantics": "temporal stability and artifact risk; not interpolation truth",
         "limitations": [
             "Cannot prove true object trajectories or disoccluded content.",
@@ -255,7 +302,18 @@ def evaluate_no_reference(
         },
         "reference": None,
         "time_scales_seconds": [round(1.0 / 60.0, 6), round(1.0 / 30.0, 6)],
+        "temporal_lag_contract": {
+            "native": "input-cadence",
+            "lag_1_60_seconds": round(1.0 / 60.0, 6),
+            "lag_1_30_seconds": round(1.0 / 30.0, 6),
+            "self_reference_half_span_seconds": round(1.0 / 60.0, 6),
+        },
         "phase_contract": "two-phase-self-reference",
+        "diagnostic_branches": {
+            "flow_geometry": "global-translation-residual-jacobian",
+            "track_smoothness": "camera-relative-klt",
+            "ui_text": "screen-band-persistent-edge-proxy",
+        },
         "flow_backend": getattr(backend, "name", flow_backend),
         "vqa_backend": getattr(learned, "name", None),
         "vqa_prior_available": learned is not None,
@@ -270,9 +328,21 @@ def evaluate_no_reference(
             key: round(value, 4) if np.isfinite(value) else None
             for key, value in category_errors.items()
         },
-        "calibrator": "nr-formula-v1",
+        "calibrator": "nr-formula-v2",
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
+    meta.update(report_provenance(
+        mode=EvaluationMode.NO_REFERENCE.value,
+        score_schema=score_schema,
+        metric_contract="nr-metrics-v2",
+        preset_contract=f"nr-{cfg.preset.name}-v1",
+        feature_contract_hash=feature_contract_hash(
+            EvaluationMode.NO_REFERENCE),
+        backend_contract={
+            "flow": backend.cache_identity(),
+            "vqa": getattr(learned, "name", "none"),
+        },
+    ))
     report = Report(
         overall_score=overall,
         confidence=confidence,
@@ -295,6 +365,7 @@ def evaluate_full_reference(
     device: str = "cuda",
     out_dir: str | None = None,
     flow_backend: str = "auto",
+    geometry_policy: str = "strict",
     export_clips: bool = True,
     progress: ProgressFn | None = None,
 ) -> Report:
@@ -309,6 +380,7 @@ def evaluate_full_reference(
         cache_dir=cache_dir,
         device=device,
         flow_backend=flow_backend,
+        geometry_policy=geometry_policy,
     )
     say("opening full-reference videos")
     reference = VideoReader(reference_video)
@@ -317,7 +389,12 @@ def evaluate_full_reference(
     cuts = scene_cuts_from_scan(scan)
     say("building same-rate PTS/content alignment")
     alignment = build_full_reference_alignment(
-        reference, candidate, scene_cuts_candidate=cuts)
+        reference, candidate, scene_cuts_candidate=cuts,
+        geometry_policy=geometry_policy)
+    say("full-reference low-resolution timeline scan")
+    reference_scan = scan_full_reference(
+        reference, candidate, alignment, width=cfg.preset.scan_width)
+    reference_globals = reference_scan.global_features()
     excluded = set(int(i) for i in cuts)
     for event in alignment.events:
         excluded.update(range(
@@ -330,11 +407,19 @@ def evaluate_full_reference(
         scan,
         eligible_centers=alignment.matched_centers(),
         excluded_indices=np.asarray(sorted(excluded), np.int32),
+        external_risk=reference_scan.per_frame_risk,
         half_span_seconds=1.0 / 30.0,
         min_samples=5,
     )
     say(f"{len(windows)} aligned windows selected")
     backend = get_flow_backend(flow_backend, device)
+    working_width = min(
+        cfg.preset.flow_width,
+        reference.meta.width,
+        (candidate.meta.width
+         if geometry_policy != "resize-candidate"
+         else reference.meta.width),
+    )
 
     stage_errors: collections.Counter[str] = collections.Counter()
     window_features: list[WindowFeatures] = []
@@ -346,39 +431,41 @@ def evaluate_full_reference(
             ref_indices = alignment.reference_of_candidate[window.indices]
             if np.any(ref_indices < 0) or np.any(np.diff(ref_indices) <= 0):
                 raise ValueError("window crosses an unmatched alignment interval")
-            cb = candidate.read_frames(
-                window.indices, width=cfg.preset.flow_width)
             rb = reference.read_frames(
-                ref_indices, width=cfg.preset.flow_width)
+                ref_indices, width=working_width)
+            cb = candidate.read_frames(
+                window.indices,
+                width=(
+                    working_width
+                    if geometry_policy != "resize-candidate" else rb.width))
+            if geometry_policy == "resize-candidate":
+                cb = _resize_bundle(
+                    cb, width=rb.width, height=rb.height)
             cf = WindowFlows(cb, backend)
             rf = WindowFlows(rb, backend)
             pairs = [(i, i + 1) for i in range(len(cb.rgb) - 1)]
             cf.precompute(pairs)
             rf.precompute(pairs)
-            wf.scalars.update(full_reference.compute_window(
-                rb, cb, rf, cf, cfg))
+            metric = MetricResult.from_scalars(
+                full_reference.compute_window(rb, cb, rf, cf, cfg),
+                required=required_features(EvaluationMode.FULL_REFERENCE),
+            )
+            wf.scalars.update(metric.scalars)
+            wf.labels["metric_status"] = metric.status
+            wf.labels["metric_warnings"] = metric.warnings
         except Exception as exc:
             wf.labels["error_full_reference"] = repr(exc)
             stage_errors["full_reference"] += 1
         window_features.append(wf)
 
-    required = (
-        "fr_l1_y",
-        "fr_ssim",
-        "fr_temporal_diff_error",
-        "fr_flow_error",
-    )
+    required = required_features(EvaluationMode.FULL_REFERENCE)
     valid = [
         wf for wf in window_features
         if all(np.isfinite(wf.scalars.get(key, float("nan"))) for key in required)
     ]
     overall, subscores, category_errors = compute_mode_scores(
-        EvaluationMode.FULL_REFERENCE, valid)
-    coverage = min(
-        1.0,
-        sum(len(wf.window.indices) for wf in valid)
-        / max(candidate.meta.n_frames, 1),
-    )
+        EvaluationMode.FULL_REFERENCE, valid, reference_globals)
+    coverage = _unique_coverage(valid, candidate.meta.n_frames)
     confidence = compute_mode_confidence(
         valid_windows=len(valid),
         total_windows=len(window_features),
@@ -404,10 +491,12 @@ def evaluate_full_reference(
         confidence,
         cfg.preset.temporal_nms_seconds,
     )
+    fr_score_schema = SCHEMA_IDS[EvaluationMode.FULL_REFERENCE] + (
+        "" if geometry_policy == "strict" else f"+{geometry_policy}")
     meta = {
         "mode": EvaluationMode.FULL_REFERENCE.value,
         "status": status,
-        "score_schema": SCHEMA_IDS[EvaluationMode.FULL_REFERENCE],
+        "score_schema": fr_score_schema,
         "score_semantics": "same-rate full-reference spatial and temporal fidelity",
         "limitations": [
             "Requires the same capture, cadence, geometry, and frame correspondence.",
@@ -432,9 +521,32 @@ def evaluate_full_reference(
             "reliable": alignment.reliable,
             "events": alignment.events,
             "warnings": alignment.warnings,
+            "geometry_policy": geometry_policy,
+            "resize_transform": (
+                None if geometry_policy == "strict" else {
+                    "policy": geometry_policy,
+                    "working_width": working_width,
+                    "working_height": int(round(
+                        reference.meta.height
+                        * working_width / reference.meta.width)),
+                    "reference_native": [
+                        reference.meta.width, reference.meta.height],
+                    "candidate_native": [
+                        candidate.meta.width, candidate.meta.height],
+                }),
         },
         "flow_backend": getattr(backend, "name", flow_backend),
+        "roi_branches": {
+            "ui": "screen-band-persistent-edge-proxy",
+            "text": "dense-stroke-proxy",
+            "salient": "reference-gradient-proxy",
+            "motion": "center-reference-motion-proxy",
+        },
         "scene_cut_frames": [int(i) for i in cuts],
+        "full_reference_scan": {
+            key: round(value, 6)
+            for key, value in reference_globals.items()
+        },
         "valid_windows": len(valid),
         "windows_evaluated": len(window_features),
         "windows_selected": len(windows),
@@ -444,16 +556,25 @@ def evaluate_full_reference(
             key: round(value, 4) if np.isfinite(value) else None
             for key, value in category_errors.items()
         },
-        "calibrator": "fr-formula-v1",
+        "calibrator": "fr-formula-v2",
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
+    meta.update(report_provenance(
+        mode=EvaluationMode.FULL_REFERENCE.value,
+        score_schema=fr_score_schema,
+        metric_contract="fr-metrics-v2",
+        preset_contract=f"fr-{cfg.preset.name}-v1",
+        feature_contract_hash=feature_contract_hash(
+            EvaluationMode.FULL_REFERENCE),
+        backend_contract={"flow": backend.cache_identity()},
+    ))
     report = Report(
         overall_score=overall,
         confidence=confidence,
         scores=subscores,
         event_ambiguity=event_ambiguity,
         worst_windows=worst,
-        features=_feature_summary(valid),
+        features={**_feature_summary(valid), **reference_globals},
         meta=meta,
     )
     _write_outputs(
@@ -464,10 +585,12 @@ def evaluate_full_reference(
 def evaluate(
     candidate_video: str,
     reference_video: str | None = None,
-    mode: str | EvaluationMode = EvaluationMode.NO_REFERENCE,
+    mode: str | EvaluationMode | None = None,
     **kwargs,
 ) -> Report:
     """Dispatch to one explicit evaluation contract."""
+    if mode is None:
+        raise ValueError("mode must be explicitly specified")
     parsed = parse_mode(mode)
     if parsed is EvaluationMode.NO_REFERENCE:
         if reference_video is not None:
@@ -483,15 +606,27 @@ def evaluate(
 def compare(
     candidate_videos: list[str],
     reference_video: str | None = None,
-    mode: str | EvaluationMode = EvaluationMode.NO_REFERENCE,
+    mode: str | EvaluationMode | None = None,
     labels: list[str] | None = None,
     out_dir: str | None = None,
+    allow_cross_content: bool = False,
     **kwargs,
 ) -> list[dict]:
     """Rank candidates only within one shared mode/schema."""
+    if mode is None:
+        raise ValueError("mode must be explicitly specified")
+    parsed_mode = parse_mode(mode)
     labels = labels or [Path(path).stem for path in candidate_videos]
     if len(labels) != len(candidate_videos):
         raise ValueError("labels must have the same length as candidate_videos")
+    comparison_issues: list[str] = []
+    if parsed_mode is EvaluationMode.NO_REFERENCE and len(candidate_videos) > 1:
+        comparison_issues = _nr_compare_issues(candidate_videos)
+        if comparison_issues and not allow_cross_content:
+            raise ValueError(
+                "no-reference candidates are not safely comparable: "
+                + "; ".join(comparison_issues)
+                + ". Pass allow_cross_content=True only for independent reports.")
     results: list[dict] = []
     for label, candidate in zip(labels, candidate_videos):
         report = evaluate(
@@ -516,18 +651,24 @@ def compare(
             "score_schema": report.meta["score_schema"],
             "relative_vs_mean": None,
         })
-    results.sort(key=lambda item: (
-        item["status"] == "failed",
-        -(item["overall"] if item["overall"] is not None else float("-inf")),
-    ))
+    comparable = not comparison_issues
+    if comparable:
+        results.sort(key=lambda item: (
+            item["status"] == "failed",
+            -(item["overall"] if item["overall"] is not None else float("-inf")),
+        ))
     valid_scores = [
         item["overall"] for item in results if item["overall"] is not None
     ]
     mean = float(np.mean(valid_scores)) if valid_scores else None
-    if mean is not None:
+    if mean is not None and comparable:
         for item in results:
             if item["overall"] is not None:
                 item["relative_vs_mean"] = round(item["overall"] - mean, 2)
+    for item in results:
+        item["comparison_status"] = (
+            "comparable" if comparable else "independent-report")
+        item["comparison_warnings"] = comparison_issues
     if out_dir:
         import json
 
@@ -538,3 +679,68 @@ def compare(
             encoding="utf-8",
         )
     return results
+
+
+def _nr_compare_issues(candidate_videos: list[str]) -> list[str]:
+    import cv2
+
+    from .imutils import hamming64
+
+    readers = [VideoReader(path) for path in candidate_videos]
+    base = readers[0].meta
+    issues: list[str] = []
+    base_bucket = 60 if abs(base.fps - 60.0) <= 3.0 else 120
+    base_duration = float(base.pts_seconds[-1] - base.pts_seconds[0])
+    scans = [scan_candidate(reader, width=96) for reader in readers]
+    for index, reader in enumerate(readers[1:], 1):
+        meta = reader.meta
+        bucket = 60 if abs(meta.fps - 60.0) <= 3.0 else 120
+        if bucket != base_bucket:
+            issues.append(f"candidate {index} FPS bucket differs")
+        duration = float(meta.pts_seconds[-1] - meta.pts_seconds[0])
+        if abs(duration - base_duration) / max(base_duration, 1e-6) > 0.05:
+            issues.append(f"candidate {index} duration differs by more than 5%")
+        if abs(meta.width / meta.height - base.width / base.height) > 0.005:
+            issues.append(f"candidate {index} aspect ratio differs")
+        elif (meta.width, meta.height) != (base.width, base.height):
+            issues.append(f"candidate {index} resolution differs")
+        pts_count = min(32, len(base.pts_seconds), len(meta.pts_seconds))
+        if pts_count >= 2:
+            base_pos = np.linspace(
+                0, len(base.pts_seconds) - 1, pts_count).astype(int)
+            cand_pos = np.linspace(
+                0, len(meta.pts_seconds) - 1, pts_count).astype(int)
+            base_pts = base.pts_seconds[base_pos] - base.pts_seconds[0]
+            cand_pts = meta.pts_seconds[cand_pos] - meta.pts_seconds[0]
+            pts_error = float(np.max(np.abs(base_pts - cand_pts)))
+            if pts_error > max(0.25 / max(base.fps, 1e-6), 0.002):
+                issues.append(f"candidate {index} PTS timeline differs")
+        count = min(16, len(scans[0].hash64), len(scans[index].hash64))
+        if count:
+            a_pos = np.linspace(0, len(scans[0].hash64) - 1, count).astype(int)
+            b_pos = np.linspace(0, len(scans[index].hash64) - 1, count).astype(int)
+            distance = np.median([
+                hamming64(scans[0].hash64[a], scans[index].hash64[b])
+                for a, b in zip(a_pos, b_pos)
+            ])
+            if distance > 24:
+                issues.append(f"candidate {index} scene fingerprint differs")
+            base_bundle = readers[0].read_frames(a_pos, width=96)
+            candidate_bundle = reader.read_frames(b_pos, width=96)
+            thumbnail_errors = []
+            for base_frame, candidate_frame in zip(
+                    base_bundle.rgb, candidate_bundle.rgb):
+                base_gray = cv2.resize(
+                    cv2.cvtColor(base_frame, cv2.COLOR_RGB2GRAY),
+                    (64, 36), interpolation=cv2.INTER_AREA)
+                candidate_gray = cv2.resize(
+                    cv2.cvtColor(candidate_frame, cv2.COLOR_RGB2GRAY),
+                    (64, 36), interpolation=cv2.INTER_AREA)
+                thumbnail_errors.append(float(np.mean(np.abs(
+                    base_gray.astype(np.float32)
+                    - candidate_gray.astype(np.float32)))))
+            if (thumbnail_errors
+                    and float(np.median(thumbnail_errors)) > 12.0):
+                issues.append(
+                    f"candidate {index} sampled content differs")
+    return list(dict.fromkeys(issues))

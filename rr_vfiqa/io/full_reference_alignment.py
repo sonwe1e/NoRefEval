@@ -86,6 +86,7 @@ def build_full_reference_alignment(
     candidate: VideoReader,
     *,
     scene_cuts_candidate: np.ndarray | None = None,
+    geometry_policy: str = "strict",
 ) -> FullReferenceAlignment:
     """Build and validate a one-to-one same-rate alignment.
 
@@ -102,11 +103,17 @@ def build_full_reference_alignment(
             f"(reference {rm.fps:.3f}, candidate {cm.fps:.3f})")
     ref_aspect = rm.width / max(rm.height, 1)
     cand_aspect = cm.width / max(cm.height, 1)
-    geometry_ok = abs(ref_aspect - cand_aspect) <= 0.005
+    same_geometry = rm.width == cm.width and rm.height == cm.height
+    if geometry_policy not in (
+            "strict", "resize-candidate", "common-resolution"):
+        raise ValueError(f"unknown geometry policy: {geometry_policy!r}")
+    geometry_ok = (
+        same_geometry if geometry_policy == "strict"
+        else abs(ref_aspect - cand_aspect) <= 0.005)
     if not geometry_ok:
         warnings.append(
-            f"frame aspect mismatch: reference {rm.width}x{rm.height}, "
-            f"candidate {cm.width}x{cm.height}")
+            f"frame geometry rejected by {geometry_policy!r}: reference "
+            f"{rm.width}x{rm.height}, candidate {cm.width}x{cm.height}")
 
     ref_mapping, cand_mapping, errors = _monotonic_match(
         _descriptors(reference),

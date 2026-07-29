@@ -65,6 +65,25 @@ CATEGORY_TO_SUBSCORE = {
     "global": "global_technical_quality",
 }
 
+CATEGORY_REQUIRED_STAGES: dict[str, tuple[str, ...]] = {
+    "motion": ("composition",),
+    "temporal": ("cycle", "temporal", "parity"),
+    "structure": ("edges",),
+    "character": ("character",),
+    "thin_weapon": ("thin",),
+    "ui": ("ui", "text"),
+    "transition": ("transition",),
+    "global": ("gtq",),
+}
+
+
+def category_window_valid(wf: WindowFeatures, category: str) -> bool:
+    failed = {
+        key[len("error_"):] for key in wf.labels if key.startswith("error_")
+    }
+    return not any(
+        stage in failed for stage in CATEGORY_REQUIRED_STAGES.get(category, ()))
+
 AGG_WEIGHTS = (0.4, 0.4, 0.2)      # P50 / P90 / P99
 _SCORE_K = 1.8                     # error→score sensitivity (bootstrap)
 
@@ -89,6 +108,8 @@ def build_category_errors(windows: list[WindowFeatures],
     out: dict[str, list[float]] = {c: [] for c in CATEGORY_FEATURES}
     for wf in windows:
         for cat, keys in CATEGORY_FEATURES.items():
+            if not category_window_valid(wf, cat):
+                continue
             vals = []
             for k in keys:
                 raw = wf.scalars.get(k)

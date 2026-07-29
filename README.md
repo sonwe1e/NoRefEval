@@ -24,7 +24,7 @@ pip install -e ".[vqa]"     # NR 模式的可选 pyIQA/NIQE 弱先验
 pip install -e ".[dev]"     # pytest
 ```
 
-未安装 `vqa` 可选依赖时，`--vqa-backend auto` 会明确记录弱先验不可用，并从融合中移除该项；它不会用“满分”填补缺失特征。
+NR 默认使用 `--vqa-backend none`，因此基础 schema 不受本机可选依赖影响。若明确启用 `--vqa-backend pyiqa-niqe`，报告 schema 会增加 `+niqe` 后缀，并记录该后端契约；不再提供会随环境变化的 `auto` 行为。
 
 ---
 
@@ -102,6 +102,8 @@ rr-vfiqa evaluate \
 - `full-reference` 遇到非 1× 帧率、几何不一致或低覆盖对齐时 fail-closed；
 - `endpoint-2x` 遇到不可靠的 2× 锚点对齐时 fail-closed。
 
+`full-reference` 默认使用 `--geometry-policy strict`，要求原始宽高完全一致。`resize-candidate` 会显式把候选变换到参考工作网格，`common-resolution` 则把两路降到共同工作分辨率；两者都要求宽高比一致，并分别使用 `+resize-candidate`、`+common-resolution` schema 后缀，报告也会保存 resize transform。
+
 同一模式内可以比较多个候选：
 
 ```bash
@@ -118,7 +120,7 @@ rr-vfiqa compare \
 
 ### 评测内容
 
-NR 执行器对任意输入序列构造两套虚拟端点参考：
+NR 执行器按 PTS 构造原生跨度与固定物理跨度的虚拟端点参考：
 
 ```text
 相位 0：Y0 / Y2 / Y4 ... 为虚拟端点，Y1 / Y3 ... 为中间帧
@@ -127,16 +129,19 @@ NR 执行器对任意输入序列构造两套虚拟端点参考：
 
 两个相位只作为对称假设使用，框架不会声称某一相位是真实帧。核心证据包括：
 
-- 双相位自参考 flow composition；
-- 从外侧帧重建中心帧的 self-cycle 残差；
-- 1/60 秒与 1/30 秒固定时间尺度的运动补偿残差；
+- 原生相邻三元组与固定 ±1/60 秒三元组的 flow composition；
+- 使用前后向一致性遮挡与置信度加权的 self-cycle 残差；
+- native、1/60 秒与 1/30 秒三档运动补偿残差；
 - flow velocity、acceleration 和 jerk 风险；
+- 去除全局平移后的 flow Jacobian、folding、divergence 和 curl；
+- 相机相对 KLT 点轨迹 acceleration、jerk 与方向突变；
 - 与相位标签无关的清晰度、边缘交替；
-- 重复帧、冻结、HUD/文字屏幕坐标边缘不稳定；
+- 统一时间尺度及 120 FPS 原生相邻帧的重复、冻结检测；
+- HUD 边缘与文字密集笔画的屏幕坐标不稳定；
 - 全局模糊、噪声、块效应；
 - 可选 pyIQA/NIQE 弱先验，融合权重不超过 5%。
 
-窗口按 PTS 和真实时间跨度选择。±33.3 ms 的窗口在 60 FPS 下通常包含 5 帧，在 120 FPS 下通常包含 9 帧，因此 120 FPS 的额外高频信息不会被固定“五帧窗口”丢掉。
+窗口按 PTS 和真实时间跨度选择。±33.3 ms 的窗口在 60 FPS 下通常包含 5 帧，在 120 FPS 下通常包含 9 帧，因此 120 FPS 的额外高频信息不会被固定“五帧窗口”丢掉。velocity、acceleration 和 jerk 全部使用真实时间间隔计算，而不是把不同 FPS 的帧索引差当成相同时间。
 
 ### 报告语义
 
@@ -144,7 +149,7 @@ NR 报告使用：
 
 ```text
 meta.mode = "no-reference"
-meta.score_schema = "nr-stability-risk-v1"
+meta.score_schema = "nr-stability-risk-v2"
 meta.score_semantics = "temporal stability and artifact risk; not interpolation truth"
 ```
 
@@ -156,7 +161,7 @@ meta.score_semantics = "temporal stability and artifact risk; not interpolation 
 - `ui_text_stability`
 - `technical_quality_prior`
 
-NR 无法证明真实轨迹、显露背景或清晰 hallucination 是否正确，所以 confidence 上限为 0.75。非 60/120 FPS 输入目前会 fail-closed，而不是套用未经标定的尺度。
+NR 无法证明真实轨迹、显露背景或清晰 hallucination 是否正确，所以 confidence 上限为 0.75。非 60/120 FPS 输入目前会 fail-closed，而不是套用未经标定的尺度。多个 NR 候选只有在 FPS 桶、时长、画幅和抽样内容指纹一致时才能排序；`--allow-cross-content` 只会生成互相独立的报告，不发布相对排名。
 
 ---
 
@@ -176,7 +181,7 @@ NR 无法证明真实轨迹、显露背景或清晰 hallucination 是否正确�
 | UI、文字、转场、卡牌代理 | HUD 漂移、笔画粘连、双重曝光 |
 | 人物、细物体、武器代理 | 局部缺失、错误归属、轨迹抖动 |
 
-该模式保留内容哈希缓存、局部 drop/duplicate 恢复、原分辨率 Audit 升级和错误阶段 fail-closed。报告使用：
+该模式保留内容哈希缓存、局部 drop/duplicate 恢复、原分辨率 Audit 升级和错误阶段 fail-closed。类别融合只使用该类别所依赖阶段均成功的窗口；某个窗口的 temporal 阶段失败，不会被其他残留特征当作有效 temporal 证据。报告使用：
 
 ```text
 meta.mode = "endpoint-2x"
@@ -189,11 +194,12 @@ meta.score_schema = "endpoint-reduced-reference-v1"
 
 ## 模式三：Full-Reference Same-Rate
 
-该模式要求 reference 与 candidate 来自同一次录制并逐帧对应。执行器先进行 1× PTS + 低分辨率内容单调对齐，再在匹配窗口中计算：
+该模式要求 reference 与 candidate 来自同一次录制并逐帧对应。执行器先进行 1× PTS + 低分辨率内容单调对齐，再对完整时间线执行低分辨率 reference scan；全片 Y/chroma、梯度、边缘、局部 SSIM proxy 与帧差不一致风险会参与窗口采样和融合。随后在匹配窗口中计算：
 
-- Y L1、PSNR、SSIM；
-- 多尺度亮度感知误差；
-- 边缘 F1 与 Chamfer；
+- Y/RGB L1、RGB Charbonnier、PSNR、11×11 Gaussian local SSIM；
+- 明确命名的多尺度亮度与梯度 L1（不是 perceptual metric）；
+- 边缘 precision、recall、F1 与 Chamfer；
+- UI、文字、显著结构和中心运动区域的局部参考误差；
 - reference/candidate 帧间变化误差；
 - 光流差异与轨迹偏差；
 - 运动补偿残差差异；
@@ -204,12 +210,12 @@ meta.score_schema = "endpoint-reduced-reference-v1"
 
 ```text
 meta.mode = "full-reference"
-meta.score_schema = "fr-same-rate-fidelity-v1"
+meta.score_schema = "fr-same-rate-fidelity-v2"
 ```
 
 子分数为 `spatial_fidelity`、`structural_fidelity`、`temporal_fidelity` 和 `motion_fidelity`。
 
-如果两条 60 FPS 视频只是同场景但不是逐帧对应，当前模式会拒绝发布有效分数。局部 DTW、时间伸缩、crop/scale/颜色归一化不属于当前 same-rate 契约。
+如果两条 60 FPS 视频只是同场景但不是逐帧对应，当前模式会拒绝发布有效分数。局部 DTW、时间伸缩、crop 和颜色归一化不属于当前 same-rate 契约；跨分辨率仅由显式的 `resize-candidate` 或 `common-resolution` policy 支持。
 
 ---
 
@@ -227,8 +233,15 @@ meta.score_schema = "fr-same-rate-fidelity-v1"
   "features": {},
   "meta": {
     "mode": "no-reference",
-    "score_schema": "nr-stability-risk-v1",
-    "status": "ok"
+    "score_schema": "nr-stability-risk-v2",
+    "status": "ok",
+    "metric_contract": "nr-metrics-v2",
+    "preset_contract": "nr-standard-v1",
+    "feature_contract_hash": "...",
+    "backend_contract": {},
+    "code_commit": "...",
+    "working_tree_dirty": false,
+    "production_gate": false
   }
 }
 ```
@@ -247,6 +260,8 @@ meta.score_schema = "fr-same-rate-fidelity-v1"
 - confidence 降到接近零；
 - CLI 返回非零退出码；
 - 阶段错误保存在 `meta.stage_errors`。
+
+coverage 统一按所有有效窗口覆盖到的唯一帧集合计算，重叠窗口不会重复计数。所有模式的报告均记录 metric、preset、feature、backend、代码提交与工作区状态契约，并固定声明 `production_gate=false`，直到各模式的真实数据标定独立完成。
 
 ---
 
@@ -279,6 +294,20 @@ python -m rr_vfiqa.benchmark --source src.mp4 --candidates a.mp4 b.mp4
 2. Endpoint 的真实 120/240 FPS 伪 GT 和人工 A/B；
 3. FR 60→60 的逐帧 GT、真实模型输出与场景外验证。
 
+NR 与 FR 的方向性验证使用独立 manifest，不共享 score schema 或阈值：
+
+```bash
+python -m rr_vfiqa.calibration.mode_validation \
+  --manifest validation/nr_manifest.json \
+  --output validation/nr_metrics.json
+
+python -m rr_vfiqa.calibration.mode_validation \
+  --manifest validation/fr_manifest.json \
+  --output validation/fr_metrics.json
+```
+
+manifest 顶层指定 `mode`，每个 case 提供 `better`、`worse`；FR case 额外提供 `reference`。该 harness 只报告模式内方向性准确率并保持 `production_gate=false`。
+
 运行测试：
 
 ```bash
@@ -304,21 +333,24 @@ rr_vfiqa/
 │   └── full_reference_alignment.py  Full-Reference 1× 对齐
 ├── sampling/
 │   ├── window_selector.py       Endpoint 生成帧窗口
-│   └── time_window_selector.py  NR/FR 时间跨度窗口
+│   ├── time_window_selector.py  NR/FR 时间跨度窗口
+│   ├── temporal_plan.py         NR 的 PTS lag/triplet/flow 规划
+│   └── full_reference_scan.py   FR 全时间线低分辨率参考扫描
 ├── metrics/
 │   ├── no_reference.py          双相位自参考与通用时序指标
 │   ├── full_reference.py        空间/时序同帧参考指标
 │   └── ...                      Endpoint 原有指标
 ├── fusion/
 │   ├── score_schema.py          Endpoint 融合
-│   └── mode_score_schemas.py    NR/FR 独立融合
+│   ├── mode_score_schemas.py    NR/FR 独立融合
+│   └── feature_registry.py      版本化特征、方向、单位与必需项
 ├── cache/                       Endpoint source 特征缓存
 ├── motion/                      RAFT/Farneback、warp、遮挡、camera
 ├── regions/                     Endpoint UI/文字/人物/细物体代理
 ├── models/                      flow/tracker/depth/VQA 后端
 ├── report/                      JSON、timeline、badcase
 ├── testing/                     合成场景与缺陷语料
-└── calibration/                 Endpoint 现有标定工具
+└── calibration/                 各模式独立验证与 Endpoint 标定工具
 ```
 
 最重要的使用原则只有一个：先确认手中的 reference 到底是“端点参考”还是“逐帧 Ground Truth”，再选择模式；不要让程序自动猜测 60+60 两条视频的语义。

@@ -80,3 +80,34 @@ def calibration_provenance(
     }
     provenance.update(_git_state())
     return provenance
+
+
+def report_provenance(
+    *,
+    mode: str,
+    score_schema: str,
+    metric_contract: str,
+    preset_contract: str,
+    feature_contract_hash: str,
+    backend_contract: dict[str, Any],
+    calibration_id: str | None = None,
+) -> dict[str, Any]:
+    """Minimal reproducibility contract embedded in every evaluation report."""
+    git = _git_state()
+    return {
+        "metric_contract": metric_contract,
+        "calibration_id": calibration_id,
+        "preset_contract": preset_contract,
+        "feature_contract_hash": feature_contract_hash,
+        "backend_contract": backend_contract,
+        "code_commit": git["commit_sha"],
+        "working_tree_dirty": git["working_tree_dirty"],
+        "tracked_diff_sha256": git["tracked_diff_sha256"],
+        "runtime_contract": {
+            "python": sys.version.split()[0],
+            "packages": _versions(),
+        },
+        "production_gate": False,
+        "mode": mode,
+        "score_schema": score_schema,
+    }

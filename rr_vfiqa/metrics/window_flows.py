@@ -24,7 +24,7 @@ class WindowFlows:
         self._cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
 
     def precompute(self, pairs: list[tuple[int, int]] | None = None) -> None:
-        """Batch-compute the directed flows the window's metrics need.
+        """Batch-compute both directions for every requested frame pair.
 
         One backend call (batched for RAFT) instead of ~14 sequential ones.
         """
@@ -32,11 +32,17 @@ class WindowFlows:
         if pairs is None:
             pairs = [(a, b) for a in range(t) for b in range(t)
                      if 0 < abs(a - b) <= 2]
+        requested = sorted({
+            (min(int(a), int(b)), max(int(a), int(b)))
+            for a, b in pairs if a != b
+        })
         todo: list[tuple[int, int, np.ndarray, np.ndarray]] = []
-        for a, b in pairs:
-            if (min(a, b), max(a, b)) in self._cache:
+        for a, b in requested:
+            cached = self._cache.get((a, b))
+            if cached is not None and cached[0] is not None and cached[1] is not None:
                 continue
             todo.append((a, b, self.bundle.rgb[a], self.bundle.rgb[b]))
+            todo.append((b, a, self.bundle.rgb[b], self.bundle.rgb[a]))
         if not todo:
             return
         flows = self.backend.flow_many([(img_a, img_b) for _, _, img_a, img_b in todo])

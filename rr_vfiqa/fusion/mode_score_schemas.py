@@ -35,24 +35,41 @@ class FeatureSpec:
 
 NR_FEATURES: dict[str, dict[str, FeatureSpec]] = {
     "temporal": {
-        "nr_mct_short_mean": FeatureSpec(30.0),
-        "nr_mct_medium_mean": FeatureSpec(45.0),
-        "nr_self_cycle_mean": FeatureSpec(35.0),
+        "nr_mct_native_mean": FeatureSpec(24.0),
+        "nr_mct_1_60_mean": FeatureSpec(30.0),
+        "nr_mct_1_30_mean": FeatureSpec(45.0),
+        "nr_common_self_cycle": FeatureSpec(35.0),
+        "nr_native_self_cycle": FeatureSpec(28.0),
         "nr_duplicate_fraction": FeatureSpec(0.20),
         "nr_freeze_fraction": FeatureSpec(0.30),
+        "nr_native_duplicate_fraction": FeatureSpec(0.15),
+        "nr_native_freeze_fraction": FeatureSpec(0.25),
     },
     "motion": {
-        "nr_self_comp_mean": FeatureSpec(0.18),
-        "nr_self_comp_phase_max": FeatureSpec(0.25),
+        "nr_common_self_comp": FeatureSpec(0.18),
+        "nr_native_self_comp": FeatureSpec(0.15),
         "nr_flow_accel_ratio": FeatureSpec(0.50),
         "nr_flow_jerk_ratio": FeatureSpec(0.75),
+        "nr_flow_fold_fraction": FeatureSpec(0.08),
+        "nr_flow_jdet_low_fraction": FeatureSpec(0.18),
+        "nr_flow_divergence_std": FeatureSpec(1.5),
+        "nr_flow_curl_std": FeatureSpec(1.5),
+        "nr_track_accel_p90": FeatureSpec(0.75),
+        "nr_track_jerk_p90": FeatureSpec(0.50),
+        "nr_track_turn_p90": FeatureSpec(1.0),
+        "nr_tile_accel_p90": FeatureSpec(0.85),
+        "nr_tile_jerk_p90": FeatureSpec(0.65),
+        "nr_local_reversal_fraction": FeatureSpec(0.20),
     },
     "phase": {
         "nr_phase_sharp_gap": FeatureSpec(0.25),
         "nr_phase_edge_gap": FeatureSpec(0.35),
+        "nr_phase_sharp_energy": FeatureSpec(0.45),
+        "nr_phase_edge_energy": FeatureSpec(0.45),
     },
     "ui_structure": {
         "nr_ui_edge_instability": FeatureSpec(0.12),
+        "nr_text_stroke_instability": FeatureSpec(0.20),
     },
     "technical": {
         "gtq_blockiness": FeatureSpec(0.60, good=1.0),
@@ -64,19 +81,36 @@ NR_FEATURES: dict[str, dict[str, FeatureSpec]] = {
 FR_FEATURES: dict[str, dict[str, FeatureSpec]] = {
     "spatial": {
         "fr_l1_y": FeatureSpec(12.0),
+        "fr_l1_rgb": FeatureSpec(12.0),
+        "fr_charbonnier_rgb": FeatureSpec(10.0),
         "fr_psnr": FeatureSpec(18.0, good=38.0, lower_is_better=False),
         "fr_ssim": FeatureSpec(0.25, good=0.98, lower_is_better=False),
-        "fr_multiscale_perceptual": FeatureSpec(0.06),
+        "fr_multiscale_luma_gradient_l1": FeatureSpec(0.06),
+        "fr_salient_roi_l1": FeatureSpec(16.0),
+        "fr_motion_roi_l1": FeatureSpec(18.0),
+        "fr_scan_y_l1": FeatureSpec(12.0),
+        "fr_scan_chroma_l1": FeatureSpec(10.0),
+        "fr_scan_gradient_l1": FeatureSpec(20.0),
+        "fr_scan_ssim_proxy_error": FeatureSpec(0.20),
     },
     "structure": {
+        "fr_edge_recall": FeatureSpec(
+            0.40, good=0.90, lower_is_better=False),
+        "fr_edge_precision": FeatureSpec(
+            0.40, good=0.90, lower_is_better=False),
         "fr_edge_f1": FeatureSpec(0.40, good=0.90, lower_is_better=False),
         "fr_edge_chamfer": FeatureSpec(4.0),
+        "fr_ui_roi_l1": FeatureSpec(12.0),
+        "fr_text_roi_edge_f1": FeatureSpec(
+            0.45, good=0.85, lower_is_better=False),
         "fr_structure_persistence_error": FeatureSpec(0.12),
+        "fr_scan_edge_mismatch": FeatureSpec(0.12),
     },
     "temporal": {
         "fr_temporal_diff_error": FeatureSpec(10.0),
         "fr_mcr_difference": FeatureSpec(10.0),
         "fr_flicker_excess": FeatureSpec(3.0),
+        "fr_scan_frame_diff_mismatch": FeatureSpec(10.0),
     },
     "motion": {
         "fr_flow_error": FeatureSpec(0.30),
@@ -122,8 +156,8 @@ CORE_CATEGORIES = {
 }
 
 SCHEMA_IDS = {
-    EvaluationMode.NO_REFERENCE: "nr-stability-risk-v1",
-    EvaluationMode.FULL_REFERENCE: "fr-same-rate-fidelity-v1",
+    EvaluationMode.NO_REFERENCE: "nr-stability-risk-v2",
+    EvaluationMode.FULL_REFERENCE: "fr-same-rate-fidelity-v2",
 }
 
 
@@ -156,6 +190,7 @@ def window_category_errors(
 def compute_mode_scores(
     mode: EvaluationMode,
     windows: list[WindowFeatures],
+    global_features: dict[str, float] | None = None,
 ) -> tuple[float, dict[str, float], dict[str, float]]:
     """Fuse using the selected mode's own features, weights, and semantics."""
     schema = _schema(mode)
@@ -163,6 +198,17 @@ def compute_mode_scores(
     for wf in windows:
         for category, error in window_category_errors(mode, wf).items():
             per_category[category].append(error)
+    if global_features:
+        for category, features in schema.items():
+            values = [
+                error
+                for key, spec in features.items()
+                if key in global_features
+                for error in [spec.error(global_features[key])]
+                if error is not None
+            ]
+            if values:
+                per_category[category].append(float(np.mean(values)))
     aggregated = {
         category: aggregate_errors(values)
         for category, values in per_category.items()

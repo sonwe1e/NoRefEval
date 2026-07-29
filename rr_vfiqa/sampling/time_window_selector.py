@@ -28,6 +28,7 @@ def select_time_windows(
     *,
     eligible_centers: np.ndarray | None = None,
     excluded_indices: np.ndarray | None = None,
+    external_risk: np.ndarray | None = None,
     half_span_seconds: float = 1.0 / 30.0,
     min_samples: int = 5,
 ) -> tuple[list[Window], np.ndarray, dict[str, np.ndarray]]:
@@ -39,6 +40,15 @@ def select_time_windows(
     """
     n = meta.n_frames
     risk, components = compute_risk(scan)
+    if external_risk is not None:
+        ext = np.asarray(external_risk, np.float64)
+        if len(ext) != len(risk):
+            raise ValueError("external_risk must match the candidate timeline")
+        finite = ext[np.isfinite(ext)]
+        scale = float(np.percentile(finite, 90)) if len(finite) else 1.0
+        normalized = np.clip(np.nan_to_num(ext) / max(scale, 1e-6), 0.0, 3.0)
+        components["reference_risk"] = normalized.astype(np.float32)
+        risk = risk + normalized
     centers = (
         np.asarray(eligible_centers, np.int32)
         if eligible_centers is not None

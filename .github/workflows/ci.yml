@@ -27,6 +27,15 @@ jobs:
           RR_VFIQA_TEST_FLOW: farneback
         run: python -m pytest tests/ -v
 
+      - name: Three-mode directional contracts
+        env:
+          RR_VFIQA_TEST_FLOW: farneback
+        run: >-
+          python -m pytest -v
+          tests/test_pipeline.py::test_bad_scores_below_good
+          tests/test_multimode.py::test_no_reference_120_native_duplicate_signal
+          tests/test_multimode.py::test_full_reference_is_separate_and_detects_same_rate_error
+
   gpu:
     # Opt-in GPU job: set repository variable RUN_GPU_CI=true and provide a
     # self-hosted CUDA runner label via GPU_RUNNER_LABEL.
@@ -46,3 +55,12 @@ jobs:
         env:
           RR_VFIQA_TEST_FLOW: raft
         run: python -m pytest tests/ -v
+
+      - name: Three-mode directional contracts (GPU)
+        env:
+          RR_VFIQA_TEST_FLOW: raft
+        run: >-
+          python -m pytest -v
+          tests/test_pipeline.py::test_bad_scores_below_good
+          tests/test_multimode.py::test_no_reference_120_native_duplicate_signal
+          tests/test_multimode.py::test_full_reference_is_separate_and_detects_same_rate_error
