@@ -141,7 +141,7 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
         d0 = np.abs(xm - xi).mean(-1)
         d1 = np.abs(xm - xj).mean(-1)
         diff01m = np.abs(xi - xj).mean(-1)
-        ch = diff01m > 12.0
+        ch = m & (diff01m > 12.0)
         n_ch = max(int(ch.sum()), 1)
 
         # Alpha-mixing evidence: M fits α·Xi + (1−α)·Xj with α strictly inside

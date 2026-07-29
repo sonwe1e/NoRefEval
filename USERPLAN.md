@@ -1,4 +1,235 @@
-# NoRefEval 完整验收结论
+# NoRefEval 当前复核结论与执行计划
+
+> 复核基线：`main@bd456e84778720ec8d4aafe0dbd3249b17f52406`
+>
+> 本节是当前有效的验收与整改基线；文末“上一轮完整验收结论”仅保留为历史记录。
+
+## 核心结论
+
+当前版本已经从“存在阻断缺陷的代码原型”提升为结构较完整、可用于内部研究和坏例筛查的评测框架，但仍未达到“可以作为真实游戏插帧模型生产门禁”的最终要求。
+
+更准确的验收判断如下：
+
+| 使用层级 | 达成度 | 当前判断 |
+| --- | ---: | --- |
+| 研究型 MVP | 75%～80% | 基本达成 |
+| 真实模型同源排序工具 | 60%～70% | 固定后端、隔离缓存时有条件可用 |
+| 绝对质量指标和生产回归门禁 | 45%～50% | 尚未达成 |
+
+README 将项目明确定位为 `research prototype / metric development framework`，并明确禁止在真实标定完成前把 `overall_score` 用作生产门禁，这与代码当前真实能力基本一致。
+
+---
+
+## 上一轮问题的闭环情况
+
+上一版最核心的数学错误和工程阻断项大部分已经得到有效修复。
+
+| 上一轮问题 | 当前状态 | 验收判断 |
+| --- | --- | --- |
+| `rr_vfiqa/cache` 被 `.gitignore` 错误忽略 | 已修复 | 源码已提交，规则改为 `/cache/` |
+| clean checkout 不可导入 | 已修复 | 已新增安装、import 和 CPU 测试 CI |
+| 核心阶段失败仍输出高分 | 基本修复 | 核心类别缺失时总分为 NaN，JSON 输出为 `null`，置信度接近零 |
+| 阶段异常被静默吞掉 | 已修复 | 报告记录 `status`、`stage_errors` 和异常样例 |
+| 颜色变换方向相反 | 已修复 | candidate→source 使用逆仿射变换 |
+| forward flow 被错误用于 backward warp | 已修复 | 已拆分 `backward_warp` 与 `forward_splat` 并增加方向单测 |
+| 双向 composition 共用同一遮挡网格 | 已修复 | 前后方向分别使用 `conf_01/occ_01` 与 `conf_10/occ_10` |
+| UI edge F-score 恒为 1 | 已修复 | 当前交叉使用另一侧距离变换并有专门测试 |
+| UI/转场双重曝光条件数学上不可能 | 已修复 | 改为逐像素最优 Alpha 混合拟合 |
+| UI regression 方向写反 | 已修复 | 只在生成状态重新靠近前状态时惩罚 |
+| 武器点在错误帧初始化 | 已修复 | 从 `X_i` 分别向前、向后跟踪后拼接 |
+| LightGBM 输出乘 100 导致饱和 | 已修复 | MOS 模式直接输出 0～100，pair 模式使用 sigmoid |
+| 所谓 pairwise 训练只是二分类回归 | 已修复 | 已实现成对排序梯度和 Hessian |
+| Audit 只是配置占位 | 部分修复 | 已选择高风险窗口并重算核心指标，但仍有 native-resolution 缺陷 |
+| 测试只覆盖 Fast 模式 | 已改善 | 新增 Standard 端到端语义分支测试和多类合成坏例 |
+| 没有性能实测 | 已改善 | 已给出 60 秒 1080p、Fast/RAFT 基准 |
+
+---
+
+## 当前阻断级问题
+
+### P0-1：源特征缓存必须区分光流与算法契约
+
+当前缓存目录只有 `cache/<video_hash>/flow_w<width>/`，元数据没有包含：
+
+- `flow_backend`；
+- RAFT 权重版本或哈希；
+- `torchvision` 版本；
+- 遮挡阈值；
+- 光流算法版本；
+- 相机运动算法版本。
+
+这会令先用 Farneback、后用 RAFT 的两次评测复用同一份源 flow，而候选窗口使用另一套光流体系，最终 composition 指标混合不同数学体系并可能改变模型排序。
+
+目标路径至少为：
+
+```text
+cache/
+  <source_hash>/
+    flow_<backend>_<weights_hash>_w<width>/
+```
+
+元数据还必须写入评测器 schema、遮挡参数和相机运动算法版本，并在契约不一致时使用新的隔离目录或拒绝旧缓存。
+
+### P0-2：`compare` 必须透传后端并正确隔离失败候选
+
+CLI 虽注册 `--flow-backend`，但当前没有把它传给 `compare_models()`；后者固定使用 `flow_backend="auto"`。因此 `rr-vfiqa compare ... --flow-backend raft` 并不保证使用 RAFT。
+
+`compare` 还必须把 `overall_score=NaN` 的候选标记为失败，禁止其污染排序、均值和 `relative_vs_mean`；只有有限有效分数参与统计。
+
+### P0-3：Audit 必须建立真实的 native-resolution 契约
+
+当前 Audit 只是候选端 native flow，加上采样后的源端 960 flow，并非完整 native core evaluation。还存在：
+
+- 相机矩阵在 960 宽图像上估计，却被当作 native-resolution matrix 使用；
+- native 网格直接套用低分辨率平移、旋转中心或 homography，造成 residual flow geometry 偏差；
+- `full_res_edges=True` 没有实际生成原生分辨率 source edges，细文字、剑尖、栅栏和细柱仍来自最近邻上采样。
+
+Audit 必须在 native 分辨率重新计算源 flow、遮挡、相机运动与源边缘，或对相机矩阵做严格的坐标共轭缩放并清楚标注降级模式。
+
+### P0-4：CoTracker Audit 路径必须可运行且可回退
+
+当前实现存在以下阻断：
+
+- `torch.hub.load_state_dict_from_url()` 返回对象而非本地 checkpoint 路径，却被转成字符串传给 `CoTrackerPredictor`；
+- 视频维度构造为 `[B,C,T,H,W]`，而官方接口需要 `[B,T,C,H,W]`；
+- `get_audit_tracker()` 只捕获 `ImportError`，checkpoint、网络和构造错误不会稳定回退 KLT；
+- native Audit 复用 960 宽 `_char_mask`，与原分辨率 OpenCV 图像尺寸不匹配；
+- Audit 重算 weapon 时必须继续显式传入已构造的 `audit_tracker`，不可无意覆盖为默认 KLT；
+- 测试必须覆盖构造异常、维度契约与回退，而不只覆盖“未安装依赖”。
+
+### P0-5：动态 UI 指标必须只在 UI mask 内计算
+
+动态 UI 分支当前使用：
+
+```python
+ch = diff01m > 12.0
+```
+
+必须改为：
+
+```python
+ch = m & (diff01m > 12.0)
+```
+
+否则 `ui_dyn_blend_frac`、`ui_dyn_out_of_range_frac` 和 `ui_dyn_regression` 会被整幅世界画面变化污染。
+
+### P0-6：局部丢帧、重复帧和时间戳漂移必须恢复或 fail-closed
+
+当前 PTS 对齐只选择一次全局 offset，之后仍固定按 `2*i+offset` 映射。候选中间一旦丢帧、重复帧或局部时间戳漂移，后续 anchor/generated 映射会整体错位。
+
+需要基于 PTS 与锚点图像距离建立局部单调匹配（如 constrained DTW、动态规划或分段 offset），并显式检测 drop/duplicate event。若无法可靠恢复，必须将该区间标记为无效并 fail-closed，不能继续输出正常质量分。
+
+### P0-7：缺陷定位评估必须使用真正的时序命中
+
+当前 recall 要求窗口与 GT segment 重叠，但 precision 只检查标签类型，没有检查时间位置；类型碰巧正确、时间位置错误的窗口也会被记为 true positive。
+
+默认 `tol_s=0.6` 对约 1.33 秒测试视频过宽。必须：
+
+- precision 同时检查标签和时间交集；
+- 使用相对片长受限的容忍区间；
+- 分别输出全部 12 类结果：blur、freeze、rotation tear、head erase、card freeze、UI drift、ghost、pole wrong motion、sword flicker、text merge、shop jump、disocclusion fill；
+- 对未运行或无样本类别明确标记 `not_evaluated`，禁止把缺失误报为通过。
+
+### P0-8：提交可复现的 calibration 证据契约
+
+Calibration JSON 必须记录：
+
+- commit SHA；
+- 操作系统、Python、关键依赖与设备；
+- flow backend、权重标识或哈希；
+- preset 与评测 schema；
+- 数据集/场景/候选生成配置；
+- 原始逐样本结果；
+- 聚合 SRCC、PLCC、pairwise accuracy 与各类定位指标。
+
+在真实 120/240 FPS 游戏数据、真实插帧模型和人工 A/B 排序进入该契约前，结果只能作为合成域证据。
+
+---
+
+## 验证体系的当前边界
+
+Synthetic interpolator ladder 的 SRCC 0.95、pairwise 0.93、同源排序 1.00 是积极证据，但仍存在同一合成渲染器、共享光流/forward-splat 范式、仅 3 个种子、候选家族较少、无真实神经插帧输出和无真实手游/RPG 编码链路等域内相关性。它能证明技术路线不是完全失效，不能证明真实模型排序同样可靠。
+
+当前坏例能力的验收判断为：
+
+| 分支 | 达成度 | 当前边界 |
+| --- | ---: | --- |
+| 背景旋转、撕裂和模糊 | 约 75% | 分支最成熟，但大旋转、高视差和 native Audit 仍受源 flow/相机尺度影响 |
+| 人物头部、腿部缺失 | 约 45% | 仍是粗前景启发式代理，无人体部件或角色实例模型 |
+| 柱子、路灯和细物体 | 约 70% | 双向半程与实例统计已有提升，但偏向 LSD 可发现的长直线 |
+| 静态 UI | 约 75% | L1、梯度、edge F-score、组件 drift 与文字拓扑较完整 |
+| 动态 UI | 约 40% | UI mask 代码错误修复前不可采信 |
+| 剑尖、剑柄和武器闪烁 | 约 40% | 普通角点、弱角色 ROI、CoTracker/Audit 路径仍不足 |
+| 卡牌和商店状态 | 约 50% | 受卡牌形态启发式与 transition changed gate 限制 |
+
+Fast/RAFT 在 RTX 4090 上评测 60 秒 1080p 约 65 秒、峰值显存约 907 MB，只能证明 Fast 粗筛基本满足效率要求。Standard、Audit、4K 和多候选缓存收益仍需要独立实测。
+
+---
+
+## 最终验收矩阵
+
+| 原始目标 | 当前结果 |
+| --- | --- |
+| 使用 60 FPS 端点评价 120 FPS 插帧 | 达成 |
+| 不依赖未知真实中间帧 | 达成 |
+| 检测旋转背景撕裂、模糊和运动错误 | 基本达成 |
+| 检测人物头、腿和身体部位缺失 | 未充分达成 |
+| 检测人物身周重影 | 部分达成 |
+| 检测柱子和细物体运动层错误 | 基本达成，限直线类目标 |
+| 检测 UI 与文字闪烁 | 静态 UI 基本达成，动态 UI 有代码错误 |
+| 检测剑尖、剑柄抖动 | 未充分达成 |
+| 检测卡牌翻转、商店状态问题 | 部分达成 |
+| 输出分类子分和置信度 | 达成 |
+| 输出最差片段和错误标签 | 达成 |
+| 输出可靠空间热图 | 未真正接入主流程 |
+| 同源模型排序 | 合成数据有效，真实数据未验证 |
+| 绝对 0～100 质量分 | 未标定，不可信 |
+| 多视频高效评测 | Fast 基本满足，Standard/Audit 未验证 |
+| 可作为生产上线门禁 | 不满足 |
+
+---
+
+## P0 执行清单
+
+- [x] 缓存 key 加入 flow backend、权重哈希和算法/schema 版本。
+- [x] `compare_models` 接收并透传 flow backend，隔离 failed/NaN 候选。
+- [x] 修复动态 UI 分支的 UI mask。
+- [x] 修复 CoTracker checkpoint、视频维度、异常回退和 Audit tracker 复用。
+- [x] Audit 重新生成 native source flow/occlusion/camera，并重建人物 ROI。
+- [x] `full_res_edges` 真正生成 native source edges。
+- [x] 实现局部 drop/duplicate 对齐；不能恢复时 fail-closed。
+- [x] 修正 detection evaluation 的 precision、时间容忍区间和 12 类输出。
+- [x] 生成可复现的 calibration JSON，包含提交、环境、后端、权重和逐样本结果。
+- [ ] 在外部真实 120/240 FPS 游戏数据、真实插帧模型与人工 A/B 数据就绪后完成真实同源排序验证。
+
+执行原则：先修复 P0 正确性与证据契约，再扩展新指标。外部真实数据相关事项是生产门禁，不允许用合成测试替代或标记完成。
+
+---
+
+## 本轮执行证据（2026-07-29）
+
+已完成前九项仓库内 P0；第十项依赖尚未提供的真实游戏 HFR、真实模型输出与人工 A/B 数据，继续保持未完成生产门禁。
+
+关键验证结果：
+
+- 完整 CPU/Farneback 测试：53 项收集，51 项通过，2 项为可选环境跳过；
+- P0 定向测试：25 项全部通过，覆盖缓存隔离、compare 失败隔离、UI mask、局部单调对齐、CoTracker 布局与异常回退；
+- Fast/Standard、场景切换、offset、drop、VFR 与 fail-closed 端到端测试：14 项全部通过；
+- Audit 冒烟：3 个高风险窗口完成 native 重算，tier-2 `w960` 与 native `w320` 源缓存契约分离，无阶段错误；未安装 CoTracker 时明确记录 KLT 降级；
+- 严格 12 类合成定位：recall `0.6667`、precision `0.2286`、F1 `0.3404`。该结果替代旧的宽容窗口高分，并如实暴露 rotation tear、head erase、pole wrong motion 与 sword flicker 等分支仍需增强；
+- 可复现证据：`docs/calibration/synthetic_detection_12class.json`，包含基线 commit、工作区状态、环境、依赖、后端算法/权重身份、数据配置和每个 fired window 的时序 true-positive 判定。
+
+本轮没有把合成域证据升级为真实模型有效性结论，也没有改变“禁止用作生产门禁”的项目定位。
+
+---
+
+## 当前允许的使用方式
+
+固定同一个 flow backend，使用已经按后端和算法契约隔离的缓存，在 Fast/Standard 模式下进行内部探索性排序和坏例筛查。`overall_score` 只用于同源相对比较，不能解释为绝对质量，也不能作为自动发布门禁。
+
+---
+
+# 上一轮完整验收结论（历史记录）
 
 **结论：当前项目尚未达到我们之前预期的“可用于真实游戏插帧模型排序与质量门禁”的状态。**
 

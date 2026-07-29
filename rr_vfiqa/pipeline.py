@@ -170,14 +170,14 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
     windows, risk, _ = select_windows(cfg, candidate.meta, alignment, cheap)
     say(f"{len(windows)} windows selected")
 
+    backend = get_flow_backend(cfg.flow_backend, cfg.device)
     pairs = sorted({w.pair for w in windows if w.pair >= 0})
-    cache = SourceCache(source, cfg)
+    cache = SourceCache(source, cfg, backend=backend)
     say(f"caching {len(pairs)} source pairs (flows/occlusion/camera)")
     cache.ensure_pairs(pairs, skip=set(int(c) for c in alignment.scene_cuts),
                        progress=lambda n, tot: say(f"source cache {n}/{tot}")
                        if tot and n % max(1, tot // 10) == 0 else None)
 
-    backend = get_flow_backend(cfg.flow_backend, cfg.device)
     ui = UIDetector(source, cfg) if p.run_region_branches else None
 
     say("tier-2 core window metrics")
@@ -238,25 +238,37 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
             _window_category_errors(wf).values(), default=0.0))
         n_audit = min(p.audit_max_windows,
                       max(1, int(round(len(ranked) * p.audit_top_fraction))))
+        audit_wfs = ranked[:n_audit]
+        audit_cache = SourceCache(
+            source, cfg, flow_width=source.meta.width, backend=backend)
+        audit_pairs = {wf.window.pair for wf in audit_wfs if wf.window.pair >= 0}
+        audit_cache.ensure_pairs(
+            audit_pairs, skip=set(int(c) for c in alignment.scene_cuts))
         say(f"tier-3 audit: re-evaluating top {n_audit} windows at native resolution")
-        for wf in ranked[:n_audit]:
+        for wf in audit_wfs:
             try:
                 nb = candidate.read_frames(wf.window.indices, width=None)
                 if nb.rgb.shape[0] < p.window_frames:
                     continue
                 nw = WindowFlows(nb, backend)
                 nw.precompute()
-                npair = cache.get_pair(wf.window.pair)
+                npair = audit_cache.get_pair(wf.window.pair)
                 for name, fn in (
                     ("composition", lambda: flow_composition_metric.compute(nw, npair, cfg)),
                     ("cycle", lambda: cycle_reconstruction.compute(nb, nw, cfg)),
                     ("temporal", lambda: temporal_compensation.compute(nb, nw, cfg)),
-                    ("edges", lambda: edge_structure.compute(nb, nw, cache, npair, cfg)),
+                    ("edges", lambda: edge_structure.compute(
+                        nb, nw, audit_cache, npair, cfg)),
                 ):
                     wf.scalars.update(fn())
                 if p.run_tracker:
+                    # Rebuild the proxy ROI at native resolution before passing
+                    # it to OpenCV/CoTracker; never reuse the tier-2 960px mask.
+                    wf.scalars.update(character_segmenter.compute_window(
+                        nb, nw, npair, cfg))
                     wf.scalars.update(weapon_tracker.compute_window(
-                        nb, nw, cfg, roi_mask=wf.scalars.get("_char_mask")))
+                        nb, nw, cfg, tracker=audit_tracker,
+                        roi_mask=wf.scalars.get("_char_mask")))
                 wf.labels["audited"] = True
             except Exception as exc:
                 wf.labels["error_audit"] = repr(exc)
@@ -288,6 +300,9 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
                                          alignment.anchor_error,
                                          valid_windows=len(valid_wfs),
                                          total_windows=len(wfs))
+    if not alignment.reliable:
+        overall = float("nan")
+        conf = min(conf, 0.01)
 
     # Optional trained calibrator (§11.4) — never overrides a fail-closed NaN.
     calibrator = maybe_load(calibrator_path or p.calibrator_path)
@@ -367,6 +382,10 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
         "stage_error_samples": error_samples,
         "preset": p.name,
         "flow_backend": getattr(backend, "name", cfg.flow_backend),
+        "source_cache": {
+            "path": str(cache.root),
+            "contract": cache.contract,
+        },
         "device": cfg.device,
         "source": {"path": source.meta.path, "fps": source.meta.fps,
                    "frames": source.meta.n_frames, "hash": source.meta.content_hash},
@@ -376,6 +395,8 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
         "alignment": {"fps_ratio": alignment.fps_ratio,
                       "first_anchor_offset": alignment.first_anchor_offset,
                       "anchor_error": round(alignment.anchor_error, 3),
+                      "reliable": alignment.reliable,
+                      "events": alignment.events,
                       "scene_cut_pairs": [int(c) for c in alignment.scene_cuts],
                       "warnings": alignment.warnings},
         "windows_evaluated": len(wfs),
@@ -412,6 +433,7 @@ def compare_models(source_video: str, candidate_videos: list[str],
                    preset: str = "standard", cache_dir: str = "./cache",
                    device: str = "cuda", out_dir: str | None = None,
                    labels: list[str] | None = None,
+                   flow_backend: str = "auto",
                    progress: ProgressFn | None = None) -> list[dict]:
     """Rank multiple interpolation models on the same source (§11.5).
 
@@ -419,18 +441,30 @@ def compare_models(source_video: str, candidate_videos: list[str],
     cost is ~T_source + N · T_candidate.
     """
     labels = labels or [Path(c).stem for c in candidate_videos]
+    if len(labels) != len(candidate_videos):
+        raise ValueError("labels must have the same length as candidate_videos")
     results = []
     for lab, cand in zip(labels, candidate_videos):
         rep = evaluate_vfi(source_video, cand, preset=preset, cache_dir=cache_dir,
-                           device=device, flow_backend="auto",
+                           device=device, flow_backend=flow_backend,
                            out_dir=str(Path(out_dir) / lab) if out_dir else None,
                            export_clips=False, progress=progress)
-        results.append({"model": lab, "overall": rep.overall_score,
+        valid = bool(np.isfinite(rep.overall_score)) and \
+            rep.meta.get("status") != "failed"
+        result_status = rep.meta.get("status", "ok") if valid else "failed"
+        results.append({"model": lab,
+                        "overall": float(rep.overall_score) if valid else None,
                         "confidence": rep.confidence, "scores": rep.scores})
-    results.sort(key=lambda r: -r["overall"])
-    mean = float(np.mean([r["overall"] for r in results])) if results else 0.0
+        results[-1]["status"] = result_status
+        results[-1]["relative_vs_mean"] = None
+    results.sort(key=lambda r: (r["status"] == "failed",
+                                -(r["overall"] if r["overall"] is not None
+                                  else float("-inf"))))
+    valid_scores = [r["overall"] for r in results if r["status"] != "failed"]
+    mean = float(np.mean(valid_scores)) if valid_scores else None
     for r in results:
-        r["relative_vs_mean"] = round(r["overall"] - mean, 2)
+        if r["status"] != "failed" and mean is not None:
+            r["relative_vs_mean"] = round(r["overall"] - mean, 2)
     if out_dir:
         import json
         Path(out_dir).mkdir(parents=True, exist_ok=True)

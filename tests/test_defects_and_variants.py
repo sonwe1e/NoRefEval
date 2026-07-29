@@ -101,6 +101,8 @@ def test_dropped_frames_survive(videos, cache_dir, flow_backend, tmp_path):
     rep = _eval(videos["source"], dropped, cache_dir + "/drop", flow_backend)
     assert rep.meta["status"] in ("ok", "degraded")
     assert rep.confidence > 0
+    assert rep.meta["alignment"]["reliable"]
+    assert rep.meta["alignment"]["events"]
 
 
 def test_vfr_candidate_survives(videos, cache_dir, flow_backend, tmp_path):

@@ -20,6 +20,7 @@ import numpy as np
 
 from ..pipeline import evaluate_vfi
 from .pseudo_gt import build_severity_corpus
+from .provenance import calibration_provenance
 
 
 def srcc(x: np.ndarray, y: np.ndarray) -> float:
@@ -75,6 +76,10 @@ def run_synthetic_validation(workdir: str | Path, preset: str = "fast",
     scores = np.array([r["overall"] for r in rows])
     quality = np.array([r["fr_psnr"] for r in rows])
     summary = {
+        "provenance": calibration_provenance(
+            "synthetic_severity_ladder", preset=preset,
+            flow_backend=flow_backend, device=device,
+            dataset={"levels": levels, "generator": "build_severity_corpus"}),
         "rows": rows,
         "srcc_overall_vs_psnr": round(srcc(scores, quality), 4),
         "plcc_overall_vs_psnr": round(plcc(scores, quality), 4),
@@ -92,6 +97,8 @@ def main() -> int:
     ap.add_argument("--flow-backend", default="farneback")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--levels", type=int, default=6)
+    ap.add_argument("--output", default=None,
+                    help="write the complete reproducible JSON artifact")
     args = ap.parse_args()
     if not args.synthetic:
         ap.error("currently only --synthetic is implemented; real corpora "
@@ -99,6 +106,10 @@ def main() -> int:
     out = run_synthetic_validation(args.workdir, preset=args.preset,
                                    flow_backend=args.flow_backend,
                                    device=args.device, levels=args.levels)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(
+            json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(out, indent=2, ensure_ascii=False))
     print(f"\nSRCC={out['srcc_overall_vs_psnr']}  PLCC={out['plcc_overall_vs_psnr']}"
           f"  pairwise={out['pairwise_accuracy']}")

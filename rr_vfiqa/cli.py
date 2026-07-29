@@ -57,12 +57,15 @@ def main(argv: list[str] | None = None) -> int:
         results = compare_models(
             args.source, args.candidates, preset=args.preset,
             cache_dir=args.cache_dir, device=args.device, out_dir=args.out,
-            labels=args.labels, progress=progress)
+            labels=args.labels, flow_backend=args.flow_backend, progress=progress)
         print(f"{'rank':<5}{'model':<28}{'overall':>9}{'relative':>10}{'conf':>7}")
         for i, r in enumerate(results, 1):
-            print(f"{i:<5}{r['model']:<28}{r['overall']:>9.2f}"
-                  f"{r['relative_vs_mean']:>10.2f}{r['confidence']:>7.2f}")
-        return 0
+            overall = f"{r['overall']:.2f}" if r["overall"] is not None else "FAILED"
+            relative = (f"{r['relative_vs_mean']:.2f}"
+                        if r["relative_vs_mean"] is not None else "—")
+            print(f"{i:<5}{r['model']:<28}{overall:>9}"
+                  f"{relative:>10}{r['confidence']:>7.2f}")
+        return 1 if any(r["status"] == "failed" for r in results) else 0
 
     return 2
 

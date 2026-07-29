@@ -29,8 +29,9 @@ report declares which branches are heuristic proxies (`meta.proxy_branches`).
 - **fail-closed**: core-metric failure yields `overall_score: null`,
   near-zero confidence and `meta.status: "failed"` — never a falsely good
   number; stage exceptions are recorded in `meta.stage_errors`;
-- reliable *same-source ranking* across multiple interpolation models
-  (source features cached once: cost is `T_source + N · T_candidate`).
+- exploratory *same-source ranking* across multiple interpolation models;
+  synthetic ladders validate the mechanism, while real-model ranking remains
+  unvalidated. Source features are cached once (`T_source + N · T_candidate`).
 
 ## Core metrics
 
@@ -76,8 +77,13 @@ CLI:
 
 ```bash
 rr-vfiqa evaluate --source src.mp4 --candidate cand.mp4 --preset standard --out run1/
-rr-vfiqa compare  --source src.mp4 --candidates a.mp4 b.mp4 c.mp4 --out cmp/
+rr-vfiqa compare  --source src.mp4 --candidates a.mp4 b.mp4 c.mp4 \
+    --flow-backend raft --out cmp/
 ```
+
+`compare` passes the requested flow backend to every candidate. Failed/NaN
+candidates are marked `failed`, sorted after valid candidates, and excluded
+from the mean and `relative_vs_mean`.
 
 ### Presets (three-tier cascade)
 
@@ -89,7 +95,15 @@ rr-vfiqa compare  --source src.mp4 --candidates a.mp4 b.mp4 c.mp4 --out cmp/
 
 Tier 3 is real: `audit_top_fraction` / `audit_max_windows` select the
 highest-risk windows after tier 2 and re-run core metrics at native
-resolution; `meta.audited_windows` reports the count.
+resolution. Candidate flow, source flow/occlusion/camera, endpoint edges and
+the character ROI are all regenerated on the native grid; the selected
+CoTracker/KLT backend is reused for weapon tracking. `meta.audited_windows`
+reports the count.
+
+Source caches are isolated by resolved backend (including `auto` fallback),
+weight identifier/hash, evaluator schema, flow width, occlusion threshold,
+camera algorithm and edge algorithm. The full contract and cache path are
+recorded in `meta.source_cache`; Farneback and RAFT data cannot be mixed.
 
 ## Calibration & benchmarks
 
@@ -105,7 +119,8 @@ python -m rr_vfiqa.calibration.model_validation --workdir mv_run --interp-backen
 
 # per-defect-category localization: recall / precision / F1 of worst-window
 # labels against ground-truth defect segments
-python -m rr_vfiqa.calibration.detection_eval --workdir det_run
+python -m rr_vfiqa.calibration.detection_eval --workdir det_run \
+    --output det_run/calibration.json
 python -m rr_vfiqa.calibration.detection_eval --defects blur ghost freeze \
     rotation_tear head_erase pole_wrong_motion sword_flicker ui_drift \
     text_merge shop_jump card_freeze disocc_fill
@@ -121,8 +136,15 @@ Bootstrap numbers (RTX 4090):
 | model ranking vs FR-PSNR (interpolators × 3 seeds) | SRCC 0.95, pairwise 0.93, **same-source ranking 1.00** |
 | strongest FR correlates | motion-compensated temporals (|SRCC| 0.97–0.99), cycle (0.95), composition (0.83) |
 | severity ladder vs FR-PSNR | PLCC 0.96, SRCC 0.7, pairwise 0.8 |
-| defect localization (6 types, standard preset) | recall 1.0, F1 0.67 |
+| defect localization (12 types, strict temporal overlap, standard/Farneback) | recall 0.667, precision 0.229, F1 0.340 — [raw JSON](docs/calibration/synthetic_detection_12class.json) |
 | 60 s 1080p, fast/RAFT | 64.6–65.5 s/candidate, 907 MB VRAM — see `docs/BENCHMARKS.md` |
+
+The strict localization result replaces the earlier inflated 6-type
+recall 1.0 / F1 0.67 claim: the old ±0.6 s tolerance covered most of a
+1.33 s clip, and precision did not require temporal overlap. The current
+artifact evaluates all 12 classes, caps tolerance at 10% of clip duration,
+and preserves every fired window with its true-positive decision. Its low
+precision is a real remaining research gap, not a passing production metric.
 
 The interpolator ladder (`rr_vfiqa.testing.interpolator`) closes the §12.1
 pseudo-GT loop with emergent rather than authored artifacts: ranking
@@ -140,14 +162,16 @@ recall ≥ 90%) still require the §P3 data:
 
 ## Testing
 
-46 tests, green on both flow backends:
+53 tests (51 pass, 2 optional-environment skips in the CPU environment):
 
 ```bash
 python -m pytest                            # Farneback (CPU-portable)
 RR_VFIQA_TEST_FLOW=raft python -m pytest    # RAFT (GPU)
 ```
 
-Coverage includes deterministic warp-convention math tests, per-defect
+Coverage includes deterministic warp-convention math tests, backend/weight
+cache isolation, compare failure quarantine, dynamic-UI mask containment,
+local drop/duplicate recovery, CoTracker layout/fallback, per-defect
 response tests over a 12-type synthetic defect corpus (blur, ghost, freeze,
 rotation tear, head erasure, pole misattribution, sword flicker, UI drift,
 text merging, shop double-exposure, disocclusion fill, card freeze), scene

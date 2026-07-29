@@ -206,6 +206,28 @@ def test_audit_tracker_degrades_to_klt():
     assert abs(tracks[-1, 0, 0] - 46) < 4
 
 
+def test_cotracker_video_layout_is_btchw():
+    from rr_vfiqa.models.tracker_backend import _cotracker_video_array
+
+    frames = [np.full((12, 20), t, np.uint8) for t in range(5)]
+    video = _cotracker_video_array(frames)
+    assert video.shape == (1, 5, 3, 12, 20)
+    assert np.all(video[0, 3] == 3)
+
+
+def test_audit_tracker_falls_back_on_constructor_error(monkeypatch):
+    import rr_vfiqa.models.tracker_backend as tracker_backend
+
+    class BrokenCoTracker:
+        def __init__(self, **_):
+            raise RuntimeError("checkpoint unavailable")
+
+    monkeypatch.setattr(tracker_backend, "CoTrackerBackend", BrokenCoTracker)
+    backend, note = tracker_backend.get_audit_tracker(device="cpu")
+    assert isinstance(backend, tracker_backend.KLTTracker)
+    assert "RuntimeError" in note and "fell back" in note
+
+
 def test_alpha_blend_fit():
     """Optimal-α fit: a real 50/50 mix is detected; hard switches and novel
     content are not (§3.5)."""

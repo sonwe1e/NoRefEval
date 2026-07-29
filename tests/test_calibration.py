@@ -72,7 +72,29 @@ def test_defect_localization_recall(tmp_path, flow_backend):
                                                 "ui_drift"],
                              preset="standard", flow_backend=flow_backend,
                              device="cuda")
-    assert out["recall"] >= 0.8        # at most one missed category
-    assert out["f1"] >= 0.5
+    # This is now a strict time-localized metric (the old ±0.6 s tolerance
+    # covered most of this 1.33 s clip and inflated recall/F1). The harness
+    # contract, not a production claim, is what this synthetic test protects.
+    assert out["recall"] >= 0.5
+    assert out["f1"] > 0
     assert out["per_defect"]["freeze"]["detected"]       # direct copy check
     assert out["per_defect"]["card_freeze"]["detected"]  # flip progression
+    assert len(out["per_defect"]) == 12
+    assert out["per_defect"]["ghost"]["status"] == "not_evaluated"
+    assert out["provenance"]["commit_sha"]
+
+
+def test_detection_precision_requires_temporal_overlap():
+    from types import SimpleNamespace
+    from rr_vfiqa.calibration.detection_eval import _is_temporal_typed_hit
+
+    expected = {"character_missing"}
+    wrong_time = SimpleNamespace(
+        start=1.0, end=1.1, types=["character_missing"])
+    wrong_type = SimpleNamespace(
+        start=0.2, end=0.3, types=["ui_unstable"])
+    true_hit = SimpleNamespace(
+        start=0.2, end=0.3, types=["character_missing"])
+    assert not _is_temporal_typed_hit(wrong_time, 0.1, 0.4, expected)
+    assert not _is_temporal_typed_hit(wrong_type, 0.1, 0.4, expected)
+    assert _is_temporal_typed_hit(true_hit, 0.1, 0.4, expected)

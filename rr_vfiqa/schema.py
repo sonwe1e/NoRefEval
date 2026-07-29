@@ -54,6 +54,8 @@ class Alignment:
     anchor_error: float = 0.0           # measured anchor mismatch baseline (Y L1)
     scene_cuts: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int32))
     warnings: list[str] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
+    reliable: bool = True
 
     def generated_centers(self) -> np.ndarray:
         """Candidate indices of generated frames M_i (odd positions)."""

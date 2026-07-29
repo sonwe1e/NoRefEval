@@ -28,6 +28,7 @@ from ..pipeline import evaluate_vfi
 from ..testing.interpolator import make_ladder
 from ..testing.synth import (make_source_and_truth, render_scene, write_video)
 from .pseudo_gt import full_reference_quality
+from .provenance import calibration_provenance
 from .validate import pairwise_accuracy, plcc, srcc
 
 
@@ -84,6 +85,15 @@ def run_model_validation(workdir: str | Path, seeds: tuple[int, ...] = (7, 21, 4
     top_features = sorted(feat_corr.items(), key=lambda kv: -kv[1])[:15]
 
     return {
+        "provenance": calibration_provenance(
+            "synthetic_model_ranking", preset=eval_preset,
+            flow_backend=eval_backend, device=device,
+            dataset={
+                "seeds": list(seeds), "n_frames": n_frames,
+                "width": w, "height": h,
+                "interpolator_backend": interp_backend,
+                "interpolator_widths": list(widths),
+            }),
         "rows": rows,
         "srcc": round(float(srcc(psnr, overall)), 4),
         "plcc": round(float(plcc(psnr, overall)), 4),
@@ -120,10 +130,16 @@ def main() -> int:
     ap.add_argument("--interp-backend", default="auto")
     ap.add_argument("--eval-backend", default="farneback")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--output", default=None,
+                    help="write the complete reproducible JSON artifact")
     args = ap.parse_args()
     out = run_model_validation(args.workdir, seeds=tuple(args.seeds),
                                interp_backend=args.interp_backend,
                                eval_backend=args.eval_backend, device=args.device)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(
+            json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(out, indent=2, ensure_ascii=False))
     print(f"\nSRCC={out['srcc']}  PLCC={out['plcc']}  "
           f"pairwise={out['pairwise_accuracy']}  "

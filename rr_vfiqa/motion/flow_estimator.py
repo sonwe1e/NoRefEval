@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
+from hashlib import sha256
 
 import cv2
 import numpy as np
+
+FLOW_ALGORITHM_VERSION = "flow-contract-v2"
 
 
 class FlowBackend(ABC):
@@ -35,6 +38,15 @@ class FlowBackend(ABC):
     def release(self) -> None:
         pass
 
+    def cache_identity(self) -> dict[str, str]:
+        """Stable identity for source-cache isolation and report provenance."""
+        return {
+            "backend": self.name,
+            "algorithm_version": FLOW_ALGORITHM_VERSION,
+            "weights_id": "none",
+            "weights_hash": "none",
+        }
+
 
 class FarnebackBackend(FlowBackend):
     name = "farneback"
@@ -50,18 +62,31 @@ class FarnebackBackend(FlowBackend):
         f = cv2.calcOpticalFlowFarneback(ga, gb, None, **self._kw)
         return f.astype(np.float32)
 
+    def cache_identity(self) -> dict[str, str]:
+        params = ",".join(f"{k}={self._kw[k]}" for k in sorted(self._kw))
+        return {
+            "backend": self.name,
+            "algorithm_version": f"{FLOW_ALGORITHM_VERSION}:opencv-{cv2.__version__}",
+            "weights_id": "farneback-params",
+            "weights_hash": sha256(params.encode("utf-8")).hexdigest()[:12],
+        }
+
 
 class RaftBackend(FlowBackend):
     name = "raft"
 
     def __init__(self, device: str = "cuda"):
         import torch
+        import torchvision
         from torchvision.models.optical_flow import raft_small, Raft_Small_Weights
 
         self._torch = torch
         self.device = torch.device(device if torch.cuda.is_available() or device == "cpu"
                                    else "cpu")
         weights = Raft_Small_Weights.DEFAULT
+        self._weights_id = f"Raft_Small_Weights.{weights.name}"
+        self._weights_url = str(weights.url)
+        self._torchvision_version = str(torchvision.__version__)
         self._transforms = weights.transforms()
         self._model = raft_small(weights=weights).to(self.device).eval()
 
@@ -102,6 +127,26 @@ class RaftBackend(FlowBackend):
         del self._model
         if self._torch.cuda.is_available():
             self._torch.cuda.empty_cache()
+
+    def cache_identity(self) -> dict[str, str]:
+        # torchvision checkpoint filenames carry the published short SHA
+        # (e.g. ``...-01064c6d.pth``). Hash the full immutable URL as a
+        # deterministic fallback so differently published weights never share
+        # a source-flow cache.
+        filename = self._weights_url.rsplit("/", 1)[-1]
+        stem = filename.rsplit(".", 1)[0]
+        short_sha = stem.rsplit("-", 1)[-1]
+        if len(short_sha) < 8:
+            short_sha = sha256(self._weights_url.encode("utf-8")).hexdigest()[:12]
+        return {
+            "backend": self.name,
+            "algorithm_version": (
+                f"{FLOW_ALGORITHM_VERSION}:torchvision-{self._torchvision_version}"
+            ),
+            "weights_id": self._weights_id,
+            "weights_hash": short_sha,
+            "weights_url": self._weights_url,
+        }
 
 
 _backends: dict[str, FlowBackend] = {}
