@@ -1,8 +1,47 @@
-"""Evaluation presets (USERPLAN.md §10) and global configuration."""
+"""Evaluation presets and mode-aware global configuration."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
+
+
+class EvaluationMode(str, Enum):
+    """Mathematically distinct evaluation contracts.
+
+    The string values are the public CLI/API spellings.  Keeping them in one
+    enum prevents a silent fallback to endpoint assumptions when an input is
+    actually no-reference or same-rate full-reference.
+    """
+
+    NO_REFERENCE = "no-reference"
+    ENDPOINT_2X = "endpoint-2x"
+    FULL_REFERENCE = "full-reference"
+
+
+MODE_ALIASES = {
+    "no_reference": EvaluationMode.NO_REFERENCE,
+    "nr": EvaluationMode.NO_REFERENCE,
+    "endpoint": EvaluationMode.ENDPOINT_2X,
+    "endpoint_reference": EvaluationMode.ENDPOINT_2X,
+    "endpoint-reference": EvaluationMode.ENDPOINT_2X,
+    "full_reference": EvaluationMode.FULL_REFERENCE,
+    "fr": EvaluationMode.FULL_REFERENCE,
+}
+
+
+def parse_mode(value: str | EvaluationMode) -> EvaluationMode:
+    if isinstance(value, EvaluationMode):
+        return value
+    normalized = value.strip().lower()
+    try:
+        return EvaluationMode(normalized)
+    except ValueError:
+        try:
+            return MODE_ALIASES[normalized]
+        except KeyError as exc:
+            choices = ", ".join(m.value for m in EvaluationMode)
+            raise ValueError(f"unknown evaluation mode {value!r}; choose from {choices}") from exc
 
 
 @dataclass(frozen=True)
@@ -77,8 +116,9 @@ PRESETS: dict[str, Preset] = {"fast": FAST, "standard": STANDARD, "audit": AUDIT
 
 @dataclass
 class EvalConfig:
-    source_video: str
+    source_video: str | None
     candidate_video: str
+    mode: EvaluationMode = EvaluationMode.ENDPOINT_2X
     preset: Preset = STANDARD
     cache_dir: str = "./cache"
     device: str = "cuda"                  # "cuda" | "cpu" | "npu"
@@ -95,12 +135,45 @@ class EvalConfig:
     @classmethod
     def build(cls, source_video: str, candidate_video: str, preset: str = "standard",
               **overrides) -> "EvalConfig":
+        """Backward-compatible endpoint-2x configuration builder."""
+        return cls.build_mode(
+            candidate_video=candidate_video,
+            reference_video=source_video,
+            mode=EvaluationMode.ENDPOINT_2X,
+            preset=preset,
+            **overrides,
+        )
+
+    @classmethod
+    def build_mode(
+        cls,
+        candidate_video: str,
+        reference_video: str | None = None,
+        mode: str | EvaluationMode = EvaluationMode.NO_REFERENCE,
+        preset: str = "standard",
+        **overrides,
+    ) -> "EvalConfig":
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
-        cfg = cls(source_video=source_video, candidate_video=candidate_video,
-                  preset=PRESETS[preset])
+        parsed_mode = parse_mode(mode)
+        if parsed_mode is EvaluationMode.NO_REFERENCE:
+            if reference_video is not None:
+                raise ValueError("no-reference mode does not accept a reference video")
+        elif not reference_video:
+            raise ValueError(f"{parsed_mode.value} mode requires a reference video")
+        cfg = cls(
+            source_video=reference_video,
+            candidate_video=candidate_video,
+            mode=parsed_mode,
+            preset=PRESETS[preset],
+        )
         for k, v in overrides.items():
             if not hasattr(cfg, k):
                 raise ValueError(f"unknown config override {k!r}")
             setattr(cfg, k, v)
         return cfg
+
+    @property
+    def reference_video(self) -> str | None:
+        """Preferred public name; ``source_video`` remains for old callers."""
+        return self.source_video

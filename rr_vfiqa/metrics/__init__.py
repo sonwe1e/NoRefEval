@@ -6,5 +6,7 @@ from . import global_technical_quality
 __all__ = [
     "WindowFlows", "anchor_integrity", "flow_composition_metric",
     "cycle_reconstruction", "temporal_compensation", "parity_frequency",
-    "edge_structure", "global_technical_quality",
+    "edge_structure", "global_technical_quality", "full_reference",
+    "no_reference",
 ]
+from . import full_reference, no_reference

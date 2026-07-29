@@ -1,9 +1,4 @@
-"""Shared data contracts for rr_vfiqa.
-
-Notation (see USERPLAN.md §1):
-    source video  X_0 .. X_N        (60 FPS anchors)
-    candidate     Y_{2i} = X_i      (even frames should be the original anchors)
-                  Y_{2i+1} = M_i    (odd frames are the interpolated frames)
+"""Shared data contracts for all rr_vfiqa evaluation modes.
 
 All spatial arrays are stored at a documented resolution. Flow arrays are
 (H, W, 2) float32 with (dx, dy) in pixel units *at that resolution*.
@@ -60,6 +55,24 @@ class Alignment:
     def generated_centers(self) -> np.ndarray:
         """Candidate indices of generated frames M_i (odd positions)."""
         return np.nonzero(self.pair_of_candidate >= 0)[0].astype(np.int32)
+
+
+@dataclass
+class FullReferenceAlignment:
+    """One-to-one mapping for same-rate full-reference evaluation."""
+
+    reference_of_candidate: np.ndarray
+    candidate_of_reference: np.ndarray
+    fps_ratio: float
+    matched_fraction: float
+    image_error: float = 0.0
+    scene_cuts: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int32))
+    warnings: list[str] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
+    reliable: bool = True
+
+    def matched_centers(self) -> np.ndarray:
+        return np.nonzero(self.reference_of_candidate >= 0)[0].astype(np.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +154,11 @@ class CameraMotion:
 
 @dataclass
 class Window:
-    """A 5-frame evaluation window on the candidate timeline."""
+    """An evaluation window on the candidate timeline.
+
+    Endpoint mode normally uses five adjacent frames.  NR/FR modes select by
+    PTS and may contain more samples at 120 FPS for the same wall-clock span.
+    """
 
     center: int                     # candidate frame index (usually odd = generated)
     indices: np.ndarray             # (T,) int32 candidate frame indices
@@ -152,7 +169,7 @@ class Window:
 
     @property
     def start_time(self) -> float:
-        return self.indices[0] / 120.0  # replaced with real pts by selector
+        return float("nan")  # use sampling.window_selector.window_times
 
     def __repr__(self) -> str:
         return f"Window(center={self.center}, pair={self.pair}, src={self.source}, risk={self.risk:.2f})"

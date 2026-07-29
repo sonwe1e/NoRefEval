@@ -9,4 +9,12 @@ __all__ = [
     "CATEGORY_FEATURES", "CATEGORY_TO_SUBSCORE",
     "build_category_errors", "compute_scores", "aggregate_errors",
     "compute_confidence", "MonotonicCalibrator", "maybe_load",
+    "SCHEMA_IDS", "compute_mode_confidence", "compute_mode_scores",
+    "window_category_errors",
 ]
+from .mode_score_schemas import (
+    SCHEMA_IDS,
+    compute_mode_confidence,
+    compute_mode_scores,
+    window_category_errors,
+)

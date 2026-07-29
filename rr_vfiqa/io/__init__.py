@@ -3,4 +3,6 @@ from .timestamp_alignment import build_alignment, detect_scene_cuts
 from .color_normalization import ColorTransform, estimate_color_transform
 
 __all__ = ["VideoReader", "build_alignment", "detect_scene_cuts",
-           "ColorTransform", "estimate_color_transform"]
+           "ColorTransform", "estimate_color_transform",
+           "build_full_reference_alignment"]
+from .full_reference_alignment import build_full_reference_alignment

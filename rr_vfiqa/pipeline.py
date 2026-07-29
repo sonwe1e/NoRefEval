@@ -132,25 +132,32 @@ def _classify_window(wf: WindowFeatures, conf_base: float) -> WorstWindow | None
 # main entry
 # ---------------------------------------------------------------------------
 
-def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standard",
-                 cache_dir: str = "./cache", device: str = "cuda",
-                 out_dir: str | None = None, flow_backend: str = "auto",
-                 export_clips: bool = True, calibrator_path: str | None = None,
-                 progress: ProgressFn | None = None) -> Report:
-    """Full endpoint-referenced VFI quality evaluation (§13 interface)."""
+def evaluate_endpoint_reference(
+    reference_video: str,
+    candidate_video: str,
+    preset: str = "standard",
+    cache_dir: str = "./cache",
+    device: str = "cuda",
+    out_dir: str | None = None,
+    flow_backend: str = "auto",
+    export_clips: bool = True,
+    calibrator_path: str | None = None,
+    progress: ProgressFn | None = None,
+) -> Report:
+    """Evaluate a 2× candidate against its endpoint/reduced reference."""
     t_start = time.perf_counter()
 
     def say(msg: str) -> None:
         if progress:
             progress(msg)
 
-    cfg = EvalConfig.build(source_video, candidate_video, preset,
+    cfg = EvalConfig.build(reference_video, candidate_video, preset,
                            cache_dir=cache_dir, device=device,
                            flow_backend=flow_backend)
     p = cfg.preset
 
     say("opening videos")
-    source = VideoReader(source_video)
+    source = VideoReader(reference_video)
     candidate = VideoReader(candidate_video)
 
     say("tier-1 cheap full-frame scan")
@@ -373,6 +380,13 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
                           for k, v in proxy_branches.items()}
 
     meta = {
+        "mode": "endpoint-2x",
+        "score_schema": "endpoint-reduced-reference-v1",
+        "score_semantics": "endpoint-referenced interpolation quality",
+        "limitations": [
+            "Source frames constrain endpoints but are not ground-truth intermediate frames.",
+            "The formula score requires real-data calibration before production gating.",
+        ],
         "status": status,
         "valid_windows": len(valid_wfs),
         "audited_windows": n_audit,
@@ -423,10 +437,29 @@ def evaluate_vfi(source_video: str, candidate_video: str, preset: str = "standar
         render_timeline_png(wfs, candidate.meta, report, out / "timeline.png")
         if export_clips and worst:
             export_badcase_clips(candidate_video, worst, out / "badcases",
-                                 out_fps=source.meta.fps * 2)
+                                 out_fps=candidate.meta.fps)
         say(f"reports written to {out}")
 
     return report
+
+
+def evaluate_vfi(
+    source_video: str,
+    candidate_video: str,
+    preset: str = "standard",
+    **kwargs,
+) -> Report:
+    """Backward-compatible name for :func:`evaluate_endpoint_reference`.
+
+    New integrations should call ``evaluate(..., mode="endpoint-2x")`` or the
+    explicit executor so the mathematical contract is visible at the callsite.
+    """
+    return evaluate_endpoint_reference(
+        source_video,
+        candidate_video,
+        preset=preset,
+        **kwargs,
+    )
 
 
 def compare_models(source_video: str, candidate_videos: list[str],

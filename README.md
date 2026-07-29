@@ -1,210 +1,324 @@
-# rr_vfiqa — Endpoint-Referenced VFI Quality Assessment
+# rr_vfiqa — 多模式视频插帧质量评测
 
-Quality evaluation for **60 → 120 FPS game frame interpolation**. True 120 FPS
-ground truth does not exist, but the original 60 FPS frames are reliable
-anchors, so this is *endpoint-referenced / reduced-reference* assessment
-(see `USERPLAN.md` for the technical route and the acceptance review):
+`rr_vfiqa` 是面向游戏视频插帧的研究型评测框架。项目现在明确区分三种数学条件不同的评测模式，不会再把任意输入都套入 60→120 FPS 的奇偶帧假设。
 
-> A generated frame is judged by whether it can be explained by both endpoint
-> frames, lies on a plausible motion trajectory, and introduces no flicker,
-> tearing, ghosting or structural loss — not by guessing a unique ground truth.
+| 模式 | 输入 | 输出含义 | 可信度定位 |
+|---|---|---|---|
+| `no-reference` | 单条 60 或 120 FPS 视频 | 时序稳定性与伪影风险 | 最低，不代表真实插帧误差 |
+| `endpoint-2x` | 60 FPS 端点参考 + 120 FPS 候选 | 端点约束下的插帧质量 | 中等，是原有成熟内核 |
+| `full-reference` | 逐帧对应的 60 FPS GT + 60 FPS 候选 | 同帧空间与时序保真度 | 最高 |
 
-**Status: research prototype / metric development framework.** The architecture,
-coordinate math, fail-closed scoring, defect corpus, and calibration harness
-are in place and tested; absolute score calibration requires the real-data
-corpora from USERPLAN §P3 (real HFR pseudo-GT + human A/B rankings). Do not
-use `overall_score` as a production gate until that calibration exists. The
-report declares which branches are heuristic proxies (`meta.proxy_branches`).
+三种模式具有独立的输入契约、特征集合、融合权重、子分数和 `score_schema`。不同模式的 `overall_score` 不在同一标尺上，禁止跨模式直接排序。
 
-## What it produces
+> 当前状态仍是 research prototype / metric development framework。三种模式都使用未完成真实数据标定的公式融合，不能仅凭 `overall_score` 作为生产上线门禁。
 
-- one overall quality score (0–100) + judgment confidence + event ambiguity;
-- eight interpretable subscores: motion consistency, temporal stability,
-  structural integrity, character integrity, thin-object/weapon, UI/text,
-  transition quality, global technical quality;
-- worst time segments with defect-type labels (`background_tear`,
-  `parity_flicker`, `character_missing`, `thin_object_stick`, `weapon_jitter`,
-  `ui_unstable`, `text_degraded`, `transition_ghost`, `card_flip_error`, …)
-  and region boxes;
-- **fail-closed**: core-metric failure yields `overall_score: null`,
-  near-zero confidence and `meta.status: "failed"` — never a falsely good
-  number; stage exceptions are recorded in `meta.stage_errors`;
-- exploratory *same-source ranking* across multiple interpolation models;
-  synthetic ladders validate the mechanism, while real-model ranking remains
-  unvalidated. Source features are cached once (`T_source + N · T_candidate`).
+---
 
-## Core metrics
-
-| Metric | Detects |
-|---|---|
-| Endpoint flow composition, bidirectional with grid-correct occlusion weights | tearing, layer misassignment, wrong motion paths |
-| Reverse anchor cycle (independent forward-splat reconstructor) | inter-frame inconsistency, systematic odd-frame blur |
-| Motion-compensated temporal residuals (5-frame windows, lag 1/2) | drag, shimmer, edge wobble |
-| Odd/even parity & temporal frequency | generated-frame blur/sharpen/brightness alternation |
-| Endpoint edge support (forward-splatted, per-instance aggregation) | missing structure, ghost contours |
-| UI (static/dynamic, component-level, α-blend fitting), text stroke topology | HUD blur/drift, crossfade ghosts, stroke merging |
-| Card flip area progression, transition state analysis | frozen flips, double-exposure switches |
-| Thin-object layer attribution (bidirectional, width-gated instances) | poles/railings following the background |
-| Character proxy (motion segmentation, mask → weapon KLT) | missing area, copy-like mids — *proxy, see meta* |
-
-Warp semantics are explicit throughout: `backward_warp(img, target→source flow)`
-vs `forward_splat(img, source→target flow)` — no ambiguous warp calls.
-
-## Install
+## 安装
 
 ```bash
-pip install -e .            # core (numpy, opencv-headless, scipy, PyAV)
-pip install -e ".[torch]"   # RAFT flow backend (recommended, GPU)
-pip install -e ".[fusion]"  # LightGBM monotonic calibrator
+pip install -e .            # NumPy、OpenCV、SciPy、PyAV
+pip install -e ".[torch]"   # RAFT 光流，推荐 GPU 环境使用
+pip install -e ".[fusion]"  # Endpoint 模式的 LightGBM 校准器
+pip install -e ".[vqa]"     # NR 模式的可选 pyIQA/NIQE 弱先验
 pip install -e ".[dev]"     # pytest
 ```
 
-## Usage
+未安装 `vqa` 可选依赖时，`--vqa-backend auto` 会明确记录弱先验不可用，并从融合中移除该项；它不会用“满分”填补缺失特征。
+
+---
+
+## 快速使用
+
+推荐使用统一的显式入口：
 
 ```python
-from rr_vfiqa import evaluate_vfi
+from rr_vfiqa import evaluate
 
-report = evaluate_vfi(
-    source_video="source_60fps.mp4",
-    candidate_video="candidate_120fps.mp4",
-    preset="standard",          # fast | standard | audit
-    cache_dir="./cache",
-    device="cuda",              # cuda | cpu
+# 单视频无参考：60/120 FPS
+nr_report = evaluate(
+    candidate_video="video_120.mp4",
+    mode="no-reference",
+    preset="standard",
+)
+
+# 60→120 端点参考
+endpoint_report = evaluate(
+    reference_video="source_60.mp4",
+    candidate_video="output_120.mp4",
+    mode="endpoint-2x",
+    preset="standard",
+)
+
+# 60→60 同帧完整参考
+fr_report = evaluate(
+    reference_video="ground_truth_60.mp4",
+    candidate_video="output_60.mp4",
+    mode="full-reference",
+    preset="standard",
 )
 ```
 
-CLI:
-
-```bash
-rr-vfiqa evaluate --source src.mp4 --candidate cand.mp4 --preset standard --out run1/
-rr-vfiqa compare  --source src.mp4 --candidates a.mp4 b.mp4 c.mp4 \
-    --flow-backend raft --out cmp/
-```
-
-`compare` passes the requested flow backend to every candidate. Failed/NaN
-candidates are marked `failed`, sorted after valid candidates, and excluded
-from the mean and `relative_vs_mean`.
-
-### Presets (three-tier cascade)
-
-| | scan | windows | flow | region branches | tier-3 escalation |
-|---|---|---|---|---|---|
-| `fast` | 320 px | 8+8 | 480 | off | – |
-| `standard` | 384 px | 16+32 | 960 | lightweight | – |
-| `audit` | 480 px | 24+48 | 960 | full | top 10% windows (≤64) recomputed at native resolution + point tracking |
-
-Tier 3 is real: `audit_top_fraction` / `audit_max_windows` select the
-highest-risk windows after tier 2 and re-run core metrics at native
-resolution. Candidate flow, source flow/occlusion/camera, endpoint edges and
-the character ROI are all regenerated on the native grid; the selected
-CoTracker/KLT backend is reused for weapon tracking. `meta.audited_windows`
-reports the count.
-
-Source caches are isolated by resolved backend (including `auto` fallback),
-weight identifier/hash, evaluator schema, flow width, occlusion threshold,
-camera algorithm and edge algorithm. The full contract and cache path are
-recorded in `meta.source_cache`; Farneback and RAFT data cannot be mixed.
-
-## Calibration & benchmarks
-
-```bash
-# FR-vs-endpoint-reference validation on the synthetic severity ladder
-python -m rr_vfiqa.calibration.validate --synthetic --workdir cal_run
-# → SRCC / PLCC / pairwise accuracy of overall_score vs full-reference PSNR
-
-# model-ranking validation with ORGANIC outputs: reference interpolators
-# (naive linear blend + forward-splat flow VFI at several resolutions)
-# ranked against FR truth across scene seeds, + per-feature SRCC table
-python -m rr_vfiqa.calibration.model_validation --workdir mv_run --interp-backend raft
-
-# per-defect-category localization: recall / precision / F1 of worst-window
-# labels against ground-truth defect segments
-python -m rr_vfiqa.calibration.detection_eval --workdir det_run \
-    --output det_run/calibration.json
-python -m rr_vfiqa.calibration.detection_eval --defects blur ghost freeze \
-    rotation_tear head_erase pole_wrong_motion sword_flicker ui_drift \
-    text_merge shop_jump card_freeze disocc_fill
-
-# timing, cache speedup, peak VRAM across candidates
-python -m rr_vfiqa.benchmark --source src.mp4 --candidates a.mp4 b.mp4 --flow-backend raft
-```
-
-Bootstrap numbers (RTX 4090):
-
-| validation | result |
-|---|---|
-| model ranking vs FR-PSNR (interpolators × 3 seeds) | SRCC 0.95, pairwise 0.93, **same-source ranking 1.00** |
-| strongest FR correlates | motion-compensated temporals (|SRCC| 0.97–0.99), cycle (0.95), composition (0.83) |
-| severity ladder vs FR-PSNR | PLCC 0.96, SRCC 0.7, pairwise 0.8 |
-| defect localization (12 types, strict temporal overlap, standard/Farneback) | recall 0.667, precision 0.229, F1 0.340 — [raw JSON](docs/calibration/synthetic_detection_12class.json) |
-| 60 s 1080p, fast/RAFT | 64.6–65.5 s/candidate, 907 MB VRAM — see `docs/BENCHMARKS.md` |
-
-The strict localization result replaces the earlier inflated 6-type
-recall 1.0 / F1 0.67 claim: the old ±0.6 s tolerance covered most of a
-1.33 s clip, and precision did not require temporal overlap. The current
-artifact evaluates all 12 classes, caps tolerance at 10% of clip duration,
-and preserves every fired window with its true-positive decision. Its low
-precision is a real remaining research gap, not a passing production metric.
-
-The interpolator ladder (`rr_vfiqa.testing.interpolator`) closes the §12.1
-pseudo-GT loop with emergent rather than authored artifacts: ranking
-perfect > flow-native ≈ flow-320 > linear-blend matches FR ordering on
-every same-source pair. Real acceptance targets (SRCC ≥ 0.8
-leave-one-game-out, ≥ 80% A/B accuracy on real model outputs, worst-10%
-recall ≥ 90%) still require the §P3 data:
-
-1. real 120/240 FPS pseudo-GT (the harness in `rr_vfiqa.calibration`
-   measures SRCC/PLCC/pairwise once you supply it);
-2. real model outputs across games/motion;
-3. human A/B rankings for the monotonic LightGBM fusion calibrator
-   (`rr_vfiqa.fusion.monotonic_calibrator` — pairwise rank loss,
-   monotone-constrained, replaces the bootstrap formula via `--calibrator`).
-
-## Testing
-
-53 tests (51 pass, 2 optional-environment skips in the CPU environment):
-
-```bash
-python -m pytest                            # Farneback (CPU-portable)
-RR_VFIQA_TEST_FLOW=raft python -m pytest    # RAFT (GPU)
-```
-
-Coverage includes deterministic warp-convention math tests, backend/weight
-cache isolation, compare failure quarantine, dynamic-UI mask containment,
-local drop/duplicate recovery, CoTracker layout/fallback, per-defect
-response tests over a 12-type synthetic defect corpus (blur, ghost, freeze,
-rotation tear, head erasure, pole misattribution, sword flicker, UI drift,
-text merging, shop double-exposure, disocclusion fill, card freeze), scene
-cuts, frame-offset/dropped-frame robustness, fail-closed behavior, calibrator
-monotonicity + pairwise ranking, calibration-harness self-tests, and a
-per-defect localization recall test (freeze-copy and card-flip included).
+三个独立执行器也可直接调用：
 
 ```python
-from rr_vfiqa.testing.synth import build_test_set, DEFECTS  # corpus generator
+from rr_vfiqa import (
+    evaluate_no_reference,
+    evaluate_endpoint_reference,
+    evaluate_full_reference,
+)
 ```
 
-## Layout
+旧的 `evaluate_vfi(source_video, candidate_video, ...)` 仍保留，语义固定为 `endpoint-2x`，用于兼容已有调用方。新代码应使用 `evaluate()` 或独立执行器，让评测假设在调用点可见。
 
+CLI 必须显式指定模式：
+
+```bash
+# 单视频无参考
+rr-vfiqa evaluate \
+  --mode no-reference \
+  --candidate video_120.mp4 \
+  --out runs/nr
+
+# 60 FPS 端点参考 + 120 FPS 插帧
+rr-vfiqa evaluate \
+  --mode endpoint-2x \
+  --reference source_60.mp4 \
+  --candidate output_120.mp4 \
+  --out runs/endpoint
+
+# 逐帧对应的 60 FPS GT + 60 FPS 输出
+rr-vfiqa evaluate \
+  --mode full-reference \
+  --reference ground_truth_60.mp4 \
+  --candidate output_60.mp4 \
+  --out runs/fr
 ```
+
+输入契约会主动拒绝歧义：
+
+- `no-reference` 不接受 `--reference`；
+- `endpoint-2x` 和 `full-reference` 必须提供 `--reference`；
+- `full-reference` 遇到非 1× 帧率、几何不一致或低覆盖对齐时 fail-closed；
+- `endpoint-2x` 遇到不可靠的 2× 锚点对齐时 fail-closed。
+
+同一模式内可以比较多个候选：
+
+```bash
+rr-vfiqa compare \
+  --mode endpoint-2x \
+  --reference source_60.mp4 \
+  --candidates model_a.mp4 model_b.mp4 \
+  --out runs/compare
+```
+
+---
+
+## 模式一：No-Reference 60/120 FPS
+
+### 评测内容
+
+NR 执行器对任意输入序列构造两套虚拟端点参考：
+
+```text
+相位 0：Y0 / Y2 / Y4 ... 为虚拟端点，Y1 / Y3 ... 为中间帧
+相位 1：Y1 / Y3 / Y5 ... 为虚拟端点，Y2 / Y4 ... 为中间帧
+```
+
+两个相位只作为对称假设使用，框架不会声称某一相位是真实帧。核心证据包括：
+
+- 双相位自参考 flow composition；
+- 从外侧帧重建中心帧的 self-cycle 残差；
+- 1/60 秒与 1/30 秒固定时间尺度的运动补偿残差；
+- flow velocity、acceleration 和 jerk 风险；
+- 与相位标签无关的清晰度、边缘交替；
+- 重复帧、冻结、HUD/文字屏幕坐标边缘不稳定；
+- 全局模糊、噪声、块效应；
+- 可选 pyIQA/NIQE 弱先验，融合权重不超过 5%。
+
+窗口按 PTS 和真实时间跨度选择。±33.3 ms 的窗口在 60 FPS 下通常包含 5 帧，在 120 FPS 下通常包含 9 帧，因此 120 FPS 的额外高频信息不会被固定“五帧窗口”丢掉。
+
+### 报告语义
+
+NR 报告使用：
+
+```text
+meta.mode = "no-reference"
+meta.score_schema = "nr-stability-risk-v1"
+meta.score_semantics = "temporal stability and artifact risk; not interpolation truth"
+```
+
+子分数为：
+
+- `temporal_stability`
+- `motion_smoothness`
+- `phase_consistency`
+- `ui_text_stability`
+- `technical_quality_prior`
+
+NR 无法证明真实轨迹、显露背景或清晰 hallucination 是否正确，所以 confidence 上限为 0.75。非 60/120 FPS 输入目前会 fail-closed，而不是套用未经标定的尺度。
+
+---
+
+## 模式二：Endpoint-Referenced 60→120
+
+这是项目原有且最成熟的模式。参考视频提供每个生成中间帧前后的真实端点，但不提供真实中间帧。
+
+核心能力包括：
+
+| 指标 | 主要用途 |
+|---|---|
+| 双向 Endpoint flow composition | 撕裂、错误运动层、错误运动路径 |
+| Reverse anchor cycle | 时序不一致、系统性生成帧模糊 |
+| 运动补偿时序残差 | 拖影、闪烁、边缘摆动 |
+| 已知奇偶相位检测 | 生成帧清晰度或结构交替 |
+| Endpoint edge support | 结构缺失、重影轮廓 |
+| UI、文字、转场、卡牌代理 | HUD 漂移、笔画粘连、双重曝光 |
+| 人物、细物体、武器代理 | 局部缺失、错误归属、轨迹抖动 |
+
+该模式保留内容哈希缓存、局部 drop/duplicate 恢复、原分辨率 Audit 升级和错误阶段 fail-closed。报告使用：
+
+```text
+meta.mode = "endpoint-2x"
+meta.score_schema = "endpoint-reduced-reference-v1"
+```
+
+人物、细物体、UI 等经典启发式仍会在 `meta.proxy_branches` 中声明，不能解释成语义真值。
+
+---
+
+## 模式三：Full-Reference Same-Rate
+
+该模式要求 reference 与 candidate 来自同一次录制并逐帧对应。执行器先进行 1× PTS + 低分辨率内容单调对齐，再在匹配窗口中计算：
+
+- Y L1、PSNR、SSIM；
+- 多尺度亮度感知误差；
+- 边缘 F1 与 Chamfer；
+- reference/candidate 帧间变化误差；
+- 光流差异与轨迹偏差；
+- 运动补偿残差差异；
+- flicker excess；
+- 结构持续性误差。
+
+它不会复用 Endpoint 模式的 anchor/generated 奇偶定义、半程 freeze-copy 公式或 `pair_of_candidate`。报告使用：
+
+```text
+meta.mode = "full-reference"
+meta.score_schema = "fr-same-rate-fidelity-v1"
+```
+
+子分数为 `spatial_fidelity`、`structural_fidelity`、`temporal_fidelity` 和 `motion_fidelity`。
+
+如果两条 60 FPS 视频只是同场景但不是逐帧对应，当前模式会拒绝发布有效分数。局部 DTW、时间伸缩、crop/scale/颜色归一化不属于当前 same-rate 契约。
+
+---
+
+## 报告与失败语义
+
+三种模式统一输出 `Report`：
+
+```json
+{
+  "overall_score": 82.4,
+  "confidence": 0.71,
+  "scores": {},
+  "event_ambiguity": 0.0,
+  "worst_windows": [],
+  "features": {},
+  "meta": {
+    "mode": "no-reference",
+    "score_schema": "nr-stability-risk-v1",
+    "status": "ok"
+  }
+}
+```
+
+启用 `--out` 后生成：
+
+- `report.json`
+- `timeline.md`
+- 可用 Matplotlib 时生成 `timeline.png`
+- 启用坏例导出时生成 `badcases/*.mp4`
+
+核心特征缺失、输入契约不成立或对齐不可靠时：
+
+- `overall_score` 序列化为 `null`；
+- `meta.status` 为 `failed`；
+- confidence 降到接近零；
+- CLI 返回非零退出码；
+- 阶段错误保存在 `meta.stage_errors`。
+
+---
+
+## Preset
+
+| Preset | 扫描宽度 | 窗口数量 | 光流宽度 | Endpoint 区域分支 | Endpoint Audit |
+|---|---:|---:|---:|---|---|
+| `fast` | 320 | 8+8 | 480 | 关闭 | 无 |
+| `standard` | 384 | 16+32 | 960 | 轻量 | 无 |
+| `audit` | 480 | 24+48 | 960 | 完整 | 最高风险 10%，最多 64 个 |
+
+NR/FR 使用相同的资源预算，但使用 PTS 时间窗口和各自的指标执行器。Endpoint 的 Audit 会在原分辨率重新构建 candidate/source flow、遮挡、camera、edge 和人物 ROI。
+
+---
+
+## 校准、测试与基准
+
+Endpoint 原有的合成标定与基准入口继续保留：
+
+```bash
+python -m rr_vfiqa.calibration.validate --synthetic --workdir cal_run
+python -m rr_vfiqa.calibration.model_validation --workdir mv_run
+python -m rr_vfiqa.calibration.detection_eval --workdir det_run
+python -m rr_vfiqa.benchmark --source src.mp4 --candidates a.mp4 b.mp4
+```
+
+现有 Endpoint 合成证据不能迁移成 NR 或 FR 的校准证据。三种模式需要分别收集真实样本、人工排序与阈值：
+
+1. NR 60/120 的真实伪影与稳定性标注；
+2. Endpoint 的真实 120/240 FPS 伪 GT 和人工 A/B；
+3. FR 60→60 的逐帧 GT、真实模型输出与场景外验证。
+
+运行测试：
+
+```bash
+python -m pytest
+RR_VFIQA_TEST_FLOW=raft python -m pytest
+```
+
+测试覆盖旧 Endpoint 回归、模式输入契约、NR 60/120 时间窗口、FR 同帧完美匹配与冻结劣化、对齐 fail-closed、缓存隔离、warp 方向、校准器和合成坏例。
+
+---
+
+## 目录结构
+
+```text
 rr_vfiqa/
-├── io/          PyAV reader (seek-based random access), PTS alignment, color fit
-├── cache/       per-source feature store (flows, occlusion, camera, edges)
-├── sampling/    cheap scan, robust-z risk, temporal NMS, window selection
-├── motion/      flow backends (batched RAFT / Farneback), occlusion, camera,
-│                composition, flow geometry
-├── metrics/     anchor integrity, cycle, temporal compensation, parity, edges, GTQ
-├── regions/     UI, text, transition, card, character, thin-object, weapon
-├── models/      unified backend interfaces (flow/segmentation/tracker/depth/VQA)
-├── fusion/      normalization, aggregation, confidence, monotonic calibrator
-├── report/      JSON, timeline, badcase clips, heatmaps
-├── testing/     synthetic scene, 12-defect corpus, reference interpolators,
-│                alignment stress variants (scene cut / offset / drops / VFR)
-├── calibration/ pseudo-GT corpora, FR metrics, model-ranking validation,
-│                per-defect localization, per-feature FR correlations
-├── benchmark.py timing / VRAM / cache-speedup measurement
-├── schema.py    contracts + explicit backward_warp / forward_splat
-└── pipeline.py / cli.py
+├── multimode.py                 统一分发、NR/FR 执行器、同模式比较
+├── pipeline.py                  Endpoint-2x 执行器与旧 API 兼容层
+├── config.py                    EvaluationMode 与模式输入契约
+├── schema.py                    对齐、窗口、报告和 warp 数据结构
+├── io/
+│   ├── video_reader.py          PyAV + PTS 解码
+│   ├── timestamp_alignment.py   Endpoint 2× 对齐
+│   └── full_reference_alignment.py  Full-Reference 1× 对齐
+├── sampling/
+│   ├── window_selector.py       Endpoint 生成帧窗口
+│   └── time_window_selector.py  NR/FR 时间跨度窗口
+├── metrics/
+│   ├── no_reference.py          双相位自参考与通用时序指标
+│   ├── full_reference.py        空间/时序同帧参考指标
+│   └── ...                      Endpoint 原有指标
+├── fusion/
+│   ├── score_schema.py          Endpoint 融合
+│   └── mode_score_schemas.py    NR/FR 独立融合
+├── cache/                       Endpoint source 特征缓存
+├── motion/                      RAFT/Farneback、warp、遮挡、camera
+├── regions/                     Endpoint UI/文字/人物/细物体代理
+├── models/                      flow/tracker/depth/VQA 后端
+├── report/                      JSON、timeline、badcase
+├── testing/                     合成场景与缺陷语料
+└── calibration/                 Endpoint 现有标定工具
 ```
 
-CI (`.github/workflows/ci.yml`): clean-checkout install + import + CPU suite
-on every push; opt-in GPU/RAFT job via repository variables.
+最重要的使用原则只有一个：先确认手中的 reference 到底是“端点参考”还是“逐帧 Ground Truth”，再选择模式；不要让程序自动猜测 60+60 两条视频的语义。
