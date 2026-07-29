@@ -104,14 +104,23 @@ class MonotonicCalibrator:
     def save(self, path: str | Path, meta: dict | None = None) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        metadata = dict(meta or {})
+        if "feature_contract_hash" not in metadata:
+            from .feature_registry import feature_contract_hash
+            metadata["feature_contract_hash"] = feature_contract_hash(
+                "endpoint-2x")
+        manifest_path = metadata.get("training_manifest_path")
+        if manifest_path and "training_manifest_hash" not in metadata:
+            from ..calibration.provenance import file_sha256
+            metadata["training_manifest_hash"] = file_sha256(manifest_path)
         with open(path, "wb") as f:
             pickle.dump({"model": self.model, "mode": self.mode,
-                         "meta": meta or {}}, f)
+                         "meta": metadata}, f)
         (path.with_suffix(".meta.json")).write_text(
             json.dumps({"feature_order": FEATURE_ORDER,
                         "monotone_constraints": MONOTONE_CONSTRAINTS,
                         "mode": self.mode,
-                        "meta": meta or {}}, indent=2), encoding="utf-8")
+                        "meta": metadata}, indent=2), encoding="utf-8")
 
     @classmethod
     def load(cls, path: str | Path) -> "MonotonicCalibrator":

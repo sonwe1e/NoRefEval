@@ -58,6 +58,13 @@ def main(argv: list[str] | None = None) -> int:
                         "strict", "resize-candidate", "common-resolution"])
     pc.add_argument("--allow-cross-content", action="store_true",
                     help="NR only: emit independent reports without ranking")
+    pc.add_argument(
+        "--comparison-group-id",
+        default=None,
+        help=(
+            "NR only: trusted same-content group; bypass visual fingerprint "
+            "rejection while retaining FPS/PTS/geometry checks"),
+    )
     _add_common(pc)
 
     args = parser.parse_args(argv)
@@ -114,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             flow_backend=args.flow_backend,
             progress=progress,
             allow_cross_content=args.allow_cross_content,
+            comparison_group_id=args.comparison_group_id,
             **compare_extra,
         )
         print(f"{'rank':<5}{'model':<28}{'overall':>9}{'relative':>10}{'conf':>7}")

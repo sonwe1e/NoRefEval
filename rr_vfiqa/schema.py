@@ -214,10 +214,15 @@ class MetricResult:
             if key not in scalars or not np.isfinite(scalars[key])
         ]
         status = "failed" if missing else "ok"
+        required_coverage = (
+            (len(required) - len(missing)) / len(required)
+            if required else 1.0)
+        effective_coverage = float(np.clip(
+            coverage * required_coverage, 0.0, 1.0))
         return cls(
             scalars=scalars,
-            coverage=float(np.clip(coverage, 0.0, 1.0)),
-            confidence=0.0 if missing else 1.0,
+            coverage=effective_coverage,
+            confidence=0.0 if missing else effective_coverage,
             warnings=(
                 [f"missing required metric feature(s): {', '.join(missing)}"]
                 if missing else []),

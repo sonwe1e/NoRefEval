@@ -47,8 +47,32 @@ _UNITS = {
     "flow": "normalized-flow",
 }
 
+_UNIT_OVERRIDES = {
+    "fr_l1_y": "luma",
+    "fr_l1_rgb": "rgb",
+    "fr_charbonnier_rgb": "rgb",
+    "fr_scan_chroma_l1": "chroma",
+    "fr_scan_gradient_l1": "luma-gradient",
+    "fr_multiscale_luma_gradient_l1": "normalized-luma-gradient",
+    "nr_mct_native_mean": "luma",
+    "nr_native_self_cycle": "luma",
+}
+
+_NR_DIAGNOSTICS = {
+    "nr_mct_native_mean": (24.0, "temporal_native_diagnostic"),
+    "nr_mct_native_p90": (36.0, "temporal_native_diagnostic"),
+    "nr_native_self_cycle": (28.0, "temporal_native_diagnostic"),
+    "nr_native_self_cycle_p90": (42.0, "temporal_native_diagnostic"),
+    "nr_native_self_comp": (0.15, "motion_native_diagnostic"),
+    "nr_native_duplicate_fraction": (0.15, "temporal_native_diagnostic"),
+    "nr_native_freeze_fraction": (0.25, "temporal_native_diagnostic"),
+    "nr_edge_instability_native": (0.12, "ui_native_diagnostic"),
+}
+
 
 def _unit(name: str) -> str:
+    if name in _UNIT_OVERRIDES:
+        return _UNIT_OVERRIDES[name]
     if any(token in name for token in (
             "mct", "self_cycle", "temporal_diff", "luma")):
         return "luma"
@@ -93,6 +117,18 @@ def definitions(mode: str | EvaluationMode) -> tuple[FeatureDefinition, ...]:
                     token in name for token in ("chamfer", "trajectory")),
                 required=name in _REQUIRED[parsed],
                 scale=float(spec.scale),
+            ))
+    if parsed is EvaluationMode.NO_REFERENCE:
+        for name, (scale, category) in _NR_DIAGNOSTICS.items():
+            rows.append(FeatureDefinition(
+                name=name,
+                mode=parsed,
+                category=category,
+                units=_unit(name),
+                direction="lower_is_better",
+                resolution_invariant=True,
+                required=False,
+                scale=scale,
             ))
     return tuple(rows)
 

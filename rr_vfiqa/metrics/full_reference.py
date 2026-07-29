@@ -51,8 +51,15 @@ def _edge_metrics(
         ec = ec & region
     if not er.any() and not ec.any():
         return 1.0, 1.0, 1.0, 0.0
-    dist_c = cv2.distanceTransform((~ec).astype(np.uint8), cv2.DIST_L2, 3)
-    dist_r = cv2.distanceTransform((~er).astype(np.uint8), cv2.DIST_L2, 3)
+    fallback_distance = float(np.hypot(*reference.shape[:2]))
+    dist_c = (
+        cv2.distanceTransform((~ec).astype(np.uint8), cv2.DIST_L2, 3)
+        if ec.any()
+        else np.full(reference.shape, fallback_distance, np.float32))
+    dist_r = (
+        cv2.distanceTransform((~er).astype(np.uint8), cv2.DIST_L2, 3)
+        if er.any()
+        else np.full(reference.shape, fallback_distance, np.float32))
     recall = float(np.mean(dist_c[er] <= 2.0)) if er.any() else 1.0
     precision = float(np.mean(dist_r[ec] <= 2.0)) if ec.any() else 1.0
     f1 = 2.0 * precision * recall / max(precision + recall, 1e-6)
@@ -130,6 +137,62 @@ def _masked_l1(
     )
 
 
+def _camera_residual_flow(flow: np.ndarray) -> np.ndarray:
+    h, w = flow.shape[:2]
+    step_y, step_x = max(1, h // 12), max(1, w // 12)
+    yy, xx = np.mgrid[0:h:step_y, 0:w:step_x].astype(np.float32)
+    source = np.stack([xx.ravel(), yy.ravel()], axis=1)
+    sampled = flow[::step_y, ::step_x].reshape(-1, 2)
+    target = source + sampled
+    affine, inliers = cv2.estimateAffine2D(
+        source,
+        target,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=2.5,
+        maxIters=1000,
+        confidence=0.99,
+        refineIters=10,
+    )
+    if affine is None or inliers is None or np.mean(inliers) < 0.45:
+        return flow - np.median(flow.reshape(-1, 2), axis=0)
+    singular_values = np.linalg.svd(affine[:, :2], compute_uv=False)
+    if (not np.all(np.isfinite(affine))
+            or singular_values.min() < 0.5
+            or singular_values.max() > 1.5
+            or np.linalg.norm(affine[:, 2]) > max(h, w)):
+        return flow - np.median(flow.reshape(-1, 2), axis=0)
+    full_y, full_x = np.mgrid[0:h, 0:w].astype(np.float32)
+    camera_x = (
+        affine[0, 0] * full_x + affine[0, 1] * full_y + affine[0, 2]
+        - full_x)
+    camera_y = (
+        affine[1, 0] * full_x + affine[1, 1] * full_y + affine[1, 2]
+        - full_y)
+    camera = np.stack([camera_x, camera_y], axis=-1)
+    return flow - camera
+
+
+def _tile_flow_errors(
+    reference_flow: np.ndarray,
+    candidate_flow: np.ndarray,
+    grid: int = 4,
+) -> list[float]:
+    h, w = reference_flow.shape[:2]
+    errors = []
+    for gy in range(grid):
+        for gx in range(grid):
+            ys = slice(gy * h // grid, (gy + 1) * h // grid)
+            xs = slice(gx * w // grid, (gx + 1) * w // grid)
+            ref_vector = np.median(
+                reference_flow[ys, xs].reshape(-1, 2), axis=0)
+            cand_vector = np.median(
+                candidate_flow[ys, xs].reshape(-1, 2), axis=0)
+            errors.append(float(
+                np.linalg.norm(cand_vector - ref_vector)
+                / (np.linalg.norm(ref_vector) + 2.0)))
+    return errors
+
+
 def compute_window(
     reference: FrameBundle,
     candidate: FrameBundle,
@@ -192,6 +255,9 @@ def compute_window(
     structure_persistence: list[float] = []
     ref_vectors: list[np.ndarray] = []
     cand_vectors: list[np.ndarray] = []
+    tile_flow_errors: list[float] = []
+    camera_residual_errors: list[float] = []
+    salient_flow_errors: list[float] = []
     for i in range(len(yr) - 1):
         dr = yr[i + 1] - yr[i]
         dc = yc[i + 1] - yc[i]
@@ -201,6 +267,15 @@ def compute_window(
         fc = candidate_flows.forward(i, i + 1)
         denom = flow_magnitude(fr) + 2.0
         flow_error.append(float(np.mean(flow_magnitude(fc - fr) / denom)))
+        tile_flow_errors.extend(_tile_flow_errors(fr, fc))
+        residual_ref = _camera_residual_flow(fr)
+        residual_cand = _camera_residual_flow(fc)
+        residual_denom = flow_magnitude(residual_ref) + 2.0
+        camera_residual_errors.append(float(np.mean(
+            flow_magnitude(residual_cand - residual_ref) / residual_denom)))
+        if rois["salient"].sum() >= 32:
+            salient_flow_errors.append(float(np.mean(
+                (flow_magnitude(fc - fr) / denom)[rois["salient"]])))
         ref_vectors.append(np.median(fr.reshape(-1, 2), axis=0))
         cand_vectors.append(np.median(fc.reshape(-1, 2), axis=0))
 
@@ -245,6 +320,21 @@ def compute_window(
         "fr_motion_roi_l1": _masked_l1(yr, yc, rois["motion"]),
         "fr_temporal_diff_error": float(np.mean(temporal_diff)) if temporal_diff else float("nan"),
         "fr_flow_error": float(np.mean(flow_error)) if flow_error else float("nan"),
+        "fr_tile_flow_error_p50": (
+            float(np.percentile(tile_flow_errors, 50))
+            if tile_flow_errors else float("nan")),
+        "fr_tile_flow_error_p90": (
+            float(np.percentile(tile_flow_errors, 90))
+            if tile_flow_errors else float("nan")),
+        "fr_tile_flow_error_p99": (
+            float(np.percentile(tile_flow_errors, 99))
+            if tile_flow_errors else float("nan")),
+        "fr_camera_residual_flow_error": (
+            float(np.mean(camera_residual_errors))
+            if camera_residual_errors else float("nan")),
+        "fr_salient_flow_error": (
+            float(np.mean(salient_flow_errors))
+            if salient_flow_errors else float("nan")),
         "fr_trajectory_deviation": float(np.mean(trajectory)) if trajectory else float("nan"),
         "fr_mcr_difference": float(np.mean(mcr_error)) if mcr_error else float("nan"),
         "fr_flicker_excess": float(max(cand_flicker - ref_flicker, 0.0)),

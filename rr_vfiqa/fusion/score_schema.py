@@ -76,13 +76,32 @@ CATEGORY_REQUIRED_STAGES: dict[str, tuple[str, ...]] = {
     "global": ("gtq",),
 }
 
+CATEGORY_REQUIRED_FEATURE_GROUPS: dict[
+    str, tuple[tuple[str, ...], ...]
+] = {
+    "motion": (("comp_mean",),),
+    "temporal": (
+        ("mct_lag1_mean", "mct_lag1_p90"),
+        ("cycle_resid_mean", "cycle_resid_p90"),
+    ),
+    "structure": (("edge_recall",), ("edge_precision",)),
+}
+
 
 def category_window_valid(wf: WindowFeatures, category: str) -> bool:
     failed = {
         key[len("error_"):] for key in wf.labels if key.startswith("error_")
     }
-    return not any(
-        stage in failed for stage in CATEGORY_REQUIRED_STAGES.get(category, ()))
+    if any(
+            stage in failed
+            for stage in CATEGORY_REQUIRED_STAGES.get(category, ())):
+        return False
+    for alternatives in CATEGORY_REQUIRED_FEATURE_GROUPS.get(category, ()):
+        if not any(
+                key in wf.scalars and np.isfinite(wf.scalars[key])
+                for key in alternatives):
+            return False
+    return True
 
 AGG_WEIGHTS = (0.4, 0.4, 0.2)      # P50 / P90 / P99
 _SCORE_K = 1.8                     # error→score sensitivity (bootstrap)

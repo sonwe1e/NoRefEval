@@ -58,30 +58,51 @@ def scan_full_reference(
     alignment: FullReferenceAlignment,
     *,
     width: int = 320,
+    target_size: tuple[int, int] | None = None,
 ) -> FullReferenceScan:
-    ref_frames = reference.decode_all(width=width)
-    cand_frames = candidate.decode_all(width=width)
+    """Stream aligned frame pairs with O(one-frame) image memory.
+
+    The scalar result arrays are timeline-sized, but decoded RGB frames are
+    never accumulated. ``target_size`` is ``(width, height)`` and guarantees
+    that non-strict geometry policies use one explicit comparison grid.
+    """
     n = candidate.meta.n_frames
     arrays = [np.full(n, np.nan, np.float32) for _ in range(6)]
     y_l1, chroma_l1, gradient_l1, edge_mismatch, ssim_err, diff_err = arrays
     previous: tuple[np.ndarray, np.ndarray] | None = None
-    for cand_index, ref_index in enumerate(alignment.reference_of_candidate):
-        if ref_index < 0 or cand_index >= len(cand_frames) or ref_index >= len(ref_frames):
+    reference_frames = iter(reference.iter_frames(width=width))
+    current_reference = next(reference_frames, None)
+    for cand_index, cand_rgb in candidate.iter_frames(width=width):
+        if cand_index >= len(alignment.reference_of_candidate):
+            break
+        ref_index = int(alignment.reference_of_candidate[cand_index])
+        if ref_index < 0:
             previous = None
             continue
-        ref = ref_frames[int(ref_index)].astype(np.float32)
-        cand = cand_frames[cand_index].astype(np.float32)
-        if ref.shape != cand.shape:
-            cand = cv2.resize(cand, (ref.shape[1], ref.shape[0]),
-                              interpolation=cv2.INTER_AREA)
+        while (current_reference is not None
+               and current_reference[0] < ref_index):
+            current_reference = next(reference_frames, None)
+        if current_reference is None or current_reference[0] != ref_index:
+            previous = None
+            continue
+
+        ref_rgb = current_reference[1]
+        if target_size is not None:
+            ref_rgb = _resize_frame(ref_rgb, target_size)
+            cand_rgb = _resize_frame(cand_rgb, target_size)
+        elif ref_rgb.shape != cand_rgb.shape:
+            cand_rgb = _resize_frame(
+                cand_rgb, (ref_rgb.shape[1], ref_rgb.shape[0]))
+        ref = ref_rgb.astype(np.float32)
+        cand = cand_rgb.astype(np.float32)
         ref_yuv = cv2.cvtColor(ref.astype(np.uint8), cv2.COLOR_RGB2YCrCb).astype(np.float32)
         cand_yuv = cv2.cvtColor(cand.astype(np.uint8), cv2.COLOR_RGB2YCrCb).astype(np.float32)
         ry, cy = ref_yuv[..., 0], cand_yuv[..., 0]
         y_l1[cand_index] = np.mean(np.abs(ry - cy))
         chroma_l1[cand_index] = np.mean(np.abs(
             ref_yuv[..., 1:] - cand_yuv[..., 1:]))
-        rg = cv2.Laplacian(ry, cv2.CV_32F)
-        cg = cv2.Laplacian(cy, cv2.CV_32F)
+        rg = _gradient_magnitude(ry)
+        cg = _gradient_magnitude(cy)
         gradient_l1[cand_index] = np.mean(np.abs(rg - cg))
         re = cv2.Canny(ry.astype(np.uint8), 60, 160) > 0
         ce = cv2.Canny(cy.astype(np.uint8), 60, 160) > 0
@@ -102,3 +123,24 @@ def scan_full_reference(
     risk = np.mean(np.stack(normalized), axis=0).astype(np.float32)
     return FullReferenceScan(
         risk, y_l1, chroma_l1, gradient_l1, edge_mismatch, ssim_err, diff_err)
+
+
+def _resize_frame(
+    frame: np.ndarray,
+    target_size: tuple[int, int],
+) -> np.ndarray:
+    width, height = target_size
+    if frame.shape[:2] == (height, width):
+        return frame
+    interpolation = (
+        cv2.INTER_AREA
+        if width <= frame.shape[1] and height <= frame.shape[0]
+        else cv2.INTER_LINEAR)
+    return cv2.resize(
+        frame, (width, height), interpolation=interpolation)
+
+
+def _gradient_magnitude(y: np.ndarray) -> np.ndarray:
+    gx = cv2.Sobel(y, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(y, cv2.CV_32F, 0, 1, ksize=3)
+    return cv2.magnitude(gx, gy)

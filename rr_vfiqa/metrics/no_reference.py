@@ -140,6 +140,69 @@ def _alternation_energy(values: np.ndarray, indices: np.ndarray) -> float:
                  (np.sum(np.abs(centered)) + 1e-6))
 
 
+def _camera_stabilize_tracks(positions: np.ndarray) -> np.ndarray:
+    """Map tracks back to the first-frame grid using robust global motion."""
+    reference = positions[0].astype(np.float32)
+    stabilized = np.empty_like(positions, dtype=np.float64)
+    stabilized[0] = reference
+    for index in range(1, len(positions)):
+        current = positions[index].astype(np.float32)
+        translation = np.median(current - reference, axis=0)
+        transform = np.asarray([
+            [1.0, 0.0, translation[0]],
+            [0.0, 1.0, translation[1]],
+            [0.0, 0.0, 1.0],
+        ], np.float64)
+        projected = reference + translation
+        best_residual = float(np.median(np.linalg.norm(
+            current - projected, axis=1)))
+
+        affine, inliers = cv2.estimateAffine2D(
+            reference,
+            current,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=2.5,
+            maxIters=1000,
+            confidence=0.99,
+            refineIters=10,
+        )
+        if affine is not None and inliers is not None and np.mean(inliers) >= 0.50:
+            affine_h = np.vstack([affine, [0.0, 0.0, 1.0]])
+            affine_projected = cv2.transform(
+                reference[None], affine)[0]
+            affine_residual = float(np.median(np.linalg.norm(
+                current - affine_projected, axis=1)))
+            if affine_residual < 0.90 * best_residual:
+                transform = affine_h
+                best_residual = affine_residual
+
+        if len(reference) >= 12 and best_residual > 1.5:
+            homography, inliers = cv2.findHomography(
+                reference,
+                current,
+                method=cv2.RANSAC,
+                ransacReprojThreshold=2.5,
+                maxIters=1000,
+                confidence=0.99,
+            )
+            if (homography is not None and inliers is not None
+                    and np.mean(inliers) >= 0.55):
+                homography_projected = cv2.perspectiveTransform(
+                    reference[None], homography)[0]
+                homography_residual = float(np.median(np.linalg.norm(
+                    current - homography_projected, axis=1)))
+                if homography_residual < 0.90 * best_residual:
+                    transform = homography
+
+        try:
+            inverse = np.linalg.inv(transform)
+            stabilized[index] = cv2.perspectiveTransform(
+                current[None], inverse.astype(np.float64))[0]
+        except np.linalg.LinAlgError:
+            stabilized[index] = current - translation
+    return stabilized
+
+
 def _track_smoothness(bundle: FrameBundle) -> dict[str, float]:
     """Camera-relative sparse-track acceleration, jerk and direction change."""
     grays = [
@@ -170,10 +233,8 @@ def _track_smoothness(bundle: FrameBundle) -> dict[str, float]:
             "nr_track_turn_p90": float("nan"),
         }
 
-    positions = tracks[:, good].astype(np.float64)
-    # Remove the median camera/body translation at every instant.  Remaining
-    # local trajectories expose swords, thin contours and foreground jitter.
-    positions -= np.median(positions, axis=1, keepdims=True)
+    positions = _camera_stabilize_tracks(
+        tracks[:, good].astype(np.float64))
     dt = np.maximum(np.diff(bundle.times), 1e-6)
     velocity = np.diff(positions, axis=0) / dt[:, None, None]
     speed = np.linalg.norm(velocity, axis=2)
@@ -273,6 +334,50 @@ def _tile_motion_dynamics(
         "nr_tile_jerk_p90": float(np.percentile(jerk_ratio, 90)),
         "nr_local_reversal_fraction": reversal,
     }
+
+
+def _screen_static_ui_mask(
+    edge_maps: list[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Find compact screen-static components across all four borders/screen.
+
+    Large connected regions are rejected as likely static scene structure;
+    compact persistent components are retained even near the screen center so
+    floating labels and prompts are not excluded by a top/bottom-only prior.
+    """
+    edge_stack = np.stack(edge_maps).astype(np.float32)
+    persistent = edge_stack.mean(0) >= 0.60
+    h, w = persistent.shape
+    border = np.zeros((h, w), bool)
+    band_y = max(1, h // 5)
+    band_x = max(1, w // 6)
+    border[:band_y] = True
+    border[-band_y:] = True
+    border[:, :band_x] = True
+    border[:, -band_x:] = True
+
+    connected = cv2.dilate(
+        persistent.astype(np.uint8), np.ones((5, 5), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        connected, connectivity=8)
+    retained = np.zeros_like(connected)
+    frame_area = h * w
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < 12 or area > 0.08 * frame_area:
+            continue
+        component = labels == label
+        # Border HUD is expected; compact full-screen components cover
+        # floating text/prompts without admitting broad static scenery.
+        if np.any(component & border) or area <= 0.02 * frame_area:
+            retained[component] = 1
+    ui_mask = cv2.dilate(
+        retained, np.ones((3, 3), np.uint8)).astype(bool)
+    if ui_mask.sum() < 32:
+        ui_mask = border & cv2.dilate(
+            persistent.astype(np.uint8), np.ones((3, 3), np.uint8)
+        ).astype(bool)
+    return ui_mask, edge_stack
 
 
 def compute_window(
@@ -403,16 +508,15 @@ def compute_window(
 
     # Screen-coordinate edge stability in typical HUD bands. Camera motion
     # does not explain changes here; this remains an honest UI/text proxy.
-    h = bundle.height
-    band = np.zeros((h, bundle.width), bool)
-    band[:max(1, h // 5)] = True
-    band[-max(1, h // 5):] = True
     edge_maps = [
         cv2.Canny(y[i].astype(np.uint8), 60, 160) > 0 for i in range(n)
     ]
+    ui_mask, edge_stack = _screen_static_ui_mask(edge_maps)
     ui_changes = [
-        float(np.mean(np.logical_xor(edge_maps[a], edge_maps[b])[band]))
+        float(np.mean(np.logical_xor(
+            edge_maps[a], edge_maps[b])[ui_mask]))
         for a, b in short_pairs
+        if ui_mask.sum() >= 32
     ]
     out["nr_ui_edge_instability"] = (
         float(np.mean(ui_changes)) if ui_changes else float("nan"))
@@ -432,11 +536,10 @@ def compute_window(
         if common_edge_changes else float("nan"))
 
     # Text-like screen-space regions: dense persistent strokes in HUD bands.
-    edge_stack = np.stack(edge_maps).astype(np.float32)
     persistent = edge_stack.mean(0) >= 0.35
     density = cv2.blur(
-        edge_stack[0], (15, 15), borderType=cv2.BORDER_REFLECT)
-    text_roi = band & persistent & (density >= 0.10)
+        edge_stack.mean(0), (15, 15), borderType=cv2.BORDER_REFLECT)
+    text_roi = ui_mask & persistent & (density >= 0.10)
     text_changes = [
         float(np.mean(np.logical_xor(edge_maps[a], edge_maps[b])[text_roi]))
         for a, b in short_pairs
@@ -444,6 +547,16 @@ def compute_window(
     ]
     out["nr_text_stroke_instability"] = (
         float(np.mean(text_changes)) if text_changes else float("nan"))
+    component_counts = []
+    for edges in edge_maps:
+        count, _, stats, _ = cv2.connectedComponentsWithStats(
+            (edges & ui_mask).astype(np.uint8), connectivity=8)
+        component_counts.append(sum(
+            1 for label in range(1, count)
+            if stats[label, cv2.CC_STAT_AREA] >= 3))
+    counts = np.asarray(component_counts, np.float64)
+    out["nr_ui_component_instability"] = float(
+        np.std(counts) / (np.mean(counts) + 1.0))
 
     # Learned backend is optional and weak. Missing means unavailable, not
     # perfect quality; the mode fusion simply omits this category.

@@ -14,8 +14,9 @@ from .multimode import (
 )
 from .pipeline import compare_models, evaluate_endpoint_reference, evaluate_vfi
 from .schema import Report
+from ._version import VERSION
 
-__version__ = "0.2.0"
+__version__ = VERSION
 
 __all__ = [
     "evaluate",

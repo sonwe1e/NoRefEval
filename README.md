@@ -143,13 +143,15 @@ NR 执行器按 PTS 构造原生跨度与固定物理跨度的虚拟端点参考
 
 窗口按 PTS 和真实时间跨度选择。±33.3 ms 的窗口在 60 FPS 下通常包含 5 帧，在 120 FPS 下通常包含 9 帧，因此 120 FPS 的额外高频信息不会被固定“五帧窗口”丢掉。velocity、acceleration 和 jerk 全部使用真实时间间隔计算，而不是把不同 FPS 的帧索引差当成相同时间。
 
+公共总分只融合 1/60、1/30 秒及其他跨帧率同义特征。native cadence 特征仍会写入 `features` 用于诊断 120 FPS 单帧复制等问题，但不会进入公共总分，避免 60 FPS 的 16.67 ms 与 120 FPS 的 8.33 ms 被同一阈值混合。
+
 ### 报告语义
 
 NR 报告使用：
 
 ```text
 meta.mode = "no-reference"
-meta.score_schema = "nr-stability-risk-v2"
+meta.score_schema = "nr-stability-risk-v3-common-time"
 meta.score_semantics = "temporal stability and artifact risk; not interpolation truth"
 ```
 
@@ -161,7 +163,7 @@ meta.score_semantics = "temporal stability and artifact risk; not interpolation 
 - `ui_text_stability`
 - `technical_quality_prior`
 
-NR 无法证明真实轨迹、显露背景或清晰 hallucination 是否正确，所以 confidence 上限为 0.75。非 60/120 FPS 输入目前会 fail-closed，而不是套用未经标定的尺度。多个 NR 候选只有在 FPS 桶、时长、画幅和抽样内容指纹一致时才能排序；`--allow-cross-content` 只会生成互相独立的报告，不发布相对排名。
+NR 无法证明真实轨迹、显露背景或清晰 hallucination 是否正确，所以 confidence 上限为 0.75。非 60/120 FPS 输入目前会 fail-closed，而不是套用未经标定的尺度。多个 NR 候选只有在 FPS 桶、时长、画幅和抽样内容指纹一致时才能排序；内容指纹使用直方图归一化 pHash，避免严重模糊或亮度变化被简单灰度 L1 误拒绝。可信调用方也可提供 `--comparison-group-id` 明确声明同源内容。`--allow-cross-content` 只会生成互相独立的报告，不发布相对排名。
 
 ---
 
@@ -185,7 +187,7 @@ NR 无法证明真实轨迹、显露背景或清晰 hallucination 是否正确�
 
 ```text
 meta.mode = "endpoint-2x"
-meta.score_schema = "endpoint-reduced-reference-v1"
+meta.score_schema = "endpoint-reduced-reference-v2"
 ```
 
 人物、细物体、UI 等经典启发式仍会在 `meta.proxy_branches` 中声明，不能解释成语义真值。
@@ -194,7 +196,7 @@ meta.score_schema = "endpoint-reduced-reference-v1"
 
 ## 模式三：Full-Reference Same-Rate
 
-该模式要求 reference 与 candidate 来自同一次录制并逐帧对应。执行器先进行 1× PTS + 低分辨率内容单调对齐，再对完整时间线执行低分辨率 reference scan；全片 Y/chroma、梯度、边缘、局部 SSIM proxy 与帧差不一致风险会参与窗口采样和融合。随后在匹配窗口中计算：
+该模式要求 reference 与 candidate 来自同一次录制并逐帧对应。执行器先进行 1× PTS + 低分辨率内容单调对齐，再以 O(单帧图像) 内存流式扫描完整时间线；全片 Y/chroma、Sobel gradient magnitude、边缘、局部 SSIM proxy 与帧差不一致风险会参与窗口采样和融合。随后在匹配窗口中计算：
 
 - Y/RGB L1、RGB Charbonnier、PSNR、11×11 Gaussian local SSIM；
 - 明确命名的多尺度亮度与梯度 L1（不是 perceptual metric）；
@@ -233,7 +235,7 @@ meta.score_schema = "fr-same-rate-fidelity-v2"
   "features": {},
   "meta": {
     "mode": "no-reference",
-    "score_schema": "nr-stability-risk-v2",
+    "score_schema": "nr-stability-risk-v3-common-time",
     "status": "ok",
     "metric_contract": "nr-metrics-v2",
     "preset_contract": "nr-standard-v1",
@@ -262,6 +264,8 @@ meta.score_schema = "fr-same-rate-fidelity-v2"
 - 阶段错误保存在 `meta.stage_errors`。
 
 coverage 统一按所有有效窗口覆盖到的唯一帧集合计算，重叠窗口不会重复计数。所有模式的报告均记录 metric、preset、feature、backend、代码提交与工作区状态契约，并固定声明 `production_gate=false`，直到各模式的真实数据标定独立完成。
+
+NR/FR 报告还会在 `meta.metric_diagnostics` 汇总 MetricResult 的失败窗口、warnings、coverage、confidence 和样例原因。Endpoint 外部校准器会记录绝对路径、模型 SHA256、feature contract hash 与 training manifest hash；所有报告也包含源码版本和 package source SHA256，非 Git 部署仍可定位构建内容。
 
 ---
 
@@ -306,7 +310,7 @@ python -m rr_vfiqa.calibration.mode_validation \
   --output validation/fr_metrics.json
 ```
 
-manifest 顶层指定 `mode`，每个 case 提供 `better`、`worse`；FR case 额外提供 `reference`。该 harness 只报告模式内方向性准确率并保持 `production_gate=false`。
+manifest 顶层指定 `mode`，每个 case 提供 `better`、`worse`；FR case 额外提供 `reference`。该 harness 会报告模式内方向性准确率、分数 margin、报告状态与置信度、期望时间段/伪影类型的定位命中，以及按特征注册表方向计算的逐特征准确率。真实数据与独立模型证据未达到门槛前，输出始终保持 `production_gate=false`。
 
 运行测试：
 

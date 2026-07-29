@@ -70,6 +70,54 @@ def _feature_summary(windows: list[WindowFeatures]) -> dict[str, float]:
     return output
 
 
+def _metric_diagnostics(
+    windows: list[WindowFeatures],
+    *,
+    limit: int = 20,
+) -> dict:
+    samples = []
+    failed = 0
+    warnings = 0
+    exceptions = 0
+    coverages = []
+    confidences = []
+    for wf in windows:
+        status = wf.labels.get("metric_status")
+        messages = list(wf.labels.get("metric_warnings") or [])
+        error_labels = {
+            key: value for key, value in wf.labels.items()
+            if key.startswith("error_")
+        }
+        if error_labels:
+            exceptions += 1
+        if status == "failed" or error_labels:
+            failed += 1
+        warnings += len(messages)
+        coverage = wf.labels.get("metric_coverage")
+        confidence = wf.labels.get("metric_confidence")
+        if coverage is not None and np.isfinite(coverage):
+            coverages.append(float(coverage))
+        if confidence is not None and np.isfinite(confidence):
+            confidences.append(float(confidence))
+        if (messages or error_labels) and len(samples) < limit:
+            samples.append({
+                "center_index": int(wf.window.center),
+                "status": status or "exception",
+                "warnings": messages,
+                "errors": error_labels,
+            })
+    return {
+        "failed_windows": failed,
+        "exception_windows": exceptions,
+        "warning_count": warnings,
+        "mean_metric_coverage": (
+            round(float(np.mean(coverages)), 5) if coverages else None),
+        "mean_metric_confidence": (
+            round(float(np.mean(confidences)), 5) if confidences else None),
+        "samples": samples,
+    }
+
+
 def _resize_bundle(
     bundle: FrameBundle,
     *,
@@ -93,6 +141,25 @@ def _resize_bundle(
         width=width,
         height=height,
     )
+
+
+def _fr_target_size(
+    reference_meta,
+    candidate_meta,
+    *,
+    max_width: int,
+    geometry_policy: str,
+) -> tuple[int, int]:
+    """Return one explicit FR comparison grid for both video streams."""
+    width_limit = min(max_width, reference_meta.width)
+    if geometry_policy in ("strict", "common-resolution"):
+        width_limit = min(width_limit, candidate_meta.width)
+    width = max(2, int(width_limit))
+    height = max(
+        2,
+        int(round(reference_meta.height * width / reference_meta.width)) // 2 * 2,
+    )
+    return width, height
 
 
 def _worst_windows(
@@ -245,6 +312,8 @@ def evaluate_no_reference(
             wf.scalars.update(metric.scalars)
             wf.labels["metric_status"] = metric.status
             wf.labels["metric_warnings"] = metric.warnings
+            wf.labels["metric_coverage"] = metric.coverage
+            wf.labels["metric_confidence"] = metric.confidence
         except Exception as exc:
             wf.labels["error_no_reference"] = repr(exc)
             stage_errors["no_reference"] += 1
@@ -324,11 +393,12 @@ def evaluate_no_reference(
         "windows_selected": len(windows),
         "coverage_fraction": round(coverage, 5),
         "stage_errors": dict(stage_errors),
+        "metric_diagnostics": _metric_diagnostics(window_features),
         "category_errors": {
             key: round(value, 4) if np.isfinite(value) else None
             for key, value in category_errors.items()
         },
-        "calibrator": "nr-formula-v2",
+        "calibrator": "nr-common-time-formula-v3",
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
     meta.update(report_provenance(
@@ -391,9 +461,20 @@ def evaluate_full_reference(
     alignment = build_full_reference_alignment(
         reference, candidate, scene_cuts_candidate=cuts,
         geometry_policy=geometry_policy)
+    scan_size = _fr_target_size(
+        reference.meta,
+        candidate.meta,
+        max_width=cfg.preset.scan_width,
+        geometry_policy=geometry_policy,
+    )
     say("full-reference low-resolution timeline scan")
     reference_scan = scan_full_reference(
-        reference, candidate, alignment, width=cfg.preset.scan_width)
+        reference,
+        candidate,
+        alignment,
+        width=scan_size[0],
+        target_size=scan_size,
+    )
     reference_globals = reference_scan.global_features()
     excluded = set(int(i) for i in cuts)
     for event in alignment.events:
@@ -413,13 +494,13 @@ def evaluate_full_reference(
     )
     say(f"{len(windows)} aligned windows selected")
     backend = get_flow_backend(flow_backend, device)
-    working_width = min(
-        cfg.preset.flow_width,
-        reference.meta.width,
-        (candidate.meta.width
-         if geometry_policy != "resize-candidate"
-         else reference.meta.width),
+    working_size = _fr_target_size(
+        reference.meta,
+        candidate.meta,
+        max_width=cfg.preset.flow_width,
+        geometry_policy=geometry_policy,
     )
+    working_width, working_height = working_size
 
     stage_errors: collections.Counter[str] = collections.Counter()
     window_features: list[WindowFeatures] = []
@@ -434,13 +515,11 @@ def evaluate_full_reference(
             rb = reference.read_frames(
                 ref_indices, width=working_width)
             cb = candidate.read_frames(
-                window.indices,
-                width=(
-                    working_width
-                    if geometry_policy != "resize-candidate" else rb.width))
-            if geometry_policy == "resize-candidate":
-                cb = _resize_bundle(
-                    cb, width=rb.width, height=rb.height)
+                window.indices, width=working_width)
+            rb = _resize_bundle(
+                rb, width=working_width, height=working_height)
+            cb = _resize_bundle(
+                cb, width=working_width, height=working_height)
             cf = WindowFlows(cb, backend)
             rf = WindowFlows(rb, backend)
             pairs = [(i, i + 1) for i in range(len(cb.rgb) - 1)]
@@ -453,6 +532,8 @@ def evaluate_full_reference(
             wf.scalars.update(metric.scalars)
             wf.labels["metric_status"] = metric.status
             wf.labels["metric_warnings"] = metric.warnings
+            wf.labels["metric_coverage"] = metric.coverage
+            wf.labels["metric_confidence"] = metric.confidence
         except Exception as exc:
             wf.labels["error_full_reference"] = repr(exc)
             stage_errors["full_reference"] += 1
@@ -526,9 +607,7 @@ def evaluate_full_reference(
                 None if geometry_policy == "strict" else {
                     "policy": geometry_policy,
                     "working_width": working_width,
-                    "working_height": int(round(
-                        reference.meta.height
-                        * working_width / reference.meta.width)),
+                    "working_height": working_height,
                     "reference_native": [
                         reference.meta.width, reference.meta.height],
                     "candidate_native": [
@@ -547,11 +626,18 @@ def evaluate_full_reference(
             key: round(value, 6)
             for key, value in reference_globals.items()
         },
+        "full_reference_scan_contract": {
+            "streaming": True,
+            "target_width": scan_size[0],
+            "target_height": scan_size[1],
+            "gradient_operator": "sobel-magnitude-3x3",
+        },
         "valid_windows": len(valid),
         "windows_evaluated": len(window_features),
         "windows_selected": len(windows),
         "coverage_fraction": round(coverage, 5),
         "stage_errors": dict(stage_errors),
+        "metric_diagnostics": _metric_diagnostics(window_features),
         "category_errors": {
             key: round(value, 4) if np.isfinite(value) else None
             for key, value in category_errors.items()
@@ -610,6 +696,7 @@ def compare(
     labels: list[str] | None = None,
     out_dir: str | None = None,
     allow_cross_content: bool = False,
+    comparison_group_id: str | None = None,
     **kwargs,
 ) -> list[dict]:
     """Rank candidates only within one shared mode/schema."""
@@ -621,7 +708,10 @@ def compare(
         raise ValueError("labels must have the same length as candidate_videos")
     comparison_issues: list[str] = []
     if parsed_mode is EvaluationMode.NO_REFERENCE and len(candidate_videos) > 1:
-        comparison_issues = _nr_compare_issues(candidate_videos)
+        comparison_issues = _nr_compare_issues(
+            candidate_videos,
+            trusted_content=bool(comparison_group_id),
+        )
         if comparison_issues and not allow_cross_content:
             raise ValueError(
                 "no-reference candidates are not safely comparable: "
@@ -669,6 +759,7 @@ def compare(
         item["comparison_status"] = (
             "comparable" if comparable else "independent-report")
         item["comparison_warnings"] = comparison_issues
+        item["comparison_group_id"] = comparison_group_id
     if out_dir:
         import json
 
@@ -681,17 +772,20 @@ def compare(
     return results
 
 
-def _nr_compare_issues(candidate_videos: list[str]) -> list[str]:
+def _nr_compare_issues(
+    candidate_videos: list[str],
+    *,
+    trusted_content: bool = False,
+) -> list[str]:
     import cv2
 
-    from .imutils import hamming64
+    from .imutils import hamming64, phash64
 
     readers = [VideoReader(path) for path in candidate_videos]
     base = readers[0].meta
     issues: list[str] = []
     base_bucket = 60 if abs(base.fps - 60.0) <= 3.0 else 120
     base_duration = float(base.pts_seconds[-1] - base.pts_seconds[0])
-    scans = [scan_candidate(reader, width=96) for reader in readers]
     for index, reader in enumerate(readers[1:], 1):
         meta = reader.meta
         bucket = 60 if abs(meta.fps - 60.0) <= 3.0 else 120
@@ -715,32 +809,21 @@ def _nr_compare_issues(candidate_videos: list[str]) -> list[str]:
             pts_error = float(np.max(np.abs(base_pts - cand_pts)))
             if pts_error > max(0.25 / max(base.fps, 1e-6), 0.002):
                 issues.append(f"candidate {index} PTS timeline differs")
-        count = min(16, len(scans[0].hash64), len(scans[index].hash64))
-        if count:
-            a_pos = np.linspace(0, len(scans[0].hash64) - 1, count).astype(int)
-            b_pos = np.linspace(0, len(scans[index].hash64) - 1, count).astype(int)
-            distance = np.median([
-                hamming64(scans[0].hash64[a], scans[index].hash64[b])
-                for a, b in zip(a_pos, b_pos)
-            ])
-            if distance > 24:
-                issues.append(f"candidate {index} scene fingerprint differs")
+        count = min(16, base.n_frames, meta.n_frames)
+        if count and not trusted_content:
+            a_pos = np.linspace(0, base.n_frames - 1, count).astype(int)
+            b_pos = np.linspace(0, meta.n_frames - 1, count).astype(int)
             base_bundle = readers[0].read_frames(a_pos, width=96)
             candidate_bundle = reader.read_frames(b_pos, width=96)
-            thumbnail_errors = []
+            distances = []
             for base_frame, candidate_frame in zip(
                     base_bundle.rgb, candidate_bundle.rgb):
-                base_gray = cv2.resize(
-                    cv2.cvtColor(base_frame, cv2.COLOR_RGB2GRAY),
-                    (64, 36), interpolation=cv2.INTER_AREA)
-                candidate_gray = cv2.resize(
-                    cv2.cvtColor(candidate_frame, cv2.COLOR_RGB2GRAY),
-                    (64, 36), interpolation=cv2.INTER_AREA)
-                thumbnail_errors.append(float(np.mean(np.abs(
-                    base_gray.astype(np.float32)
-                    - candidate_gray.astype(np.float32)))))
-            if (thumbnail_errors
-                    and float(np.median(thumbnail_errors)) > 12.0):
-                issues.append(
-                    f"candidate {index} sampled content differs")
+                base_gray = cv2.equalizeHist(cv2.cvtColor(
+                    base_frame, cv2.COLOR_RGB2GRAY))
+                candidate_gray = cv2.equalizeHist(cv2.cvtColor(
+                    candidate_frame, cv2.COLOR_RGB2GRAY))
+                distances.append(hamming64(
+                    phash64(base_gray), phash64(candidate_gray)))
+            if distances and float(np.median(distances)) > 12:
+                issues.append(f"candidate {index} scene fingerprint differs")
     return list(dict.fromkeys(issues))

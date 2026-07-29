@@ -14,7 +14,10 @@ from typing import Callable
 import numpy as np
 
 from .cache.source_cache import SourceCache
-from .calibration.provenance import report_provenance
+from .calibration.provenance import (
+    calibrator_provenance,
+    report_provenance,
+)
 from .config import EvalConfig
 from .fusion import (build_category_errors, compute_confidence, compute_scores,
                      maybe_load)
@@ -314,7 +317,20 @@ def evaluate_endpoint_reference(
         conf = min(conf, 0.01)
 
     # Optional trained calibrator (§11.4) — never overrides a fail-closed NaN.
-    calibrator = maybe_load(calibrator_path or p.calibrator_path)
+    active_calibrator_path = calibrator_path or p.calibrator_path
+    calibrator = maybe_load(active_calibrator_path)
+    endpoint_feature_contract = feature_contract_hash("endpoint-2x")
+    calibrator_contract = calibrator_provenance(
+        active_calibrator_path,
+        meta=(calibrator.meta if calibrator else None),
+        expected_feature_contract_hash=endpoint_feature_contract,
+    )
+    if (calibrator_contract is not None
+            and calibrator_contract["feature_contract_hash"] not in (
+                "unverified", endpoint_feature_contract)):
+        raise ValueError(
+            "calibrator feature contract does not match the current "
+            "endpoint feature contract")
     if calibrator is not None and overall == overall:
         feats = {f"A_{cat}": A.get(cat, float("nan")) for cat in CATEGORY_FEATURES}
         feats = {k: (v if v == v else 0.0) for k, v in feats.items()}
@@ -383,7 +399,7 @@ def evaluate_endpoint_reference(
 
     meta = {
         "mode": "endpoint-2x",
-        "score_schema": "endpoint-reduced-reference-v1",
+        "score_schema": "endpoint-reduced-reference-v2",
         "score_semantics": "endpoint-referenced interpolation quality",
         "limitations": [
             "Source frames constrain endpoints but are not ground-truth intermediate frames.",
@@ -433,16 +449,19 @@ def evaluate_endpoint_reference(
             for category in CATEGORY_FEATURES
         },
         "calibrator": "lightgbm" if calibrator else "formula",
+        "calibrator_contract": calibrator_contract,
         "elapsed_seconds": round(time.perf_counter() - t_start, 2),
     }
     meta.update(report_provenance(
         mode="endpoint-2x",
-        score_schema="endpoint-reduced-reference-v1",
+        score_schema="endpoint-reduced-reference-v2",
         metric_contract="endpoint-metrics-v2",
         preset_contract=f"endpoint-{p.name}-v1",
-        feature_contract_hash=feature_contract_hash("endpoint-2x"),
+        feature_contract_hash=endpoint_feature_contract,
         backend_contract={"flow": backend.cache_identity()},
-        calibration_id=("lightgbm-external" if calibrator else None),
+        calibration_id=(
+            f"sha256:{calibrator_contract['sha256'][:16]}"
+            if calibrator_contract else None),
     ))
 
     report = Report(overall_score=overall,

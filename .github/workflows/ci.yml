@@ -33,7 +33,7 @@ jobs:
         run: >-
           python -m pytest -v
           tests/test_pipeline.py::test_bad_scores_below_good
-          tests/test_multimode.py::test_no_reference_120_native_duplicate_signal
+          tests/test_multimode.py::test_no_reference_60_freeze_lowers_common_time_score
           tests/test_multimode.py::test_full_reference_is_separate_and_detects_same_rate_error
 
   gpu:
@@ -62,5 +62,5 @@ jobs:
         run: >-
           python -m pytest -v
           tests/test_pipeline.py::test_bad_scores_below_good
-          tests/test_multimode.py::test_no_reference_120_native_duplicate_signal
+          tests/test_multimode.py::test_no_reference_60_freeze_lowers_common_time_score
           tests/test_multimode.py::test_full_reference_is_separate_and_detects_same_rate_error

@@ -3,16 +3,74 @@
 from __future__ import annotations
 
 import importlib.metadata
+from functools import lru_cache
 from hashlib import sha256
+import os
 import platform
 from pathlib import Path
 import subprocess
 import sys
 from typing import Any
 
+from .._build_info import BUILD_COMMIT, BUILD_DIRTY
+from .._version import VERSION
 from ..motion.flow_estimator import get_flow_backend
 
 CALIBRATION_SCHEMA_VERSION = 1
+
+
+@lru_cache(maxsize=1)
+def _build_contract() -> dict[str, Any]:
+    package_root = Path(__file__).resolve().parents[1]
+    digest = sha256()
+    for path in sorted(package_root.rglob("*.py")):
+        relative = path.relative_to(package_root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    try:
+        version = importlib.metadata.version("rr-vfiqa")
+    except importlib.metadata.PackageNotFoundError:
+        version = "source-tree"
+    return {
+        "source_version": VERSION,
+        "distribution_version": version,
+        "package_source_sha256": digest.hexdigest(),
+        "embedded_commit": os.environ.get(
+            "RR_VFIQA_BUILD_COMMIT", BUILD_COMMIT),
+        "embedded_dirty": BUILD_DIRTY,
+    }
+
+
+def file_sha256(path: str | Path) -> str:
+    digest = sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def calibrator_provenance(
+    path: str | Path | None,
+    *,
+    meta: dict[str, Any] | None,
+    expected_feature_contract_hash: str,
+) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    resolved = Path(path).resolve()
+    if not resolved.exists():
+        return None
+    metadata = meta or {}
+    return {
+        "path": str(resolved),
+        "sha256": file_sha256(resolved),
+        "feature_contract_hash": metadata.get(
+            "feature_contract_hash", "unverified"),
+        "expected_feature_contract_hash": expected_feature_contract_hash,
+        "training_manifest_hash": metadata.get("training_manifest_hash"),
+    }
 
 
 def _git_state() -> dict[str, Any]:
@@ -38,8 +96,9 @@ def _git_state() -> dict[str, Any]:
                 if diff.stdout or staged.stdout else None),
         }
     except (OSError, subprocess.SubprocessError):
+        embedded = _build_contract()["embedded_commit"]
         return {
-            "commit_sha": "unknown",
+            "commit_sha": embedded,
             "working_tree_dirty": None,
             "tracked_diff_sha256": None,
         }
@@ -77,6 +136,7 @@ def calibration_provenance(
             "flow_backend": backend.cache_identity(),
         },
         "dataset": dataset,
+        "build_contract": _build_contract(),
     }
     provenance.update(_git_state())
     return provenance
@@ -107,6 +167,7 @@ def report_provenance(
             "python": sys.version.split()[0],
             "packages": _versions(),
         },
+        "build_contract": _build_contract(),
         "production_gate": False,
         "mode": mode,
         "score_schema": score_schema,

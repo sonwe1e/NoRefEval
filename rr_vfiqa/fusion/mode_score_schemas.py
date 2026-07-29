@@ -35,19 +35,14 @@ class FeatureSpec:
 
 NR_FEATURES: dict[str, dict[str, FeatureSpec]] = {
     "temporal": {
-        "nr_mct_native_mean": FeatureSpec(24.0),
         "nr_mct_1_60_mean": FeatureSpec(30.0),
         "nr_mct_1_30_mean": FeatureSpec(45.0),
         "nr_common_self_cycle": FeatureSpec(35.0),
-        "nr_native_self_cycle": FeatureSpec(28.0),
         "nr_duplicate_fraction": FeatureSpec(0.20),
         "nr_freeze_fraction": FeatureSpec(0.30),
-        "nr_native_duplicate_fraction": FeatureSpec(0.15),
-        "nr_native_freeze_fraction": FeatureSpec(0.25),
     },
     "motion": {
         "nr_common_self_comp": FeatureSpec(0.18),
-        "nr_native_self_comp": FeatureSpec(0.15),
         "nr_flow_accel_ratio": FeatureSpec(0.50),
         "nr_flow_jerk_ratio": FeatureSpec(0.75),
         "nr_flow_fold_fraction": FeatureSpec(0.08),
@@ -70,8 +65,11 @@ NR_FEATURES: dict[str, dict[str, FeatureSpec]] = {
     "ui_structure": {
         "nr_ui_edge_instability": FeatureSpec(0.12),
         "nr_text_stroke_instability": FeatureSpec(0.20),
+        "nr_ui_component_instability": FeatureSpec(0.35),
     },
     "technical": {
+        "gtq_sharpness": FeatureSpec(
+            180.0, good=260.0, lower_is_better=False),
         "gtq_blockiness": FeatureSpec(0.60, good=1.0),
         "gtq_noise": FeatureSpec(16.0),
         "nr_learned_vqa_error": FeatureSpec(1.0),
@@ -114,6 +112,9 @@ FR_FEATURES: dict[str, dict[str, FeatureSpec]] = {
     },
     "motion": {
         "fr_flow_error": FeatureSpec(0.30),
+        "fr_tile_flow_error_p90": FeatureSpec(0.35),
+        "fr_camera_residual_flow_error": FeatureSpec(0.30),
+        "fr_salient_flow_error": FeatureSpec(0.35),
         "fr_trajectory_deviation": FeatureSpec(2.0),
     },
 }
@@ -156,7 +157,7 @@ CORE_CATEGORIES = {
 }
 
 SCHEMA_IDS = {
-    EvaluationMode.NO_REFERENCE: "nr-stability-risk-v2",
+    EvaluationMode.NO_REFERENCE: "nr-stability-risk-v3-common-time",
     EvaluationMode.FULL_REFERENCE: "fr-same-rate-fidelity-v2",
 }
 

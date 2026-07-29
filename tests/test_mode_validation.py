@@ -12,7 +12,7 @@ from rr_vfiqa.calibration import mode_validation
 def _report(score: float, mode: str):
     meta = {
         "score_schema": (
-            "nr-stability-risk-v2"
+            "nr-stability-risk-v3-common-time"
             if mode == "no-reference" else "fr-same-rate-fidelity-v2"),
         "metric_contract": (
             "nr-metrics-v2"
@@ -23,6 +23,12 @@ def _report(score: float, mode: str):
     }
     return SimpleNamespace(
         overall_score=score,
+        confidence=0.8,
+        features=(
+            {"nr_common_self_cycle": 1.0 if score > 80 else 10.0}
+            if mode == "no-reference"
+            else {"fr_l1_y": 0.0 if score > 80 else 10.0}),
+        worst_windows=[],
         meta=meta,
         to_dict=lambda: {"overall_score": score},
     )
@@ -41,6 +47,8 @@ def test_directional_validation_is_mode_local(monkeypatch, mode):
     assert result["directional_accuracy"] == 1.0
     assert result["mode"] == mode
     assert result["production_gate"] is False
+    assert result["mean_score_margin"] == 30.0
+    assert result["feature_directional_accuracy"] == 1.0
     assert result["metric_contract"].startswith(
         "nr-" if mode == "no-reference" else "fr-")
 
