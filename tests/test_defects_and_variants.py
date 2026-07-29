@@ -93,11 +93,26 @@ def test_frame_offset_detected(videos, cache_dir, flow_backend, tmp_path):
 
 
 def test_dropped_frames_survive(videos, cache_dir, flow_backend, tmp_path):
-    from rr_vfiqa.testing.synth import build_dropped_candidate
     from rr_vfiqa.io.video_reader import VideoReader
+    from rr_vfiqa.testing.synth import build_dropped_candidate
 
     good_frames = VideoReader(str(videos["good"])).decode_all()
     dropped = build_dropped_candidate(good_frames, tmp_path)
     rep = _eval(videos["source"], dropped, cache_dir + "/drop", flow_backend)
+    assert rep.meta["status"] in ("ok", "degraded")
+    assert rep.confidence > 0
+
+
+def test_vfr_candidate_survives(videos, cache_dir, flow_backend, tmp_path):
+    """Variable-frame-rate candidate (§2.1): PTS-based alignment must not
+    crash and must stay honest in the report meta."""
+    from rr_vfiqa.io.video_reader import VideoReader
+    from rr_vfiqa.testing.synth import build_vfr_candidate
+
+    good_frames = VideoReader(str(videos["good"])).decode_all()
+    vfr = build_vfr_candidate(good_frames, tmp_path)
+    cand_meta = VideoReader(str(vfr)).meta
+    assert cand_meta.fps == pytest.approx(120, abs=6)   # mean rate preserved
+    rep = _eval(videos["source"], vfr, cache_dir + "/vfr", flow_backend)
     assert rep.meta["status"] in ("ok", "degraded")
     assert rep.confidence > 0

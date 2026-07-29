@@ -37,6 +37,31 @@ def test_synthetic_validation_tracks_fr(tmp_path, flow_backend):
     assert out["pairwise_accuracy"] >= 0.8
 
 
+def test_model_ranking_on_interpolator_ladder(tmp_path):
+    """§12.1 loop with organic model outputs: reference interpolators at
+    different flow resolutions + naive blender, ranked against FR truth.
+    The primary product claim — same-source model ranking — must hold."""
+    from rr_vfiqa.calibration import run_model_validation
+
+    out = run_model_validation(tmp_path, seeds=(7,), n_frames=160, w=320,
+                               h=192, interp_backend="farneback",
+                               device="cpu", widths=(224, None),
+                               eval_preset="fast", eval_backend="farneback")
+    by_model = {r["model"]: r for r in out["rows"]}
+    # The perfect interleave must beat the naive crossfade blender.
+    assert by_model["perfect"]["overall"] > by_model["linear"]["overall"]
+    # Same-source ranking accuracy (§11.5): evaluator order vs FR order.
+    assert out["within_seed_pairwise"] >= 0.75
+    assert out["srcc"] >= 0.6
+    # Motion-compensated features must track FR quality strongly (the
+    # route's claim that temporal consistency is the backbone). At 4
+    # candidates many features tie at |SRCC|=1.0, so check strength, not rank.
+    corr = out["feature_correlations"]
+    backbone = {k: v for k, v in corr.items()
+                if k.startswith(("mct_", "cycle_", "comp_"))}
+    assert backbone and max(backbone.values()) >= 0.8
+
+
 def test_defect_localization_recall(tmp_path, flow_backend):
     """Each single-defect candidate must be localized with a correct label
     in its ground-truth segment (§P3: 各坏例类别 F1, worst-case recall)."""

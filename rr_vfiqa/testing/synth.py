@@ -22,6 +22,7 @@ Also usable to build calibration corpora: compute full-reference metrics on
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 import av
@@ -436,3 +437,30 @@ def build_dropped_candidate(good_frames: np.ndarray, out_dir: str | Path,
     keep[[min(n - 1, int(f * n)) for f in drop_fractions]] = False
     return write_video(Path(out_dir) / "candidate_dropped_120.mp4",
                        good_frames[keep], 120)
+
+
+def build_vfr_candidate(good_frames: np.ndarray, out_dir: str | Path,
+                        jitter_hz: tuple[float, ...] = (112.0, 130.0)) -> Path:
+    """Candidate with variable frame durations alternating between jitter_hz
+    rates (VFR corruption, §2.1) — mean rate stays ~120 FPS."""
+    path = Path(out_dir) / "candidate_vfr_120.mp4"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    h, w = good_frames.shape[1:3]
+    ticks = 10000                     # stream timebase: 0.1 ms units
+    with av.open(str(path), "w") as out:
+        st = out.add_stream("h264", rate=120)
+        st.width, st.height, st.pix_fmt = w, h, "yuv420p"
+        st.options = {"crf": "18", "preset": "medium"}
+        st.time_base = Fraction(1, ticks)
+        pts = 0
+        for i, f in enumerate(good_frames):
+            dur = ticks / jitter_hz[i % len(jitter_hz)]
+            frame = av.VideoFrame.from_ndarray(f, format="rgb24")
+            frame.pts = int(round(pts))
+            frame.time_base = st.time_base
+            pts += dur
+            for packet in st.encode(frame):
+                out.mux(packet)
+        for packet in st.encode():
+            out.mux(packet)
+    return path

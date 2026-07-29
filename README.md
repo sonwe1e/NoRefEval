@@ -98,6 +98,11 @@ resolution; `meta.audited_windows` reports the count.
 python -m rr_vfiqa.calibration.validate --synthetic --workdir cal_run
 # → SRCC / PLCC / pairwise accuracy of overall_score vs full-reference PSNR
 
+# model-ranking validation with ORGANIC outputs: reference interpolators
+# (naive linear blend + forward-splat flow VFI at several resolutions)
+# ranked against FR truth across scene seeds, + per-feature SRCC table
+python -m rr_vfiqa.calibration.model_validation --workdir mv_run --interp-backend raft
+
 # per-defect-category localization: recall / precision / F1 of worst-window
 # labels against ground-truth defect segments
 python -m rr_vfiqa.calibration.detection_eval --workdir det_run
@@ -109,12 +114,22 @@ python -m rr_vfiqa.calibration.detection_eval --defects blur ghost freeze \
 python -m rr_vfiqa.benchmark --source src.mp4 --candidates a.mp4 b.mp4 --flow-backend raft
 ```
 
-Bootstrap numbers on synthetic content (RTX 4090): severity-ladder
-correlation PLCC ≈ 0.96 / SRCC 0.7 / pairwise 0.8 vs FR-PSNR; defect
-localization recall 1.0 / F1 0.67 across six defect types at standard preset;
-60 s 1080p timing in `docs/BENCHMARKS.md`. Real acceptance targets
-(SRCC ≥ 0.8 leave-one-game-out, ≥ 80% A/B accuracy, worst-10% recall ≥ 90%)
-require the §P3 data:
+Bootstrap numbers (RTX 4090):
+
+| validation | result |
+|---|---|
+| model ranking vs FR-PSNR (interpolators × 3 seeds) | SRCC 0.95, pairwise 0.93, **same-source ranking 1.00** |
+| strongest FR correlates | motion-compensated temporals (|SRCC| 0.97–0.99), cycle (0.95), composition (0.83) |
+| severity ladder vs FR-PSNR | PLCC 0.96, SRCC 0.7, pairwise 0.8 |
+| defect localization (6 types, standard preset) | recall 1.0, F1 0.67 |
+| 60 s 1080p, fast/RAFT | 64.6–65.5 s/candidate, 907 MB VRAM — see `docs/BENCHMARKS.md` |
+
+The interpolator ladder (`rr_vfiqa.testing.interpolator`) closes the §12.1
+pseudo-GT loop with emergent rather than authored artifacts: ranking
+perfect > flow-native ≈ flow-320 > linear-blend matches FR ordering on
+every same-source pair. Real acceptance targets (SRCC ≥ 0.8
+leave-one-game-out, ≥ 80% A/B accuracy on real model outputs, worst-10%
+recall ≥ 90%) still require the §P3 data:
 
 1. real 120/240 FPS pseudo-GT (the harness in `rr_vfiqa.calibration`
    measures SRCC/PLCC/pairwise once you supply it);
@@ -125,7 +140,7 @@ require the §P3 data:
 
 ## Testing
 
-42 tests, green on both flow backends:
+46 tests, green on both flow backends:
 
 ```bash
 python -m pytest                            # Farneback (CPU-portable)
@@ -158,8 +173,10 @@ rr_vfiqa/
 ├── models/      unified backend interfaces (flow/segmentation/tracker/depth/VQA)
 ├── fusion/      normalization, aggregation, confidence, monotonic calibrator
 ├── report/      JSON, timeline, badcase clips, heatmaps
-├── testing/     synthetic scene + 11-defect corpus + alignment stress variants
-├── calibration/ pseudo-GT corpora, FR metrics, SRCC/PLCC/pairwise validation
+├── testing/     synthetic scene, 12-defect corpus, reference interpolators,
+│                alignment stress variants (scene cut / offset / drops / VFR)
+├── calibration/ pseudo-GT corpora, FR metrics, model-ranking validation,
+│                per-defect localization, per-feature FR correlations
 ├── benchmark.py timing / VRAM / cache-speedup measurement
 ├── schema.py    contracts + explicit backward_warp / forward_splat
 └── pipeline.py / cli.py
