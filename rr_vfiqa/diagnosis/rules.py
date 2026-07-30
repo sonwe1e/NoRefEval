@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
 
 from .schema import DiagnosticIssue, Evidence
@@ -278,6 +279,8 @@ def diagnose_windows(
     windows_scalars: list[tuple[float, float, int, dict[str, float], float]],
     nms_seconds: float = 0.5,
     severity_floor: float = 0.10,
+    *,
+    error_maps: dict[int, np.ndarray] | None = None,
 ) -> list[DiagnosticIssue]:
     """Build issues from per-window data.
 
@@ -285,10 +288,17 @@ def diagnose_windows(
     window_confidence)``.  Windows that fire one or more rules become issues;
     same-type issues close in time are merged so a sustained defect reads as
     one card rather than a stack.
+
+    ``error_maps`` maps ``center_index`` -> a dense (H, W) field; when supplied
+    the hottest issue per window gets spatial ``boxes`` extracted from that
+    window's map so the report can annotate *where* the defect sits
+    (USERPLAN P1).
     """
     raw: list[DiagnosticIssue] = []
     for start, end, center, scalars, win_conf in windows_scalars:
-        for rule, evs, mass in evaluate_rules(scalars):
+        emap = error_maps.get(center) if error_maps else None
+        fired = evaluate_rules(scalars)
+        for rule, evs, mass in fired:
             severity = float(np.clip(mass, 0.0, 1.0))
             if severity < severity_floor:
                 continue
@@ -296,6 +306,11 @@ def diagnose_windows(
             confidence = float(np.clip(
                 0.55 * win_conf + 0.45 * min(1.0, len(evs) / 3.0)
                 + 0.10 * strength_mean, 0.0, 1.0))
+            # Attach boxes from the error map to the strongest issue only, so
+            # the annotation reflects the dominant defect in this window.
+            boxes: list[list[int]] = []
+            if emap is not None and rule is fired[0][0]:
+                boxes = boxes_from_error_map(emap)
             raw.append(DiagnosticIssue(
                 issue_type=rule.issue_type,
                 title=rule.title,
@@ -307,8 +322,44 @@ def diagnose_windows(
                 evidence=evs,
                 probable_causes=list(rule.probable_causes),
                 center_index=center,
+                boxes=boxes,
             ))
     return merge_issues(raw, nms_seconds)
+
+
+def boxes_from_error_map(error_map: np.ndarray, *,
+                         threshold: float = 0.55,
+                         min_area: int = 64,
+                         max_boxes: int = 3) -> list[list[int]]:
+    """Extract up to ``max_boxes`` bounding boxes of the high-value region.
+
+    Returns a list of ``[x, y, w, h]`` boxes in pixel coordinates of
+    ``error_map``.  Used to populate ``DiagnosticIssue.boxes`` so the report
+    can annotate *where* the defect sits (USERPLAN P1).
+    """
+    if error_map is None or error_map.size == 0:
+        return []
+    m = np.nan_to_num(error_map.astype(np.float32), nan=0.0)
+    vmax = float(np.percentile(m, 99)) if m.max() > 0 else 1.0
+    if vmax <= 0:
+        return []
+    binary = (m >= threshold * vmax).astype(np.uint8)
+    # Light clean-up so broad hot regions become tight contours.
+    kernel = np.ones((3, 3), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    boxes: list[list[int]] = []
+    for cnt in sorted(contours, key=cv2.contourArea, reverse=True):
+        if len(boxes) >= max_boxes:
+            break
+        area = int(cv2.contourArea(cnt))
+        if area < min_area:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        boxes.append([int(x), int(y), int(w), int(h)])
+    return boxes
 
 
 def merge_issues(issues: list[DiagnosticIssue], nms_seconds: float) -> list[DiagnosticIssue]:

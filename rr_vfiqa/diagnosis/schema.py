@@ -87,6 +87,11 @@ class DiagnosticIssue:
     center_index: int = -1
     boxes: list[list[int]] = field(default_factory=list)
     maps: list[str] = field(default_factory=list)   # names of heatmaps in out/heatmaps/
+    # USERPLAN §10: paths (relative to result root) to the companion videos and
+    # keyframe thumbnail for this issue, populated by the report writer.
+    clip_paths: dict[str, str] = field(default_factory=dict)
+    # original / overlay / compare -> relative path
+    thumbnail: str = ""   # keyframe with boxes drawn, relative path
 
     def to_dict(self) -> dict[str, Any]:
         band_key, band_label = severity_band(self.severity)
@@ -105,6 +110,8 @@ class DiagnosticIssue:
             "probable_causes": list(self.probable_causes),
             "boxes": [list(b) for b in self.boxes],
             "maps": list(self.maps),
+            "clip_paths": dict(self.clip_paths),
+            "thumbnail": self.thumbnail,
             "causes_are_inferred": True,
         }
 

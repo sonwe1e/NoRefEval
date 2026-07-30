@@ -219,6 +219,17 @@ def _render_card(i: int, issue: dict) -> str:
         for m in maps)
     map_block = (f'<h4>热力图</h4><div class="heatmaps">{map_imgs}</div>'
                  if map_imgs else "")
+    # USERPLAN §10: embed the companion videos + keyframe thumbnail.
+    clips = issue.get("clip_paths") or {}
+    clip_rows = "".join(
+        f'<li><a href="{_esc(p)}" target="_blank">{html.escape(label)}</a></li>'
+        for label, p in clips.items() if p)
+    clip_block = (f'<h4>坏例视频</h4><ul class="clips">{clip_rows or "<li>—</li>"}</ul>'
+                  if clip_rows else "")
+    thumb = issue.get("thumbnail", "")
+    thumb_block = (f'<h4>关键帧</h4><a href="{_esc(thumb)}" target="_blank">'
+                   f'<img class="thumb" src="{_esc(thumb)}" alt="keyframe" '
+                   f'loading="lazy"></a>' if thumb else "")
     return (
         f'<article class="card band-{band}" id="issue-{i}">'
         f'<div class="card-h" style="border-left:6px solid {color}">'
@@ -233,7 +244,7 @@ def _render_card(i: int, issue: dict) -> str:
         f'</div>'
         f'<div class="card-b"><h4>证据</h4><ul>{ev_rows or "<li>—</li>"}</ul>'
         f'<h4>可能原因</h4><ul>{causes or "<li>—</li>"}</ul>'
-        f'{map_block}</div>'
+        f'{map_block}{thumb_block}{clip_block}</div>'
         f'</article>')
 
 
@@ -281,6 +292,9 @@ text-transform:uppercase;letter-spacing:.04em}section{max-width:1080px;margin:0 
 .heatmaps img.heat{width:180px;height:auto;border-radius:6px;
 border:1px solid var(--line);cursor:zoom-in;transition:transform .15s}
 .heatmaps img.heat:hover{transform:scale(1.5);z-index:2;position:relative}
+.clips{list-style:square;padding-left:18px}.clips a{color:#7fd1ff}
+.thumb{width:240px;height:auto;border-radius:6px;border:1px solid var(--line);
+margin-top:4px}
 .meta{color:var(--mut);padding-bottom:40px}.meta li{margin:3px 0}
 .ok{color:#27ae60}
 @media (prefers-color-scheme: light){

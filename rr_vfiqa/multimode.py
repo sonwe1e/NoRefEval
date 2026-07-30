@@ -34,7 +34,9 @@ from .motion.flow_estimator import get_flow_backend
 from .pipeline import evaluate_endpoint_reference
 from .report import (
     export_badcase_clips,
+    export_compare_clips,
     export_overlay_clips,
+    extract_compare_panels,
     render_timeline_md,
     render_timeline_png,
     write_html_report,
@@ -417,9 +419,27 @@ def _write_outputs(
     diag_issues = ((report.meta or {}).get("diagnostics") or {}).get("issues") or []
     if export_clips and diag_issues:
         overlay_maps = _issue_error_maps(diag_issues, windows)
-        export_overlay_clips(
+        overlay_paths = export_overlay_clips(
             candidate_video, diag_issues, out / "badcases",
             out_fps=candidate.meta.fps, error_maps=overlay_maps)
+        # USERPLAN §10 item 3: diagnostic compare clip (multi-panel).
+        compare_paths = _export_compare(candidate_video, diag_issues, windows,
+                                        overlay_maps, out / "badcases",
+                                        reference_video=None)
+        # USERPLAN §10: keyframe thumbnail with defect boxes drawn.
+        thumb_paths = _export_keyframes(candidate_video, diag_issues,
+                                        out / "badcases")
+        # Write the paths back into the issues so the HTML report can link them.
+        for idx, issue in enumerate(diag_issues):
+            clips = {}
+            if idx < len(overlay_paths) and overlay_paths[idx].exists():
+                clips["overlay"] = f"badcases/{overlay_paths[idx].name}"
+            if idx < len(compare_paths) and compare_paths[idx].exists():
+                clips["compare"] = f"badcases/{compare_paths[idx].name}"
+            if clips:
+                issue["clip_paths"] = clips
+            if idx < len(thumb_paths) and thumb_paths[idx].exists():
+                issue["thumbnail"] = f"badcases/{thumb_paths[idx].name}"
 
 
 def _issue_error_maps(diag_issues: list[dict],
@@ -444,6 +464,69 @@ def _issue_error_maps(diag_issues: list[dict],
                 out[i] = arr
                 break
     return out
+
+
+def _export_keyframes(candidate_video: str, issues: list[dict],
+                      out_dir: Path) -> list[Path]:
+    """Extract a keyframe per issue with its defect boxes drawn (USERPLAN §10).
+
+    Returns a list of PNG paths aligned with ``issues`` (Path() when the
+    frame could not be extracted).
+    """
+    import cv2
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for n, issue in enumerate(issues[:12]):
+        t_center = 0.5 * (float(issue.get("start_time", 0)) +
+                           float(issue.get("end_time", 0)))
+        out_path = out_dir / f"issue_{n:03d}_keyframe.png"
+        try:
+            import av
+            with av.open(candidate_video) as inp:
+                vs = inp.streams.video[0]
+                inp.seek(int(t_center * av.time_base), any_frame=False,
+                         backward=True)
+                frame = None
+                for f in inp.decode(vs):
+                    t = float(f.pts * vs.time_base) if f.pts is not None else 0.0
+                    if t >= t_center - 1e-3:
+                        frame = f.to_ndarray(format="bgr24")
+                        break
+                if frame is None:
+                    paths.append(Path())
+                    continue
+            annotated = frame.copy()
+            for box in (issue.get("boxes") or []):
+                if len(box) == 4:
+                    x, y, w, h = box
+                    # Boxes may be at working resolution; scale to frame size.
+                    scale_x = annotated.shape[1] / max(issue.get("_map_w", w + x), 1)
+                    scale_y = annotated.shape[0] / max(issue.get("_map_h", h + y), 1)
+                    x, w = int(x * scale_x), int(w * scale_x)
+                    y, h = int(y * scale_y), int(h * scale_y)
+                    cv2.rectangle(annotated, (x, y), (x + w, y + h),
+                                  (0, 0, 255), 2)
+            cv2.imwrite(str(out_path), annotated)
+            paths.append(out_path)
+        except Exception:  # noqa: BLE001
+            paths.append(Path())
+    return paths
+
+
+def _export_compare(candidate_video: str, issues: list[dict],
+                    windows: list[WindowFeatures],
+                    overlay_maps: dict[int, np.ndarray],
+                    out_dir: Path, reference_video: str | None = None) -> None:
+    """Build the multi-panel compare clip per issue (USERPLAN §10)."""
+    all_panels: list[list[tuple[np.ndarray, str]]] = []
+    for n, issue in enumerate(issues[:12]):
+        emap = overlay_maps.get(n)
+        panels = extract_compare_panels(
+            candidate_video, issue, error_map=emap,
+            reference_video=reference_video)
+        all_panels.append(panels)
+    export_compare_clips(issues, out_dir, panels=all_panels)
 
 
 def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],
@@ -623,6 +706,14 @@ def evaluate_no_reference(
         overall = cad_rep.overall
     subscores["common_time_quality"] = cad_rep.common_time_quality
     subscores["cadence_integrity"] = cad_rep.cadence_integrity
+    # --- USERPLAN §8: dense error maps for the top-risk windows -----------
+    # Computed before diagnosis so issues can carry spatial boxes (USERPLAN
+    # P1).  Scalar metrics run for every window; the heavier dense fields are
+    # only computed for the windows that feed the worst-issue cards.
+    nr_error_maps = _compute_nr_error_maps(
+        candidate, cfg, backend, window_features, worst)
+
+    # Diagnose with error maps so issues carry spatial boxes (USERPLAN P1).
     diag_ws = [
         (window_times(wf.window, candidate.meta)[0],
          window_times(wf.window, candidate.meta)[1],
@@ -630,14 +721,29 @@ def evaluate_no_reference(
          float(wf.labels.get("metric_confidence", 1.0)))
         for wf in window_features
     ]
-    nr_issues = diagnose_windows(diag_ws, cfg.preset.temporal_nms_seconds)
-
-    # --- USERPLAN §8: dense error maps for the top-risk windows -----------
-    # Scalar metrics run for every window; the heavier dense fields are only
-    # computed for the windows that feed the worst-issue cards, so report-side
-    # rendering stays bounded.  Maps are matched to issues by center_index.
-    nr_error_maps = _compute_nr_error_maps(
-        candidate, cfg, backend, window_features, worst)
+    # Per center, pick the single most diagnostic map for box extraction.
+    _NR_BOX_MAP = {
+        "duplicate_freeze": "duplicate_frame_indicator",
+        "generated_blur": "phase_sharpness_map",
+        "ghost_double_exposure": "composition_error_map",
+        "tearing_flow_folding": "flow_fold_map",
+        "ui_text_instability": "ui_edge_instability_map",
+    }
+    nr_error_by_center: dict[int, np.ndarray] = {}
+    for c, maps in nr_error_maps.items():
+        if not maps:
+            continue
+        preferred_name = None
+        # Choose by the issue type is not known yet at this stage; fall back to
+        # the first available map after normalization.
+        for name in ("composition_error_map", "mct_residual_map",
+                     "flow_fold_map", "duplicate_frame_indicator"):
+            if name in maps:
+                preferred_name = name
+                break
+        nr_error_by_center[c] = maps[preferred_name or next(iter(maps))]
+    nr_issues = diagnose_windows(diag_ws, cfg.preset.temporal_nms_seconds,
+                                 error_maps=nr_error_by_center)
 
     # Pick, for each issue, the single most diagnostic map to render: the
     # map whose family best explains the issue's evidence.  The mapping is by
@@ -899,7 +1005,15 @@ def evaluate_full_reference(
     _fr_tier3(candidate, reference, cfg, backend, window_features, worst,
               alignment)
 
+    # --- USERPLAN P1: dense error maps for the top-risk FR windows -------
+    # Computed before diagnosis so issues can carry spatial boxes (USERPLAN
+    # P1).
+    fr_error_maps = _compute_fr_error_maps(
+        candidate, reference, cfg, backend, window_features, worst,
+        alignment, geometry_policy)
+
     # USERPLAN §7: structured diagnostic evidence (no cadence term for FR).
+    # Diagnose with error maps so issues carry spatial boxes.
     fr_diag_ws = [
         (window_times(wf.window, candidate.meta)[0],
          window_times(wf.window, candidate.meta)[1],
@@ -907,12 +1021,20 @@ def evaluate_full_reference(
          float(wf.labels.get("metric_confidence", 1.0)))
         for wf in window_features
     ]
-    fr_issues = diagnose_windows(fr_diag_ws, cfg.preset.temporal_nms_seconds)
-
-    # --- USERPLAN P1: dense error maps for the top-risk FR windows -------
-    fr_error_maps = _compute_fr_error_maps(
-        candidate, reference, cfg, backend, window_features, worst,
-        alignment, geometry_policy)
+    # Per center, pick the single most diagnostic map for box extraction.
+    fr_error_by_center: dict[int, np.ndarray] = {}
+    for c, maps in fr_error_maps.items():
+        if not maps:
+            continue
+        for name in ("luma_error_map", "mcr_difference_map",
+                     "flow_error_map", "edge_mismatch_map"):
+            if name in maps:
+                fr_error_by_center[c] = maps[name]
+                break
+        else:
+            fr_error_by_center[c] = next(iter(maps.values()))
+    fr_issues = diagnose_windows(fr_diag_ws, cfg.preset.temporal_nms_seconds,
+                                 error_maps=fr_error_by_center)
 
     # Associate each FR issue with its preferred error map (by center_index).
     _FR_ISSUE_MAP = {
