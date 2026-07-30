@@ -211,6 +211,14 @@ def _render_card(i: int, issue: dict) -> str:
         for e in ev)
     causes = "".join(f"<li>{_esc(c)} <em>(推断)</em></li>"
                      for c in issue.get("probable_causes", []) or [])
+    maps = issue.get("maps", []) or []
+    map_imgs = "".join(
+        f'<a href="{_esc(m)}" target="_blank">'
+        f'<img class="heat" src="{_esc(m)}" alt="{_esc(m)}" '
+        f'loading="lazy"></a>'
+        for m in maps)
+    map_block = (f'<h4>热力图</h4><div class="heatmaps">{map_imgs}</div>'
+                 if map_imgs else "")
     return (
         f'<article class="card band-{band}" id="issue-{i}">'
         f'<div class="card-h" style="border-left:6px solid {color}">'
@@ -224,7 +232,8 @@ def _render_card(i: int, issue: dict) -> str:
         f'<span>轨道 {_esc(issue.get("track"))}</span>'
         f'</div>'
         f'<div class="card-b"><h4>证据</h4><ul>{ev_rows or "<li>—</li>"}</ul>'
-        f'<h4>可能原因</h4><ul>{causes or "<li>—</li>"}</ul></div>'
+        f'<h4>可能原因</h4><ul>{causes or "<li>—</li>"}</ul>'
+        f'{map_block}</div>'
         f'</article>')
 
 
@@ -268,6 +277,10 @@ text-transform:uppercase;letter-spacing:.04em}section{max-width:1080px;margin:0 
 .card-b{padding:0 14px 12px}.card-b h4{margin:8px 0 2px;color:var(--mut);font-size:12px}
 .card-b ul{margin:0;padding-left:18px}.card-b code{color:#7fd1ff}
 .card-b em{color:var(--mut);font-style:normal;font-size:11px}
+.heatmaps{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+.heatmaps img.heat{width:180px;height:auto;border-radius:6px;
+border:1px solid var(--line);cursor:zoom-in;transition:transform .15s}
+.heatmaps img.heat:hover{transform:scale(1.5);z-index:2;position:relative}
 .meta{color:var(--mut);padding-bottom:40px}.meta li{margin:3px 0}
 .ok{color:#27ae60}
 @media (prefers-color-scheme: light){

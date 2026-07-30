@@ -62,6 +62,41 @@ def _unique_coverage(
     return float(len(covered) / max(n_frames, 1))
 
 
+def _compute_nr_error_maps(candidate, cfg, backend, window_features, worst, *,
+                           top_k: int = 8):
+    """Compute dense error maps for the top-risk NR windows (USERPLAN §8).
+
+    Only the windows that feed the worst-issue cards pay this cost; the maps
+    are stored on ``wf.error_maps`` and later matched to ``DiagnosticIssue``
+    objects by ``center_index``.  Returns ``{center_index: {name: array}}``.
+    """
+    from .metrics import nr_window_maps
+    if not worst or not window_features:
+        return {}
+    # worst windows are already sorted worst-first by the caller.
+    centers = [int(w.center_index) for w in worst[:top_k]]
+    by_center = {int(wf.window.center): wf for wf in window_features}
+    out: dict[int, dict[str, np.ndarray]] = {}
+    for center in centers:
+        wf = by_center.get(center)
+        if wf is None:
+            continue
+        try:
+            bundle = candidate.read_frames(
+                wf.window.indices, width=cfg.preset.flow_width)
+            flows = WindowFlows(bundle, backend)
+            lag_plan = TemporalLagPlan.build(bundle.times)
+            flow_plan = FlowPairPlan.for_no_reference(lag_plan)
+            flows.precompute(flow_plan.unique_pairs())
+            maps = nr_window_maps(bundle, flows, cfg)
+            if maps:
+                wf.error_maps.update(maps)
+                out[center] = dict(maps)
+        except Exception as exc:  # never let map generation fail the report
+            wf.labels["error_map_failure"] = repr(exc)
+    return out
+
+
 def _feature_summary(windows: list[WindowFeatures]) -> dict[str, float]:
     output: dict[str, float] = {}
     keys = set().union(*(set(w.scalars) for w in windows)) if windows else set()
@@ -252,6 +287,44 @@ def _write_outputs(
             candidate_video, diag_issues, out / "badcases",
             out_fps=candidate.meta.fps)
 
+    # --- USERPLAN §8: render heatmap PNGs for issues that have a map -----
+    _render_issue_heatmaps(report, windows, out)
+
+
+def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],
+                           out: Path) -> None:
+    """Write ``heatmaps/issue_NNN_<map>.png`` for issues carrying a map name.
+
+    Each issue was associated with one preferred error map (see the
+    ``_NR_ISSUE_MAP`` table in ``evaluate_no_reference``); here we look up that
+    map on the matching window and save a jet PNG.  The issue's ``maps`` list
+    is rewritten from the map-name to the relative path so the HTML report can
+    link to it (USERPLAN §9 directory layout).
+    """
+    from rr_vfiqa.visualization import save_heatmap
+    diag = ((report.meta or {}).get("diagnostics") or {})
+    issues = diag.get("issues") or []
+    if not issues or not windows:
+        return
+    by_center = {int(wf.window.center): wf for wf in windows}
+    heat_dir = out / "heatmaps"
+    for i, issue in enumerate(issues):
+        if not issue.get("maps"):
+            continue
+        wf = by_center.get(int(issue.get("center_index", -1)))
+        if wf is None:
+            continue
+        rel_maps: list[str] = []
+        for name in issue["maps"]:
+            arr = wf.error_maps.get(name) if wf else None
+            if arr is None:
+                continue
+            label = f"{issue.get('title', name)}  #{i:03d}"
+            png = save_heatmap(arr, heat_dir / f"issue_{i:03d}_{name}.png",
+                               label=label)
+            rel_maps.append(f"heatmaps/{png.name}")
+        issue["maps"] = rel_maps
+
 
 def evaluate_no_reference(
     candidate_video: str,
@@ -391,6 +464,38 @@ def evaluate_no_reference(
         for wf in window_features
     ]
     nr_issues = diagnose_windows(diag_ws, cfg.preset.temporal_nms_seconds)
+
+    # --- USERPLAN §8: dense error maps for the top-risk windows -----------
+    # Scalar metrics run for every window; the heavier dense fields are only
+    # computed for the windows that feed the worst-issue cards, so report-side
+    # rendering stays bounded.  Maps are matched to issues by center_index.
+    nr_error_maps = _compute_nr_error_maps(
+        candidate, cfg, backend, window_features, worst)
+
+    # Pick, for each issue, the single most diagnostic map to render: the
+    # map whose family best explains the issue's evidence.  The mapping is by
+    # issue_type -> preferred NR map name (USERPLAN §8).
+    _NR_ISSUE_MAP = {
+        "duplicate_freeze": "duplicate_frame_indicator",
+        "generated_blur": "phase_sharpness_map",
+        "ghost_double_exposure": "composition_error_map",
+        "tearing_flow_folding": "flow_fold_map",
+        "ui_text_instability": "ui_edge_instability_map",
+    }
+    if nr_error_maps:
+        by_center = {int(wf.window.center): wf for wf in window_features}
+        for issue in nr_issues:
+            wf = by_center.get(int(issue.center_index))
+            if wf is None:
+                continue
+            preferred = _NR_ISSUE_MAP.get(issue.issue_type)
+            available = [preferred] if preferred and preferred in wf.error_maps \
+                else list(wf.error_maps.keys())
+            if available:
+                # record the chosen map name; the heatmap PNG is written later
+                # in _write_outputs, keyed by (issue_index, map_name).
+                issue.maps = [available[0]]
+
     score_schema = SCHEMA_IDS[EvaluationMode.NO_REFERENCE] + (
         "+niqe" if learned is not None else "")
     meta = {

@@ -86,6 +86,7 @@ class DiagnosticIssue:
     probable_causes: list[str] = field(default_factory=list)
     center_index: int = -1
     boxes: list[list[int]] = field(default_factory=list)
+    maps: list[str] = field(default_factory=list)   # names of heatmaps in out/heatmaps/
 
     def to_dict(self) -> dict[str, Any]:
         band_key, band_label = severity_band(self.severity)
@@ -103,6 +104,7 @@ class DiagnosticIssue:
             "evidence": [e.to_dict() for e in self.evidence],
             "probable_causes": list(self.probable_causes),
             "boxes": [list(b) for b in self.boxes],
+            "maps": list(self.maps),
             "causes_are_inferred": True,
         }
 

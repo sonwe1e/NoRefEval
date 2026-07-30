@@ -9,4 +9,9 @@ __all__ = [
     "edge_structure", "global_technical_quality", "full_reference",
     "no_reference",
 ]
-from . import full_reference, no_reference
+from . import full_reference, no_reference  # noqa: E402,F811  (``no_reference`` re-exports)
+
+# Dense error-map accessors (USERPLAN §8) — kept here so callers can do
+# ``from rr_vfiqa.metrics import nr_window_maps`` without importing the
+# heavy metric module directly.
+from .no_reference import compute_window_maps as nr_window_maps  # noqa: E402

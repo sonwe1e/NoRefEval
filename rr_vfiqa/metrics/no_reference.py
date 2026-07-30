@@ -12,7 +12,7 @@ import numpy as np
 from ..config import EvalConfig
 from ..models.vqa_backend import VQABackend
 from ..motion.flow_composition import composition_error
-from ..motion.flow_geometry import geometry_stats
+from ..motion.flow_geometry import geometry_stats, jacobian_det
 from ..motion.occlusion import cycle_occlusion
 from ..models.tracker_backend import KLTTracker
 from ..sampling.temporal_plan import TemporalLagPlan, TemporalTriplet
@@ -564,3 +564,129 @@ def compute_window(
         quality = float(vqa_backend.technical_quality(bundle.rgb))
         out["nr_learned_vqa_error"] = float(np.clip(1.0 - quality, 0.0, 1.0))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Dense error maps (USERPLAN §8).  Only computed for the highest-risk windows
+# (the scalar ``compute_window`` runs for every window): these are what the
+# report renders as heatmaps and what feeds issue-level spatial boxes.
+# ---------------------------------------------------------------------------
+def compute_window_maps(bundle: FrameBundle, flows: WindowFlows, cfg: EvalConfig,
+                        ) -> dict[str, np.ndarray]:
+    """Return named (H, W) diagnostic fields for one window.
+
+    The set matches USERPLAN §8 for the no-reference mode:
+
+    * ``mct_residual_map``     — luma motion-compensation residual (1/60 s lag);
+    * ``composition_error_map`` — forward+backward composition error, max over
+      the two directions, scaled to the working resolution;
+    * ``self_cycle_residual_map`` — |warped_mid - true_mid| on the center frame;
+    * ``flow_fold_map``        — ``max(0, 1 - jacobian_det)`` after removing the
+                              global translation proxy (folding/tearing);
+    * ``jacobian_determinant_map`` — raw ``det(I + ∇F)`` for the same field;
+    * ``ui_edge_instability_map`` — per-pixel XOR of consecutive edge maps,
+                              restricted to the screen-static UI mask;
+    * ``phase_sharpness_map``   — per-pixel Laplacian variance, odd vs even;
+    * ``duplicate_frame_indicator`` — per-pixel |Δluma| at the native lag.
+    """
+    n = len(bundle.rgb)
+    if n < 5:
+        return {}
+    y = bundle.y_channel()
+    h, w = y.shape[1], y.shape[2]
+    out: dict[str, np.ndarray] = {}
+
+    lag_plan = TemporalLagPlan.build(bundle.times)
+    short_pairs = lag_plan.lag_1_60
+    native_pairs = lag_plan.native
+
+    # --- MCT residual map (1/60 s) ----------------------------------------
+    res_fields: list[np.ndarray] = []
+    for a, b in short_pairs:
+        f_ab = flows.pair(a, b)[0]
+        warped = backward_warp(y[b], f_ab)
+        res_fields.append(charbonnier(np.abs(warped - y[a]),
+                                      cfg.charbonnier_tau).astype(np.float32))
+    out["mct_residual_map"] = _stack_mean(res_fields, h, w)
+
+    # --- composition + self-cycle residual maps ---------------------------
+    comp_fields: list[np.ndarray] = []
+    cycle_fields: list[np.ndarray] = []
+    for triplet in lag_plan.native_triplets:
+        a, m, b = triplet.left, triplet.middle, triplet.right
+        f_ab, f_ba = flows.pair(a, b)
+        f_am, f_ma = flows.pair(a, m)
+        f_mb, f_bm = flows.pair(m, b)
+        occ = cycle_occlusion(f_ab, f_ba,
+                              threshold_px=cfg.occlusion_cycle_threshold)
+        weight_a = occ.conf_ab * (1.0 - occ.occ_ab.astype(np.float32))
+        weight_b = occ.conf_ba * (1.0 - occ.occ_ba.astype(np.float32))
+        fwd = composition_error(f_ab, f_am, f_mb, weight=weight_a,
+                                tau_px=cfg.charbonnier_tau)
+        bwd = composition_error(f_ba, f_bm, f_ma, weight=weight_b,
+                                tau_px=cfg.charbonnier_tau)
+        comp_fields.append(np.maximum(fwd.error_map, bwd.error_map))
+        reconstructed, coverage = _reconstruct_mid(
+            bundle.rgb[a], bundle.rgb[b], f_ab, f_ba,
+            weight_a=weight_a, weight_b=weight_b)
+        visible = coverage > 0.25
+        field = np.zeros((h, w), np.float32)
+        if visible.sum() >= 64:
+            field[visible] = charbonnier(
+                np.abs(_luma(reconstructed[visible]) - y[m][visible]),
+                cfg.charbonnier_tau).astype(np.float32)
+        cycle_fields.append(field)
+    out["composition_error_map"] = _stack_mean(comp_fields, h, w)
+    out["self_cycle_residual_map"] = _stack_mean(cycle_fields, h, w)
+
+    # --- flow-fold / jacobian maps (1/60 s, minus global translation) -----
+    fold_fields: list[np.ndarray] = []
+    jdet_fields: list[np.ndarray] = []
+    for a, b in short_pairs:
+        field = flows.forward(a, b)
+        global_translation = np.median(field.reshape(-1, 2), axis=0)
+        residual = field - global_translation
+        jdet = jacobian_det(residual)
+        jdet_fields.append(jdet.astype(np.float32))
+        fold_fields.append(np.clip(1.0 - jdet, 0.0, None).astype(np.float32))
+    out["flow_fold_map"] = _stack_mean(fold_fields, h, w)
+    out["jacobian_determinant_map"] = _stack_mean(jdet_fields, h, w)
+
+    # --- UI edge instability map ------------------------------------------
+    edge_maps = [cv2.Canny(y[i].astype(np.uint8), 60, 160) > 0 for i in range(n)]
+    ui_mask, _ = _screen_static_ui_mask(edge_maps)
+    ui_fields: list[np.ndarray] = []
+    for a, b in short_pairs:
+        field = np.logical_xor(edge_maps[a], edge_maps[b]).astype(np.float32)
+        field[~ui_mask] = 0.0
+        ui_fields.append(field)
+    out["ui_edge_instability_map"] = _stack_mean(ui_fields, h, w)
+
+    # --- phase sharpness map (Laplacian variance, odd vs even frame) ------
+    sharp = np.array([cv2.Laplacian(y[i], cv2.CV_32F).var()
+                      for i in range(n)], np.float64)
+    parity = bundle.indices.astype(np.int64) % 2
+    gap = float(abs(np.mean(sharp[parity == 0]) - np.mean(sharp[parity == 1])))
+    out["phase_sharpness_map"] = np.full((h, w), np.clip(gap / 500.0, 0.0, 1.0),
+                                        np.float32)
+
+    # --- duplicate frame indicator (native lag) ---------------------------
+    dup_fields: list[np.ndarray] = []
+    for a, b in native_pairs:
+        dup_fields.append(np.abs(y[b] - y[a]).astype(np.float32))
+    out["duplicate_frame_indicator"] = _stack_mean(dup_fields, h, w)
+
+    return out
+
+
+def _stack_mean(fields: list[np.ndarray], h: int, w: int) -> np.ndarray:
+    if not fields:
+        return np.zeros((h, w), np.float32)
+    # fields may be at a different resolution than (h, w) when flows run at the
+    # working width; resize back to the luma grid so every map lines up.
+    resized = []
+    for f in fields:
+        if f.shape[:2] != (h, w):
+            f = cv2.resize(f, (w, h), interpolation=cv2.INTER_LINEAR)
+        resized.append(f)
+    return np.mean(resized, axis=0).astype(np.float32)
