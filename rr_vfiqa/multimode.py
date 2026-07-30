@@ -97,6 +97,127 @@ def _compute_nr_error_maps(candidate, cfg, backend, window_features, worst, *,
     return out
 
 
+def _compute_fr_error_maps(candidate, reference, cfg, backend, window_features,
+                           worst, alignment, geometry_policy, *, top_k: int = 8):
+    """Compute dense error maps for the top-risk FR windows (USERPLAN P1).
+
+    Uses native-resolution frames for sharper evidence.  Maps are stored on
+    ``wf.error_maps`` and later matched to ``DiagnosticIssue`` objects by
+    center_index.
+    """
+    from .metrics import fr_window_maps
+    if not worst or not window_features:
+        return {}
+    centers = [int(w.center_index) for w in worst[:top_k]]
+    by_center = {int(wf.window.center): wf for wf in window_features}
+    out: dict[int, dict[str, np.ndarray]] = {}
+    for center in centers:
+        wf = by_center.get(center)
+        if wf is None:
+            continue
+        try:
+            ref_indices = alignment.reference_of_candidate[wf.window.indices]
+            if np.any(ref_indices < 0) or np.any(np.diff(ref_indices) <= 0):
+                continue
+            rb = reference.read_frames(ref_indices)   # native resolution
+            cb = candidate.read_frames(wf.window.indices)
+            h, w = rb.height, rb.width
+            cb = _resize_bundle(cb, width=w, height=h)
+            rf = WindowFlows(rb, backend)
+            cf = WindowFlows(cb, backend)
+            pairs = [(i, i + 1) for i in range(len(rb.rgb) - 1)]
+            rf.precompute(pairs)
+            cf.precompute(pairs)
+            maps = fr_window_maps(rb, cb, rf, cf, cfg)
+            if maps:
+                wf.error_maps.update(maps)
+                out[center] = dict(maps)
+        except Exception as exc:  # never let map generation fail the report
+            wf.labels["error_map_failure"] = repr(exc)
+    return out
+
+
+def _fr_tier3(candidate, reference, cfg, backend, window_features, worst,
+              alignment, *, top_k: int = 6):
+    """Tier-3 native-resolution re-evaluation for FR windows (USERPLAN P3).
+
+    Re-runs ``full_reference.compute_window`` for the top-risk windows at
+    native resolution.  Updates scalars in place and labels ``audited``.
+    """
+    p = cfg.preset
+    eff_frac = (p.audit_top_fraction if p.audit_top_fraction > 0
+                else (p.auto_audit_fraction if p.auto_audit else 0.0))
+    eff_max = (p.audit_max_windows if p.audit_max_windows > 0
+               else (p.auto_audit_max if p.auto_audit else 0))
+    if eff_frac <= 0 or not worst:
+        return
+    ranked = sorted(window_features,
+                    key=lambda wf: -float(wf.scalars.get("fr_l1_y",
+                                                         float("nan"))))
+    n_audit = min(eff_max, max(1, int(round(len(ranked) * eff_frac))))
+    audit_wfs = ranked[:n_audit]
+    for wf in audit_wfs:
+        try:
+            ref_indices = alignment.reference_of_candidate[wf.window.indices]
+            if np.any(ref_indices < 0) or np.any(np.diff(ref_indices) <= 0):
+                continue
+            rb = reference.read_frames(ref_indices)   # native resolution
+            cb = candidate.read_frames(wf.window.indices)
+            h, w = rb.height, rb.width
+            cb = _resize_bundle(cb, width=w, height=h)
+            rf = WindowFlows(rb, backend)
+            cf = WindowFlows(cb, backend)
+            pairs = [(i, i + 1) for i in range(len(rb.rgb) - 1)]
+            rf.precompute(pairs)
+            cf.precompute(pairs)
+            metric = MetricResult.from_scalars(
+                full_reference.compute_window(rb, cb, rf, cf, cfg),
+                required=required_features(EvaluationMode.FULL_REFERENCE))
+            wf.scalars.update(metric.scalars)
+            wf.labels["audited"] = True
+        except Exception as exc:
+            wf.labels["error_audit"] = repr(exc)
+
+
+def _nr_fr_tier3(candidate, cfg, backend, learned, window_features, worst):
+    """Tier-3 native-resolution re-evaluation for NR windows (USERPLAN P3).
+
+    Re-runs ``no_reference.compute_window`` for the top-risk windows at native
+    resolution (sharper flows/edges).  Updates the window scalars in place and
+    labels the window ``audited``.  Capped so runtime stays bounded; failures
+    never abort the report.
+    """
+    p = cfg.preset
+    eff_frac = (p.audit_top_fraction if p.audit_top_fraction > 0
+                else (p.auto_audit_fraction if p.auto_audit else 0.0))
+    eff_max = (p.audit_max_windows if p.audit_max_windows > 0
+               else (p.auto_audit_max if p.auto_audit else 0))
+    if eff_frac <= 0 or not worst:
+        return
+    ranked = sorted(window_features,
+                    key=lambda wf: -float(wf.scalars.get("nr_common_self_cycle",
+                                                         float("nan"))))
+    n_audit = min(eff_max, max(1, int(round(len(ranked) * eff_frac))))
+    audit_wfs = ranked[:n_audit]
+    for wf in audit_wfs:
+        try:
+            bundle = candidate.read_frames(wf.window.indices, width=None)
+            if bundle.rgb.shape[0] < 5:
+                continue
+            flows = WindowFlows(bundle, backend)
+            lag_plan = TemporalLagPlan.build(bundle.times)
+            flow_plan = FlowPairPlan.for_no_reference(lag_plan)
+            flows.precompute(flow_plan.unique_pairs())
+            metric = MetricResult.from_scalars(
+                no_reference.compute_window(
+                    bundle, flows, cfg, vqa_backend=learned),
+                required=required_features(EvaluationMode.NO_REFERENCE))
+            wf.scalars.update(metric.scalars)
+            wf.labels["audited"] = True
+        except Exception as exc:
+            wf.labels["error_audit"] = repr(exc)
+
+
 def _feature_summary(windows: list[WindowFeatures]) -> dict[str, float]:
     output: dict[str, float] = {}
     keys = set().union(*(set(w.scalars) for w in windows)) if windows else set()
@@ -474,6 +595,12 @@ def evaluate_no_reference(
         cfg.preset.temporal_nms_seconds,
     )
 
+    # --- USERPLAN P3 / §3: Tier-3 native-resolution re-evaluation ----------
+    # High-risk windows are re-run at native resolution (sharper flows/edges),
+    # so the user never has to hand-pick an "audit" preset.  Mirrors the
+    # endpoint audit escalation (pipeline.py) for NR/FR.
+    _nr_fr_tier3(candidate, cfg, backend, learned, window_features, worst)
+
     # --- USERPLAN §5 cadence integrity + §7 diagnostic evidence ------------
     # The shared 1/60 s score must not hide a collapsed native cadence, so we
     # penalise the common-time overall multiplicatively and surface both the
@@ -767,6 +894,11 @@ def evaluate_full_reference(
         confidence,
         cfg.preset.temporal_nms_seconds,
     )
+
+    # --- USERPLAN P3 / §3: Tier-3 native-resolution re-evaluation ----------
+    _fr_tier3(candidate, reference, cfg, backend, window_features, worst,
+              alignment)
+
     # USERPLAN §7: structured diagnostic evidence (no cadence term for FR).
     fr_diag_ws = [
         (window_times(wf.window, candidate.meta)[0],
@@ -776,6 +908,32 @@ def evaluate_full_reference(
         for wf in window_features
     ]
     fr_issues = diagnose_windows(fr_diag_ws, cfg.preset.temporal_nms_seconds)
+
+    # --- USERPLAN P1: dense error maps for the top-risk FR windows -------
+    fr_error_maps = _compute_fr_error_maps(
+        candidate, reference, cfg, backend, window_features, worst,
+        alignment, geometry_policy)
+
+    # Associate each FR issue with its preferred error map (by center_index).
+    _FR_ISSUE_MAP = {
+        "fr_spatial_reference_error": "luma_error_map",
+        "fr_temporal_fidelity_error": "mcr_difference_map",
+        "ghost_double_exposure": "edge_mismatch_map",
+        "tearing_flow_folding": "flow_error_map",
+        "ui_text_instability": "edge_mismatch_map",
+    }
+    if fr_error_maps:
+        by_center = {int(wf.window.center): wf for wf in window_features}
+        for issue in fr_issues:
+            wf = by_center.get(int(issue.center_index))
+            if wf is None:
+                continue
+            preferred = _FR_ISSUE_MAP.get(issue.issue_type)
+            available = [preferred] if preferred and preferred in wf.error_maps \
+                else list(wf.error_maps.keys())
+            if available:
+                issue.maps = [available[0]]
+
     fr_score_schema = SCHEMA_IDS[EvaluationMode.FULL_REFERENCE] + (
         "" if geometry_policy == "strict" else f"+{geometry_policy}")
     meta = {

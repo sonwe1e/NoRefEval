@@ -214,7 +214,8 @@ def evaluate_endpoint_reference(
         wf = WindowFeatures(window=w)
 
         stages = [
-            ("composition", lambda: flow_composition_metric.compute(wflows, pair, cfg)),
+            ("composition", lambda: flow_composition_metric.compute_with_maps(
+                wflows, pair, cfg)),
             ("cycle", lambda: cycle_reconstruction.compute(bundle, wflows, cfg)),
             ("temporal", lambda: temporal_compensation.compute(bundle, wflows, cfg)),
             ("parity", lambda: parity_frequency.compute_window(bundle, wflows, cfg)),
@@ -236,7 +237,16 @@ def evaluate_endpoint_reference(
                 roi_mask=wf.scalars.get("_char_mask"))))
         for name, fn in stages:
             try:                                    # one failing stage must not
-                wf.scalars.update(fn())             # take down the whole window
+                result = fn()                       # take down the whole window
+                # USERPLAN P1: stages may return (scalars, maps) to populate
+                # dense error maps alongside the per-window scalars.
+                if isinstance(result, tuple):
+                    scalars, maps = result
+                    wf.scalars.update(scalars)
+                    if maps:
+                        wf.error_maps.update(maps)
+                else:
+                    wf.scalars.update(result)
             except Exception as exc:
                 wf.labels[f"error_{name}"] = repr(exc)
                 stage_errors[name] += 1
@@ -375,6 +385,27 @@ def evaluate_endpoint_reference(
     ]
     ep_issues = diagnose_windows(ep_diag_ws, p.temporal_nms_seconds)
 
+    # USERPLAN P1: associate each endpoint issue with its preferred dense
+    # error map (by center_index), so the HTML report and overlay clips can
+    # render the real diagnostic evidence.
+    _EP_ISSUE_MAP = {
+        "ghost_double_exposure": "composition_error_map",
+        "tearing_flow_folding": "flow_fold_map",
+        "duplicate_freeze": "composition_error_map",
+        "generated_blur": "composition_error_map",
+        "ui_text_instability": "composition_error_map",
+    }
+    by_center = {int(wf.window.center): wf for wf in wfs}
+    for issue in ep_issues:
+        wf = by_center.get(int(issue.center_index))
+        if wf is None:
+            continue
+        preferred = _EP_ISSUE_MAP.get(issue.issue_type)
+        available = [preferred] if preferred and preferred in wf.error_maps \
+            else list(wf.error_maps.keys())
+        if available:
+            issue.maps = [available[0]]
+
     # Feature export: robust per-key median across windows + globals.
     feat_out: dict[str, float] = {}
     if wfs:
@@ -501,8 +532,20 @@ def evaluate_endpoint_reference(
                                  out_fps=candidate.meta.fps)
         ep_diag_issues = (meta.get("diagnostics") or {}).get("issues") or []
         if export_clips and ep_diag_issues:
+            # USERPLAN P1: pass the real per-issue error map to the exporter.
+            ep_overlay_maps: dict[int, np.ndarray] = {}
+            by_c = {int(wf.window.center): wf for wf in wfs}
+            for ei, eiss in enumerate(ep_diag_issues):
+                wf_e = by_c.get(int(eiss.get("center_index", -1)))
+                if wf_e is not None:
+                    for nm in (eiss.get("maps") or []):
+                        arr = wf_e.error_maps.get(nm)
+                        if arr is not None:
+                            ep_overlay_maps[ei] = arr
+                            break
             export_overlay_clips(candidate_video, ep_diag_issues,
-                                 out / "badcases", out_fps=candidate.meta.fps)
+                                 out / "badcases", out_fps=candidate.meta.fps,
+                                 error_maps=ep_overlay_maps)
         say(f"reports written to {out}")
 
     return report

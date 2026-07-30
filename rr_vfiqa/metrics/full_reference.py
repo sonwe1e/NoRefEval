@@ -370,3 +370,77 @@ def compute_window(
             float(np.mean(structure_persistence))
             if structure_persistence else float("nan")),
     }
+
+
+# ---------------------------------------------------------------------------
+# Dense error maps (USERPLAN P1).  Only computed for the highest-risk windows
+# (the scalar ``compute_window`` runs for every window).
+# ---------------------------------------------------------------------------
+def compute_window_maps(
+    reference: FrameBundle,
+    candidate: FrameBundle,
+    reference_flows: WindowFlows,
+    candidate_flows: WindowFlows,
+    cfg: EvalConfig,
+) -> dict[str, np.ndarray]:
+    """Return named (H, W) diagnostic fields for one FR window (USERPLAN §8).
+
+    * ``luma_error_map``    — mean per-pixel |reference - candidate| luma;
+    * ``edge_mismatch_map``  — per-pixel XOR of reference/candidate edges;
+    * ``flow_error_map``     — mean per-pixel flow-error magnitude (normalized
+      by reference flow magnitude);
+    * ``mcr_difference_map`` — per-pixel |warp_residual_candidate -
+      warp_residual_reference| (motion-compensation residual difference).
+    """
+    yr = reference.y_channel()
+    yc = candidate.y_channel()
+    h, w = yr.shape[1], yr.shape[2]
+    out: dict[str, np.ndarray] = {}
+
+    # --- luma error map (mean over frames) -------------------------------
+    luma_fields: list[np.ndarray] = []
+    for a, b in zip(yr, yc):
+        luma_fields.append(np.abs(a - b).astype(np.float32))
+    out["luma_error_map"] = _mean_with_resize(luma_fields, h, w)
+
+    # --- edge mismatch map (mean over frames) ----------------------------
+    edge_fields: list[np.ndarray] = []
+    for a, b in zip(yr, yc):
+        ea = cv2.Canny(a.astype(np.uint8), 60, 160) > 0
+        eb = cv2.Canny(b.astype(np.uint8), 60, 160) > 0
+        edge_fields.append(np.logical_xor(ea, eb).astype(np.float32))
+    out["edge_mismatch_map"] = _mean_with_resize(edge_fields, h, w)
+
+    # --- flow error map (mean over frame pairs) ---------------------------
+    flow_fields: list[np.ndarray] = []
+    for i in range(len(yr) - 1):
+        fr = reference_flows.forward(i, i + 1)
+        fc = candidate_flows.forward(i, i + 1)
+        mag = flow_magnitude(fr) + 2.0
+        flow_fields.append((flow_magnitude(fc - fr) / mag).astype(np.float32))
+    out["flow_error_map"] = _mean_with_resize(flow_fields, h, w)
+
+    # --- MCR difference map (mean over frame pairs) -----------------------
+    mcr_fields: list[np.ndarray] = []
+    for i in range(len(yr) - 1):
+        fr = reference_flows.forward(i, i + 1)
+        fc = candidate_flows.forward(i, i + 1)
+        wr = backward_warp(yr[i + 1], fr)
+        wc = backward_warp(yc[i + 1], fc)
+        rr = np.abs(wr - yr[i])
+        rc = np.abs(wc - yc[i])
+        mcr_fields.append(np.abs(rc - rr).astype(np.float32))
+    out["mcr_difference_map"] = _mean_with_resize(mcr_fields, h, w)
+
+    return out
+
+
+def _mean_with_resize(fields: list[np.ndarray], h: int, w: int) -> np.ndarray:
+    if not fields:
+        return np.zeros((h, w), np.float32)
+    resized = []
+    for f in fields:
+        if f.shape[:2] != (h, w):
+            f = cv2.resize(f, (w, h), interpolation=cv2.INTER_LINEAR)
+        resized.append(f)
+    return np.mean(resized, axis=0).astype(np.float32)
