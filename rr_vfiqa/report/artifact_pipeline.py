@@ -87,7 +87,7 @@ class ArtifactStatus:
     @property
     def all_ok(self) -> bool:
         return all(
-            self[k]["status"] == "ok"
+            getattr(self, k)["status"] == "ok"
             for k in ("heatmaps", "original_clips", "overlay_clips",
                       "compare_clips", "keyframes", "timeline", "report_write")
         )
@@ -185,6 +185,18 @@ def build_report_artifacts(
     except Exception as exc:  # noqa: BLE001
         status.report_write["status"] = "degraded"
         status.report_write["errors"].append(repr(exc))
+        # USERPLAN §10: re-sync the (now degraded) status onto the report
+        # meta BEFORE the best-effort write, so the on-disk JSON carries
+        # report_write=degraded.  Step 6 snapshotted status.to_dict() before
+        # the atomic write, so we must refresh it here.
+        if report.meta is not None:
+            report.meta["artifact_status"] = status.to_dict()
+        # Best-effort plain overwrite so the on-disk JSON carries the
+        # degraded status + whatever media links were produced.
+        try:
+            write_json_report(report, json_path)
+        except Exception:  # noqa: BLE001
+            pass  # base report is still readable; scores are valid
 
     return status
 
@@ -330,7 +342,13 @@ def _render_single_keyframe(ctx: ArtifactContext, issue: dict,
 
 
 def _atomic_write_report(report: Report, json_path: Path, html_path: Path) -> None:
-    """Write report to temp files then atomically rename (USERPLAN P0-2)."""
+    """Write report to temp files then atomically rename (USERPLAN P0-2).
+
+    On failure, the base report (written in step 2 of ``build_report_artifacts``)
+    already exists on disk.  We log the error and re-raise so the caller can
+    record ``report_write=degraded`` and do a best-effort plain overwrite
+    (USERPLAN §10).
+    """
     try:
         fd, tmp_json = tempfile.mkstemp(
             prefix="report.json.", dir=json_path.parent)
@@ -344,6 +362,9 @@ def _atomic_write_report(report: Report, json_path: Path, html_path: Path) -> No
         write_html_report(report, Path(tmp_html))
         os.replace(tmp_html, html_path)
     except Exception as exc:  # noqa: BLE001
-        # Atomic write failed but the base report already exists — log and move on.
+        # Atomic write failed but the base report already exists — log and
+        # re-raise so build_report_artifacts records report_write=degraded
+        # and does a best-effort plain overwrite.
         if report.meta is not None:
             report.meta["atomic_write_error"] = repr(exc)
+        raise

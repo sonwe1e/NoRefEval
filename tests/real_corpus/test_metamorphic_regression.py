@@ -61,8 +61,10 @@ def _inspect(video: str, reference: str | None, tmp: Path,
     the clean source, so ``reference`` is passed through.
 
     When ``expected_mode`` is provided, the report's routed mode is asserted
-    to match — but only callers who know the reference is correct should set
-    this, otherwise the assertion would mask fixture gaps.
+    to match and the CLI return code is checked (0 for ok, 1 for failed).
+    ``report.json`` existence is asserted — a missing report means the command
+    crashed before writing, and the test must fail rather than return ``{}``
+    (USERPLAN §4, §7).
     """
     from rr_vfiqa.cli import main
     out = tmp / "result"
@@ -72,11 +74,18 @@ def _inspect(video: str, reference: str | None, tmp: Path,
            "--flow-backend", "farneback", "--device", "cpu", "--quiet"]
     if reference is not None:
         cmd += ["--reference", str(reference)]
-    main(cmd)
+    rc = main(cmd)
     rjson = out / "report.json"
-    if not rjson.exists():
-        return {}
+    assert rjson.exists(), (
+        f"inspect did not write report.json (rc={rc}); "
+        f"cmd={' '.join(cmd)}")
     rep = json.loads(rjson.read_text(encoding="utf-8"))
+    actual_status = (rep.get("meta") or {}).get("status")
+    # CLI return code must agree with report status (USERPLAN §4).
+    if actual_status == "failed":
+        assert rc == 1, f"report status=failed but CLI rc={rc}"
+    else:
+        assert rc == 0, f"report status={actual_status!r} but CLI rc={rc}"
     if expected_mode is not None:
         actual_mode = (rep.get("meta") or {}).get("mode")
         # Accept either the alias or the full meta mode value.
@@ -115,7 +124,8 @@ class TestDefectLocalization:
         detected = 0
         for case in cases:
             rep = _inspect(case["candidate"], _reference_for_case(case),
-                           tmp_path / f"loc_{case['case_id']}", mode=mode)
+                           tmp_path / f"loc_{case['case_id']}", mode=mode,
+                           expected_mode=mode)
             diag = (rep.get("meta") or {}).get("diagnostics") or {}
             issues = diag.get("issues") or []
             windows = _defect_windows(case)
@@ -139,20 +149,19 @@ class TestDefectLocalization:
                     f"{windows}; issues="
                     f"{[(i.get('issue_type'), i.get('start_time'), i.get('end_time')) for i in issues]}",
                     stacklevel=1)
-        # Sanity floor on localisation rate.  FR is evaluated at low resolution
-        # here where subtle defects (colour/shift) are near the noise floor.
-        # Endpoint cases in the RPG fixture route by FPS ratio (often as
-        # endpoint-2x) and the synthetic defects at this draft resolution do
-        # not reliably trigger the multi-evidence diagnosis rules — many
-        # endpoint cases produce zero located issues.  The floor is therefore
-        # set to 0 for endpoint until the fixture resolution or defect
-        # injection is improved (USERPLAN targets ≥80% for the final fixture).
+        # USERPLAN §8 (Internal Beta thresholds): after the 4s / 320x180
+        # fixture fix, every defect window now fits fully inside the video.
+        # Endpoint is the strongest reference condition and must NOT have the
+        # lowest bar — the floor is raised to ≥60% (USERPLAN §3).
         if mode == "fr":
-            floor = 0.2
+            floor = 0.7
         elif mode == "endpoint":
-            floor = 0.0  # TODO: raise to 0.4+ when fixture resolution improves
+            floor = 0.6
         else:
-            floor = 0.4
+            floor = 0.6
+        # Require a minimum number of valid samples — never skip when valid==0.
+        assert len(cases) >= 3, (
+            f"{mode}: only {len(cases)} cases; need ≥3 for a meaningful rate")
         rate = detected / len(cases)
         assert rate >= floor, (
             f"{mode}: only {detected}/{len(cases)} defects localised "
@@ -170,14 +179,19 @@ class TestDefectLocalization:
         cases = [c for c in rpg_cases
                  if c["mode"] == mode and c.get("oracle")]
         assert cases, f"no {mode} cases with oracle"
+        # USERPLAN §8: require a minimum number of valid samples — never skip.
+        assert len(cases) >= 3, (
+            f"{mode}: only {len(cases)} cases; need ≥3")
         improvements = 0
         valid = 0
         for case in cases:
             ref = _reference_for_case(case)
             rep_cand = _inspect(case["candidate"], ref,
-                                tmp_path / f"score_cand_{case['case_id']}", mode=mode)
+                                tmp_path / f"score_cand_{case['case_id']}", mode=mode,
+                                expected_mode=mode)
             rep_clean = _inspect(case["oracle"], ref,
-                                 tmp_path / f"score_clean_{case['case_id']}", mode=mode)
+                                 tmp_path / f"score_clean_{case['case_id']}", mode=mode,
+                                 expected_mode=mode)
             vc = rep_cand.get("overall_score")
             vk = rep_clean.get("overall_score")
             if vc is None or vk is None:
@@ -185,15 +199,14 @@ class TestDefectLocalization:
             valid += 1
             if vc < vk:
                 improvements += 1
-        # At least half of the valid comparisons should show the expected
-        # direction.  If no pair produced two finite scores, the test is
-        # inconclusive rather than a hard failure (the localization +
-        # metric-direction tests cover those cases).
-        if valid == 0:
-            pytest.skip(f"{mode}: no candidate/oracle pair produced two finite scores")
+        # USERPLAN §8: require ≥3 valid (conclusive) pairs and ≥75% direction.
+        assert valid >= 3, (
+            f"{mode}: only {valid} conclusive candidate/oracle pairs "
+            f"(need ≥3); all others failed/failed-closed")
         rate = improvements / valid
-        assert rate >= 0.5, (
-            f"{mode}: only {improvements}/{valid} defects lowered the score")
+        assert rate >= 0.75, (
+            f"{mode}: only {improvements}/{valid} defects lowered the score "
+            f"(rate {rate:.0%}, floor 75%)")
 
 
 class TestMetricDirection:
@@ -236,12 +249,14 @@ class TestMetricDirection:
         cases = [c for c in rpg_cases
                  if c["mode"] == mode and c["oracle"] is not None]
         assert cases, f"no {mode} cases with an oracle"
-        # USERPLAN P2-R2: aggregate rate-based assertion.  Synthetic oracles
-        # are not always cleaner than the defective candidate on every single
-        # metric (e.g. a static oracle can saturate nr_native_duplicate_fraction
-        # at 1.0, leaving no headroom).  We assert that the *majority* of
-        # conclusive cases move in the expected direction, matching the
-        # localization test's approach.
+        # USERPLAN §8: require a minimum number of cases.
+        assert len(cases) >= 3, (
+            f"{mode}: only {len(cases)} cases; need ≥3")
+        # Aggregate rate-based assertion.  Synthetic oracles are not always
+        # cleaner than the defective candidate on every single metric (e.g. a
+        # static oracle can saturate nr_native_duplicate_fraction at 1.0,
+        # leaving no headroom).  We assert that the *majority* of conclusive
+        # cases move in the expected direction.
         correct = 0
         wrong = 0
         inconclusive = 0
@@ -253,9 +268,11 @@ class TestMetricDirection:
             key, higher_is_worse = check
             ref = _reference_for_case(case)
             rep_cand = _inspect(case["candidate"], ref,
-                                tmp_path / f"mcand_{case['case_id']}", mode=mode)
+                                tmp_path / f"mcand_{case['case_id']}", mode=mode,
+                                expected_mode=mode)
             rep_clean = _inspect(case["oracle"], ref,
-                                 tmp_path / f"mclean_{case['case_id']}", mode=mode)
+                                 tmp_path / f"mclean_{case['case_id']}", mode=mode,
+                                 expected_mode=mode)
             fc = _features(rep_cand)
             fk = _features(rep_clean)
             # Feature names are mode-specific (NR emits nr_native_*, endpoint
@@ -282,23 +299,20 @@ class TestMetricDirection:
                 correct += 1
             else:
                 wrong += 1
-        # P0-5: count wrong cases in the denominator.  The threshold applies to
-        # the conclusive cases (correct + wrong); inconclusive cases are
-        # tracked separately and must not dominate the result.
+        # USERPLAN §8: count wrong cases in the denominator.  The threshold
+        # applies to the conclusive cases (correct + wrong); inconclusive
+        # cases are tracked separately and must not dominate the result.
         conclusive = correct + wrong
-        if conclusive == 0:
-            # No conclusive cases at all (e.g. FR cases that route as
-            # endpoint-2x and lack the target feature) — the relation is
-            # inconclusive for this fixture, not a failure.
-            pytest.skip(
-                f"{mode}: no conclusive metric-direction cases "
-                f"(all {inconclusive} inconclusive)")
+        # USERPLAN §8: require ≥3 conclusive cases — never skip.
+        assert conclusive >= 3, (
+            f"{mode}: only {conclusive} conclusive metric-direction cases "
+            f"(need ≥3); {inconclusive} inconclusive, {wrong} wrong")
         rate = correct / conclusive
-        assert rate >= 0.3, (
+        assert rate >= 0.7, (
             f"{mode}: only {correct}/{conclusive} defects moved the metric "
             f"in the expected direction (wrong: {wrong}, "
-            f"inconclusive: {inconclusive})")
-        max_inconclusive = 0.7
+            f"inconclusive: {inconclusive}; floor 70%)")
+        max_inconclusive = 0.3
         inconclusive_rate = inconclusive / len(cases) if cases else 0
         assert inconclusive_rate <= max_inconclusive, (
             f"{mode}: inconclusive rate {inconclusive_rate:.0%} exceeds "
@@ -338,18 +352,32 @@ class TestStaticVideo:
                     out.mux(packet)
 
             out_dir = os.path.join(td, "out")
-            main(["inspect", "--candidate", path, "--out", out_dir,
-                  "--mode", "no-reference", "--no-clips",
-                  "--flow-backend", "farneback", "--device", "cpu", "--quiet"])
+            rc = main(["inspect", "--candidate", path, "--out", out_dir,
+                       "--mode", "no-reference", "--no-clips",
+                       "--flow-backend", "farneback", "--device", "cpu",
+                       "--quiet"])
 
+            # USERPLAN §7: assert report.json was written — the old test
+            # silently passed when the file was missing.  Also assert the
+            # routed mode and CLI return code agree with the report status.
             rjson = os.path.join(out_dir, "report.json")
-            if os.path.exists(rjson):
-                rep = json.loads(Path(rjson).read_text(encoding="utf-8"))
-                cadence = (rep.get("meta") or {}).get("cadence", {})
-                cadence_risk = cadence.get("cadence_risk", 1.0)
-                assert cadence_risk < 0.1, (
-                    f"static video should have near-zero cadence risk, "
-                    f"got {cadence_risk}")
+            assert os.path.exists(rjson), (
+                f"static inspect did not produce report.json (rc={rc})")
+            rep = json.loads(Path(rjson).read_text(encoding="utf-8"))
+            meta = rep.get("meta", {})
+            assert meta.get("mode") == "no-reference", (
+                f"expected mode=no-reference, got {meta.get('mode')}")
+            assert meta.get("status") != "failed", (
+                f"static video should not fail: {meta.get('failure_reason')}")
+            assert rc == 0, f"static video should exit 0, got rc={rc}"
+            cadence = meta.get("cadence", {})
+            cadence_risk = cadence.get("cadence_risk", 1.0)
+            assert cadence_risk < 0.02, (
+                f"static video should have near-zero cadence risk, "
+                f"got {cadence_risk}")
+            assert rep["scores"].get("cadence_integrity", 0.0) >= 98.0, (
+                f"static video should have cadence_integrity >= 98, "
+                f"got {rep['scores'].get('cadence_integrity')}")
 
 
 class TestMediaE2E:
@@ -361,13 +389,32 @@ class TestMediaE2E:
     mode and verifies the artefacts are produced and valid.
     """
 
+    # USERPLAN §5: strong defect cases that reliably trigger diagnostic
+    # issues.  We avoid "first case per mode" (which may produce zero
+    # issues and vacuously pass) and instead pick cases whose defect type
+    # is known to fire multi-evidence rules.
+    _STRONG_CASES = {
+        # NR case_01 is a long freeze window — fires duplicate_freeze.
+        "nr": "nr_case_01",
+        # endpoint case_05 is a generated_freeze_copy — fires freeze_copy.
+        "endpoint": "endpoint_case_05",
+        # fr case_01 is a global_blur — fires fr_spatial_reference_error.
+        "fr": "fr_case_01",
+    }
+
     @pytest.mark.parametrize("mode", ["nr", "endpoint", "fr"])
     def test_default_inspect_with_clips(self, rpg_cases, tmp_path, mode):
-        """inspect with default clips export produces valid media links."""
-        cases = [c for c in rpg_cases if c["mode"] == mode]
-        if not cases:
-            pytest.skip(f"no {mode} cases")
-        case = cases[0]
+        """USERPLAN §5: inspect WITH clips on a strong defect case.
+
+        Asserts: mode routed correctly, status != failed, at least one
+        diagnostic issue fires, media files exist + are non-empty + decodable,
+        HTML renders issue cards.
+        """
+        target_id = self._STRONG_CASES[mode]
+        case = next((c for c in rpg_cases if c["case_id"] == target_id), None)
+        assert case is not None, (
+            f"strong-case {target_id} not found in fixture; "
+            f"available={[c['case_id'] for c in rpg_cases if c['mode']==mode]}")
         import av
         from rr_vfiqa.cli import main
         out = tmp_path / f"media_e2e_{case['case_id']}"
@@ -377,16 +424,21 @@ class TestMediaE2E:
         ref = _reference_for_case(case)
         if ref is not None:
             cmd += ["--reference", str(ref)]
-        main(cmd)
+        rc = main(cmd)
         rjson = out / "report.json"
         assert rjson.exists(), "report.json missing"
         rep = json.loads(rjson.read_text(encoding="utf-8"))
+        meta = rep.get("meta", {})
+        # USERPLAN §5: assert routed mode matches expectation.
+        expected_meta_mode = _MODE_ALIAS_TO_META[mode]
+        actual_mode = meta.get("mode")
+        assert actual_mode == expected_meta_mode, (
+            f"expected mode={expected_meta_mode}, got {actual_mode}")
         # status not failed.  A media-encoding failure (e.g. missing H.264
         # encoder in the test environment) must NOT overturn a valid score
         # (USERPLAN P0-2).  If the report is failed, check whether the
         # artifact_status shows the metrics were computed and only media
         # export degraded — that is acceptable in this environment.
-        meta = rep.get("meta", {})
         if meta.get("status") == "failed":
             artifact_status = meta.get("artifact_status", {})
             # If the failure is purely from media encoding (not metrics),
@@ -395,31 +447,45 @@ class TestMediaE2E:
             raise AssertionError(
                 f"inspect failed: {meta.get('failure_reason')}\n"
                 f"artifact_status={artifact_status}")
-        # mode routed correctly.  The routed mode depends on the FPS ratio
-        # between candidate and reference (a 1:2 ratio routes as endpoint-2x,
-        # same-rate routes as full-reference).  We only assert the mode for
-        # NR, which has no reference and always routes as no-reference.
-        if mode == "nr":
-            actual_mode = meta.get("mode")
-            assert actual_mode == "no-reference", (
-                f"expected mode=no-reference, got {actual_mode}")
-        # check media links exist on disk
+        assert rc == 0, f"strong defect should exit 0, got rc={rc}"
+        # USERPLAN §5: a strong defect MUST produce at least one issue.
         diag = meta.get("diagnostics", {})
         issues = diag.get("issues", [])
-        for issue in issues:
-            for m in issue.get("maps", []):
-                assert (out / m).exists(), f"map missing: {m}"
-            for label, p in (issue.get("clip_paths") or {}).items():
-                assert (out / p).exists(), f"clip missing: {label}={p}"
+        assert issues, (
+            f"strong defect {target_id} produced no diagnostic issue")
+        issue = issues[0]
+        assert issue.get("maps"), "issue has no maps"
+        assert "overlay" in (issue.get("clip_paths") or {}), (
+            "issue has no overlay clip_path")
+        assert "compare" in (issue.get("clip_paths") or {}), (
+            "issue has no compare clip_path")
+        assert issue.get("thumbnail"), "issue has no thumbnail"
+        # check media links exist on disk + non-empty
+        for m in issue.get("maps", []):
+            fp = out / m
+            assert fp.exists(), f"map missing: {m}"
+            assert fp.stat().st_size > 0, f"map empty: {m}"
+        for label, p in (issue.get("clip_paths") or {}).items():
+            fp = out / p
+            assert fp.exists(), f"clip missing: {label}={p}"
+            assert fp.stat().st_size > 0, f"clip empty: {label}={p}"
+        thumb = issue.get("thumbnail")
+        if thumb:
+            tp = out / thumb
+            assert tp.exists(), f"thumbnail missing: {thumb}"
+            assert tp.stat().st_size > 0, f"thumbnail empty: {thumb}"
         # HTML exists and contains the expected issue card markers
         html_path = out / "report.html"
         assert html_path.exists(), "report.html missing"
         html = html_path.read_text(encoding="utf-8")
-        if issues:
-            # issue cards render as <article class="card band-..." id="issue-N">
-            assert 'class="card band-' in html, (
-                "HTML report missing issue card markers")
-        # the compare clip can be decoded by PyAV (at least 1 frame)
+        # issue cards render as <article class="card band-..." id="issue-N">
+        assert 'class="card band-' in html, (
+            "HTML report missing issue card markers")
+        # HTML must reference the same relative clip paths as the report.
+        for label, p in (issue.get("clip_paths") or {}).items():
+            assert p in html, (
+                f"HTML missing {label} clip path {p}")
+        # the compare clip can be decoded by PyAV (at least 2 frames)
         decoded_any = False
         for issue in issues:
             for _label, p in (issue.get("clip_paths") or {}).items():
@@ -427,64 +493,95 @@ class TestMediaE2E:
                 try:
                     with av.open(str(full)) as container:
                         stream = container.streams.video[0]
+                        n_frames = 0
                         for _frame in container.decode(stream):
-                            decoded_any = True
-                            break
-                except Exception:  # noqa: BLE001
-                    continue
+                            n_frames += 1
+                            if n_frames >= 2:
+                                decoded_any = True
+                                break
+                except Exception as exc:  # noqa: BLE001
+                    raise AssertionError(
+                        f"clip {p} could not be decoded by PyAV: {exc}")
                 if decoded_any:
                     break
             if decoded_any:
                 break
-        # Not every issue type emits clips (e.g. NR freeze may only produce a
-        # heatmap), so we only assert decode-ability when a clip was exported.
-        clip_count = sum(
-            len(i.get("clip_paths") or {}) for i in issues)
-        if clip_count > 0:
-            assert decoded_any, (
-                f"no clip could be decoded by PyAV across {clip_count} clips")
+        assert decoded_any, "no clip could be decoded by PyAV (need ≥2 frames)"
 
     def test_multi_issue_files_are_distinct(self, rpg_cases, tmp_path):
-        """When 3+ issues fire, overlay/compare files must NOT overwrite each
-        other (USERPLAN P0-1 regression).  Verifies issue_000/001/002 all exist
-        and differ in content."""
-        import hashlib
-        from rr_vfiqa.cli import main
+        """USERPLAN §6: when 3+ issues fire, overlay/compare/keyframe files
+        must NOT overwrite each other (P0-1 regression).
 
-        # Pick the NR case with the most issues (most likely to have 3+)
-        nr_cases = [c for c in rpg_cases if c["mode"] == "nr"]
-        assert nr_cases, "no NR cases"
-        best = None
-        best_n = 0
-        for case in nr_cases:
-            out = tmp_path / f"multi_{case['case_id']}"
-            main(["inspect", "--candidate", str(case["candidate"]), "--out",
-                  str(out), "--speed", "fast", "--flow-backend", "farneback",
-                  "--device", "cpu", "--quiet"])
-            rjson = out / "report.json"
-            if not rjson.exists():
-                continue
-            rep = json.loads(rjson.read_text(encoding="utf-8"))
-            n = len((rep.get("meta", {}).get("diagnostics") or {}).get("issues") or [])
-            if n > best_n:
-                best_n = n
-                best = (case, out, rep)
-        if best is None or best_n < 3:
-            pytest.skip(f"no NR case produced 3+ issues (max {best_n})")
-        case, out, rep = best
-        issues = (rep.get("meta", {}).get("diagnostics") or {}).get("issues") or []
-        # Collect overlay clip paths
-        overlays = []
-        for issue in issues:
-            p = (issue.get("clip_paths") or {}).get("overlay")
-            if p:
-                overlays.append(out / p)
-        assert len(overlays) >= 3, f"expected 3+ overlays, got {len(overlays)}"
-        # All must exist
-        for path in overlays:
-            assert path.exists(), f"overlay missing: {path}"
-        # All must have distinct content (no overwrite)
-        hashes = {hashlib.md5(path.read_bytes()).hexdigest() for path in overlays}
-        assert len(hashes) == len(overlays), (
-            f"overlays are not distinct: {len(hashes)} unique out of "
-            f"{len(overlays)} files (overwrite bug)")
+        This is now a *deterministic* unit test: we construct 3 issues
+        directly (no dependency on the diagnostic engine's output) and run
+        them through the artifact pipeline.  The test never skips.
+        """
+        import hashlib
+
+        from rr_vfiqa.report.overlay_exporter import export_overlay_clips
+        from rr_vfiqa.report.compare_exporter import export_compare_clips
+
+        # Use any real candidate video as the source for clip export.
+        case = rpg_cases[0]
+        candidate = case["candidate"]
+        # Three synthetic issues with non-overlapping time windows so the
+        # exported clips capture different source frames → distinct content.
+        issues = [
+            {"issue_type": "duplicate_freeze", "title": "freeze",
+             "start_time": 0.2, "end_time": 0.4,
+             "severity_band": "high", "severity_label": "明显问题"},
+            {"issue_type": "generated_blur", "title": "blur",
+             "start_time": 0.6, "end_time": 0.8,
+             "severity_band": "medium", "severity_label": "有可见问题"},
+            {"issue_type": "ghost_double_exposure", "title": "ghost",
+             "start_time": 1.0, "end_time": 1.2,
+             "severity_band": "high", "severity_label": "明显问题"},
+        ]
+        out = tmp_path / "multi_issue"
+        out.mkdir(parents=True, exist_ok=True)
+        badcases = out / "badcases"
+
+        # Batch export — the single-call path that fixed the overwrite bug.
+        overlay_paths = export_overlay_clips(
+            candidate, issues, badcases, out_fps=30.0)
+        compare_paths = export_compare_clips(
+            issues, badcases, out_fps=30.0, candidate_video=candidate)
+
+        # Every expected file must exist on disk.
+        expected_names = {
+            "issue_000_overlay.mp4", "issue_001_overlay.mp4",
+            "issue_002_overlay.mp4",
+            "issue_000_compare.mp4", "issue_001_compare.mp4",
+            "issue_002_compare.mp4",
+        }
+        actual_names = {p.name for p in badcases.iterdir()} if badcases.exists() else set()
+        missing = expected_names - actual_names
+        assert not missing, f"missing artifact files: {missing}"
+
+        # All overlay files must have distinct content (no overwrite bug).
+        overlay_files = [badcases / n for n in sorted(expected_names)
+                         if n.endswith("_overlay.mp4")]
+        overlay_hashes = {
+            hashlib.md5(p.read_bytes()).hexdigest() for p in overlay_files
+        }
+        assert len(overlay_hashes) == len(overlay_files), (
+            f"overlays are not distinct: {len(overlay_hashes)} unique out of "
+            f"{len(overlay_files)} files (overwrite bug)")
+
+        # All compare files must have distinct content too.
+        compare_files = [badcases / n for n in sorted(expected_names)
+                         if n.endswith("_compare.mp4")]
+        compare_hashes = {
+            hashlib.md5(p.read_bytes()).hexdigest() for p in compare_files
+        }
+        assert len(compare_hashes) == len(compare_files), (
+            f"compares are not distinct: {len(compare_hashes)} unique out of "
+            f"{len(compare_files)} files (overwrite bug)")
+
+        # Overlay and compare paths must differ *per issue* (each issue gets
+        # its own unique clip_paths, not a shared path).
+        for idx, (op, cp) in enumerate(zip(overlay_paths, compare_paths)):
+            assert op is not None and cp is not None, (
+                f"issue {idx}: overlay={op}, compare={cp}")
+            assert op.name != cp.name, (
+                f"issue {idx}: overlay and compare share name {op.name}")

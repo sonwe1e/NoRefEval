@@ -25,16 +25,23 @@ def _project_root() -> Path:
 def rpg_root(tmp_path_factory) -> Path:
     """Generate the RPG validation data once per session.
 
-    Uses a reduced draft configuration (320x180, 2s) for speed.  The master
+    Uses a reduced draft configuration (320x180, 4s) for speed.  The master
     FPS stays at 120 so the endpoint source/candidate FPS ratio (60/120) and
-    the even-frame contract hold; only the spatial resolution and duration are
-    trimmed.
+    the even-frame contract hold; only the spatial resolution is trimmed.
+    The duration is 4s so that every defect window in case_specs.py (whose
+    latest end_time is 3.10s) fits fully inside the video — a 2s video would
+    truncate defects and leave no post-defect recovery interval (USERPLAN §2).
     """
     from tools.rpg_validation_generator.config import GeneratorConfig
     from tools.rpg_validation_generator.orchestration import generate
+    from tools.rpg_validation_generator.case_specs import CASES
+
+    duration_seconds = max(c.end_time for c in CASES) + 0.5
+    assert duration_seconds <= 4.5, (
+        f"defect windows require {duration_seconds}s; review case_specs.py")
 
     cfg = GeneratorConfig(
-        width=320, height=180, duration_seconds=2.0,
+        width=320, height=180, duration_seconds=duration_seconds,
         master_fps=120, seed=20260729, world_width=400, world_height=250)
     root = tmp_path_factory.mktemp("rpg_corpus")
     generate(str(root), cfg, mode="all")
