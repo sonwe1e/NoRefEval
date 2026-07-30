@@ -85,12 +85,13 @@ def test_maps_are_finite():
 
 
 def test_duplicate_indicator_spots_static_region():
-    # A fully static frame should yield near-zero duplicate indicator
-    # (consecutive identical frames -> |Δluma| ≈ 0).
+    # USERPLAN P1: duplicate_frame_indicator is now oriented so HIGH value =
+    # high duplication risk (hot = bad).  A fully static frame (consecutive
+    # identical frames -> |Δluma| ≈ 0) should yield risk ≈ 1.0.
     bundle = _bundle()
     bundle.rgb[:] = bundle.rgb[0]
     maps = _maps_for(bundle, _cfg())
-    assert float(maps["duplicate_frame_indicator"].max()) == pytest.approx(0.0)
+    assert float(maps["duplicate_frame_indicator"].mean()) == pytest.approx(1.0)
 
 
 def test_jacobian_determinant_near_rigid():

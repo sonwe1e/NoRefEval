@@ -91,11 +91,17 @@ def _inspect_core(*, candidate: str, reference: str | None, mode: str = "auto",
         extra["calibrator_path"] = calibrator
     elif mode == EvaluationMode.FULL_REFERENCE.value:
         extra["geometry_policy"] = geometry_policy
-    report = evaluate(
-        candidate_video=candidate, reference_video=reference, mode=mode,
-        preset=resolved, cache_dir=cache_dir, device=device, out_dir=out_dir,
-        flow_backend=flow_backend, export_clips=not no_clips,
-        progress=progress, **extra)
+    # USERPLAN P0-R2: any failure past routing must still leave a complete
+    # report (report.json + report.html) with status=failed and the reason —
+    # never crash the command with an unhandled traceback.
+    try:
+        report = evaluate(
+            candidate_video=candidate, reference_video=reference, mode=mode,
+            preset=resolved, cache_dir=cache_dir, device=device, out_dir=out_dir,
+            flow_backend=flow_backend, export_clips=not no_clips,
+            progress=progress, **extra)
+    except Exception as exc:  # noqa: BLE001
+        report = _failed_report(mode, route, out_dir, repr(exc))
     d = report.to_dict()
     diag = (d.get("meta") or {}).get("diagnostics") or {}
     summary = {
@@ -110,6 +116,32 @@ def _inspect_core(*, candidate: str, reference: str | None, mode: str = "auto",
         "auto_route": route.to_dict() if route else None,
     }
     return summary, (1 if d.get("meta", {}).get("status") == "failed" else 0)
+
+
+def _failed_report(mode: str, route, out_dir: str | None, reason: str):
+    """Build a fail-closed Report when evaluation raises past routing.
+
+    Writes report.json + report.html so the user always gets an artefact with
+    status=failed and the human-readable failure reason (USERPLAN P0-R2).
+    """
+    from pathlib import Path
+    from .schema import Report
+    from .report import write_html_report, write_json_report
+    meta = {
+        "mode": mode,
+        "status": "failed",
+        "failure_reason": reason,
+        "auto_route": route.to_dict() if route else None,
+    }
+    report = Report(
+        overall_score=None, confidence=0.0, scores={},
+        event_ambiguity=0.0, worst_windows=[], features={}, meta=meta)
+    if out_dir:
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        write_json_report(report, out / "report.json")
+        write_html_report(report, out / "report.html")
+    return report
 
 
 def _refused_report_obj(refused: dict):

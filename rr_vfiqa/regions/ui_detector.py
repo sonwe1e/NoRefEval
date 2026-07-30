@@ -142,22 +142,25 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
                 np.abs(bundle.rgb[0].astype(np.float32) - xm)[m].mean()) / norm
     else:
         # §8.4 dynamic UI / §8.6 discrete events: only penalize mixing defects.
-        d0 = np.abs(xm - xi).mean(-1) / norm
-        d1 = np.abs(xm - xj).mean(-1) / norm
-        diff01m = np.abs(xi - xj).mean(-1) / norm
-        ch = m & (diff01m > 12.0 / norm)
+        # NOTE: all quantities here are in RGB intensity units (0-255), NOT
+        # spatial pixels — so they are NOT divided by the frame diagonal.
+        # (spatial_norm_factor is for geometric pixel distances only.)
+        d0 = np.abs(xm - xi).mean(-1)
+        d1 = np.abs(xm - xj).mean(-1)
+        diff01m = np.abs(xi - xj).mean(-1)
+        ch = m & (diff01m > 12.0)
         n_ch = max(int(ch.sum()), 1)
 
         # Alpha-mixing evidence: M fits α·Xi + (1−α)·Xj with α strictly inside
         # (0,1) and tiny residual — impossible for a correct hard switch, and
         # not tripped by the triangle-inequality-violating old d0<τ & d1<τ.
         alpha, resid = alpha_blend_fit(xi, xm, xj)
-        blend = ch & (resid < 6.0 / norm) & (alpha > 0.15) & (alpha < 0.85)
+        blend = ch & (resid < 6.0) & (alpha > 0.15) & (alpha < 0.85)
         out["ui_dyn_blend_frac"] = float(blend.sum() / n_ch)
         out["ui_dyn_blend_resid"] = float(resid[ch].mean()) if ch.any() else float("nan")
 
-        out_of_range = ((xm < np.minimum(xi, xj) - 8.0 / norm) |
-                        (xm > np.maximum(xi, xj) + 8.0 / norm)).any(-1)
+        out_of_range = ((xm < np.minimum(xi, xj) - 8.0) |
+                        (xm > np.maximum(xi, xj) + 8.0)).any(-1)
         out["ui_dyn_out_of_range_frac"] = float((out_of_range & ch).sum() / n_ch)
 
         # State regression (§3.6 fixed sign): M_i returns TOWARD X_i relative
@@ -165,7 +168,7 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
         # M_i FURTHER from X_i than M_{i-1}, so only a shrink counts.
         if bundle.rgb.shape[0] >= 5:
             m_prev = bundle.rgb[0].astype(np.float32)
-            d0_prev = np.abs(m_prev - xi).mean(-1) / norm
+            d0_prev = np.abs(m_prev - xi).mean(-1)
             back = ch & (d0 < d0_prev - 0.2 * diff01m)
             out["ui_dyn_regression"] = float(back.sum() / n_ch)
     return out

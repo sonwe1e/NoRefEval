@@ -69,7 +69,14 @@ def scan_full_reference(
     n = candidate.meta.n_frames
     arrays = [np.full(n, np.nan, np.float32) for _ in range(6)]
     y_l1, chroma_l1, gradient_l1, edge_mismatch, ssim_err, diff_err = arrays
+    # USERPLAN P2: previous + the indices that produced it.  frame-diff
+    # mismatch (diff_err) is only meaningful when BOTH the reference and the
+    # candidate advance by exactly one frame since the last pair — an alignment
+    # gap (ref 0→1→3) must reset state so we never compare a two-frame
+    # reference delta against a one-frame candidate delta.
     previous: tuple[np.ndarray, np.ndarray] | None = None
+    prev_ref_index = -2
+    prev_cand_index = -2
     reference_frames = iter(reference.iter_frames(width=width))
     current_reference = next(reference_frames, None)
     for cand_index, cand_rgb in candidate.iter_frames(width=width):
@@ -108,11 +115,19 @@ def scan_full_reference(
         ce = cv2.Canny(cy.astype(np.uint8), 60, 160) > 0
         edge_mismatch[cand_index] = np.mean(np.logical_xor(re, ce))
         ssim_err[cand_index] = 1.0 - _ssim_proxy(ry, cy)
-        if previous is not None:
+        # Only compute frame-diff mismatch on consecutive (ref, cand) pairs:
+        # a gap in either timeline makes the per-frame deltas incommensurable.
+        if (previous is not None
+                and ref_index == prev_ref_index + 1
+                and cand_index == prev_cand_index + 1):
             prev_r, prev_c = previous
             diff_err[cand_index] = np.mean(np.abs(
                 (cy - prev_c) - (ry - prev_r)))
+        else:
+            diff_err[cand_index] = float("nan")
         previous = (ry, cy)
+        prev_ref_index = ref_index
+        prev_cand_index = cand_index
 
     normalized = []
     for values, scale in (

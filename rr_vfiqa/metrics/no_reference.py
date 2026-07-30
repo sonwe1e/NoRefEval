@@ -666,18 +666,25 @@ def compute_window_maps(bundle: FrameBundle, flows: WindowFlows, cfg: EvalConfig
         ui_fields.append(field)
     out["ui_edge_instability_map"] = _stack_mean(ui_fields, h, w)
 
-    # --- phase sharpness map (Laplacian variance, odd vs even frame) ------
-    sharp = np.array([cv2.Laplacian(y[i], cv2.CV_32F).var()
-                      for i in range(n)], np.float64)
+    # --- phase sharpness map (per-pixel odd vs even Laplacian energy) -----
+    # USERPLAN P1: a blur defect shows as lower sharpness on generated (odd)
+    # frames.  Compute per-pixel Laplacian magnitude on each frame, then map
+    # the odd/even difference so the heat concentrates on blurred regions.
+    lap = np.stack([np.abs(cv2.Laplacian(y[i], cv2.CV_32F)) for i in range(n)])
     parity = bundle.indices.astype(np.int64) % 2
-    gap = float(abs(np.mean(sharp[parity == 0]) - np.mean(sharp[parity == 1])))
-    out["phase_sharpness_map"] = np.full((h, w), np.clip(gap / 500.0, 0.0, 1.0),
-                                        np.float32)
+    even_mean = lap[parity == 0].mean(0)
+    odd_mean = lap[parity == 1].mean(0)
+    gap = np.abs(odd_mean - even_mean).astype(np.float32)
+    gmax = max(float(np.percentile(gap, 99)), 1e-3)
+    out["phase_sharpness_map"] = np.clip(gap / gmax, 0.0, 1.0).astype(np.float32)
 
     # --- duplicate frame indicator (native lag) ---------------------------
+    # USERPLAN P1: high value = high duplication risk (hot = bad).  Raw frame
+    # difference is near 0 for duplicates, so invert: risk = exp(-diff / sigma).
     dup_fields: list[np.ndarray] = []
     for a, b in native_pairs:
-        dup_fields.append(np.abs(y[b] - y[a]).astype(np.float32))
+        diff = np.abs(y[b] - y[a]).astype(np.float32)
+        dup_fields.append(np.exp(-diff / 8.0))
     out["duplicate_frame_indicator"] = _stack_mean(dup_fields, h, w)
 
     return out

@@ -290,11 +290,39 @@ def _write_outputs(
             out_fps=candidate.meta.fps,
         )
     # USERPLAN §10: overlay companion clips (severity bar + timecode + heat).
+    # USERPLAN P1-R1: pass the real per-issue error map to the exporter so the
+    # heat overlay shows the actual diagnostic evidence, not the motion-proxy
+    # fallback (the proxy is only used when an issue has no map).
     diag_issues = ((report.meta or {}).get("diagnostics") or {}).get("issues") or []
     if export_clips and diag_issues:
+        overlay_maps = _issue_error_maps(diag_issues, windows)
         export_overlay_clips(
             candidate_video, diag_issues, out / "badcases",
-            out_fps=candidate.meta.fps)
+            out_fps=candidate.meta.fps, error_maps=overlay_maps)
+
+
+def _issue_error_maps(diag_issues: list[dict],
+                      windows: list[WindowFeatures]) -> dict[int, np.ndarray]:
+    """Collect the preferred error map for each issue (by center_index).
+
+    Returns ``{issue_index: error_map}`` for the overlay exporter.  Issues
+    without a map or without a matching window are simply omitted — the
+    exporter falls back to its motion-proxy for those.
+    """
+    by_center = {int(wf.window.center): wf for wf in windows}
+    out: dict[int, np.ndarray] = {}
+    for i, issue in enumerate(diag_issues):
+        if not issue.get("maps"):
+            continue
+        wf = by_center.get(int(issue.get("center_index", -1)))
+        if wf is None:
+            continue
+        for name in issue["maps"]:
+            arr = wf.error_maps.get(name)
+            if arr is not None:
+                out[i] = arr
+                break
+    return out
 
 
 def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],
@@ -452,10 +480,16 @@ def evaluate_no_reference(
     # common-time and cadence-integrity numbers.  Diagnostics are built from
     # every window (incl. ones that failed the required-feature gate) so a
     # localized defect still produces a located issue.
+    # USERPLAN P0-R1: shared-scale (1/60 s) motion per window drives the
+    # cadence motion gate — windows with no longer-scale motion and no
+    # odd/even alternation are treated as genuinely static, not collapsed.
     cad_rep = cadence_integrity(
         [wf.scalars for wf in valid], overall,
         alternation_per_window=[
             float(wf.scalars.get("nr_native_motion_alternation", float("nan")))
+            for wf in valid],
+        common_time_motion_per_window=[
+            float(wf.scalars.get("nr_mct_1_60_mean", float("nan")))
             for wf in valid],
     )
     if np.isfinite(overall):

@@ -141,8 +141,10 @@ RULES: tuple[Rule, ...] = (
         conditions=(
             Condition("edge_ghost_frac", 0.05, 1.2, scale=0.10,
                       note="额外双边缘比例"),
-            Condition("edge_chamfer_sup_to_em", 1.5, 0.9, scale=2.0,
-                      note="边缘 chamfer 升高"),
+            # USERPLAN §6.2: edge_chamfer_sup_to_em is now normalized to the
+            # frame diagonal (typical 0.01-0.05); threshold in the same unit.
+            Condition("edge_chamfer_sup_to_em", 3.0 / 559.77, 0.9,
+                      scale=4.0 / 559.77, note="边缘 chamfer 升高"),
             Condition("cycle_resid_p90", 8.0, 0.8, scale=8.0,
                       note="循环重建残差偏高"),
             Condition("comp_p90_max", 12.0, 0.7, scale=10.0,

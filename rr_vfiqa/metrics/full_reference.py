@@ -61,19 +61,23 @@ def _edge_metrics(
         cv2.distanceTransform((~er).astype(np.uint8), cv2.DIST_L2, 3)
         if er.any()
         else np.full(reference.shape, fallback_distance, np.float32))
-    # USERPLAN §6.2: Chamfer tolerance + distances are resolution-normalized
+    # USERPLAN §6.2: Chamfer distances + tolerance are resolution-normalized
     # (fraction of frame diagonal) so the same relative defect scores across
-    # resolutions and presets.
+    # resolutions and presets.  Both the distance field AND the 2-pixel
+    # tolerance are divided by the diagonal, so the comparison stays in the
+    # same normalized unit (a 2px offset at any resolution is still "2px").
     norm = spatial_norm_factor(*reference.shape[:2])
+    dist_c_n = dist_c / norm
+    dist_r_n = dist_r / norm
     tol = 2.0 / norm
-    recall = float(np.mean(dist_c[er] <= tol)) if er.any() else 1.0
-    precision = float(np.mean(dist_r[ec] <= tol)) if ec.any() else 1.0
+    recall = float(np.mean(dist_c_n[er] <= tol)) if er.any() else 1.0
+    precision = float(np.mean(dist_r_n[ec] <= tol)) if ec.any() else 1.0
     f1 = 2.0 * precision * recall / max(precision + recall, 1e-6)
     chamfer_parts = []
     if er.any():
-        chamfer_parts.append(float(np.mean(dist_c[er])) / norm)
+        chamfer_parts.append(float(np.mean(dist_c_n[er])))
     if ec.any():
-        chamfer_parts.append(float(np.mean(dist_r[ec])) / norm)
+        chamfer_parts.append(float(np.mean(dist_r_n[ec])))
     return recall, precision, float(f1), float(np.mean(chamfer_parts))
 
 

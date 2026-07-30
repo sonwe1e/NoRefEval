@@ -97,7 +97,7 @@ FR_FEATURES: dict[str, dict[str, FeatureSpec]] = {
         "fr_edge_precision": FeatureSpec(
             0.40, good=0.90, lower_is_better=False),
         "fr_edge_f1": FeatureSpec(0.40, good=0.90, lower_is_better=False),
-        "fr_edge_chamfer": FeatureSpec(4.0),
+        "fr_edge_chamfer": FeatureSpec(4.0 / 559.77),  # USERPLAN §6.2: normalized
         "fr_ui_roi_l1": FeatureSpec(12.0),
         "fr_text_roi_edge_f1": FeatureSpec(
             0.45, good=0.85, lower_is_better=False),
@@ -115,7 +115,7 @@ FR_FEATURES: dict[str, dict[str, FeatureSpec]] = {
         "fr_tile_flow_error_p90": FeatureSpec(0.35),
         "fr_camera_residual_flow_error": FeatureSpec(0.30),
         "fr_salient_flow_error": FeatureSpec(0.35),
-        "fr_trajectory_deviation": FeatureSpec(2.0),
+        "fr_trajectory_deviation": FeatureSpec(2.0 / 559.77),  # USERPLAN §6.2: normalized
     },
 }
 

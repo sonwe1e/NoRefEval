@@ -37,9 +37,22 @@ class CadenceReport:
     evidence: list[dict]         # the global sub-signals that drove the risk
 
 
-def _window_cadence_risk(scalars: dict[str, float],
-                         alternation: float | None = None) -> tuple[float, list[dict]]:
-    """Native-cadence risk for one window in 0..1, plus the sub-signals."""
+def _window_cadence_risk(
+    scalars: dict[str, float],
+    alternation: float | None = None,
+    *,
+    common_time_motion: float | None = None,
+) -> tuple[float, list[dict]]:
+    """Native-cadence risk for one window in 0..1, plus the sub-signals.
+
+    ``common_time_motion`` is the shared 1/60 s (or 1/30 s) motion magnitude.
+    A collapsed native cadence is only penalised when there is *real motion* at
+    a longer scale (or a stable odd/even alternation) — a genuinely static
+    scene (pause menu, loading screen, idle character) has native duplicate
+    fractions near 1 too, but is NOT a cadence failure.  This motion gate
+    prevents the exponential penalty from crushing legitimate still content
+    (USERPLAN P0-R1).
+    """
     ev: list[dict] = []
 
     dup = _get(scalars, "nr_native_duplicate_fraction")
@@ -89,6 +102,20 @@ def _window_cadence_risk(scalars: dict[str, float],
     else:
         risk = float(np.clip(0.7 * contribs[0], 0.0, 1.0))
     risk = max(risk, strong_single)
+
+    # --- motion gate (USERPLAN P0-R1) -------------------------------------
+    # If there is no motion at the common 1/60 s scale AND no stable odd/even
+    # alternation, the native "stillness" is more likely a genuinely static
+    # scene than a collapsed cadence — suppress the risk.
+    has_alternation = (r_alt is not None and r_alt >= 0.30)
+    if common_time_motion is not None:
+        ev.append({"signal": "common_time_motion",
+                   "value": round(common_time_motion, 4)})
+        if common_time_motion < 2.0 and not has_alternation:
+            # No longer-scale motion and no alternation: treat as legit static.
+            risk = float(np.clip(risk * 0.10, 0.0, 1.0))
+            ev.append({"signal": "motion_gate", "value": "static_scene_suppress"})
+
     return float(np.clip(risk, 0.0, 1.0)), ev
 
 
@@ -98,15 +125,25 @@ def cadence_integrity(
     *,
     lam: float = DEFAULT_LAMBDA,
     alternation_per_window: list[float] | None = None,
+    common_time_motion_per_window: list[float] | None = None,
 ) -> CadenceReport:
-    """Aggregate native-cadence risk across windows and penalise the total."""
+    """Aggregate native-cadence risk across windows and penalise the total.
+
+    ``common_time_motion_per_window`` is the shared-scale (1/60 s) motion per
+    window; near-zero values with no odd/even alternation mark a genuinely
+    static scene, whose native duplicate/freeze signals are suppressed by the
+    motion gate (USERPLAN P0-R1).
+    """
     per_window: list[float] = []
     global_ev: list[dict] = []
     for i, sc in enumerate(windows_scalars):
         alt = (alternation_per_window[i]
                if alternation_per_window and i < len(alternation_per_window)
                else None)
-        r, ev = _window_cadence_risk(sc, alt)
+        ctm = (common_time_motion_per_window[i]
+               if common_time_motion_per_window
+               and i < len(common_time_motion_per_window) else None)
+        r, ev = _window_cadence_risk(sc, alt, common_time_motion=ctm)
         per_window.append(r)
     if per_window:
         # A cadence collapse is usually sustained, so use a high percentile
@@ -116,11 +153,15 @@ def cadence_integrity(
                 float(np.median(per_window))), 0.0, 1.0))
         # attach the evidence of the worst window for the report
         worst = int(np.argmax(per_window))
+        ctm_w = (common_time_motion_per_window[worst]
+                 if common_time_motion_per_window
+                 and worst < len(common_time_motion_per_window) else None)
         _, global_ev = _window_cadence_risk(
             windows_scalars[worst],
             alternation_per_window[worst]
             if alternation_per_window and worst < len(alternation_per_window)
-            else None)
+            else None,
+            common_time_motion=ctm_w)
     else:
         risk = 0.0
     integrity = float(100.0 * np.exp(-lam * risk))
