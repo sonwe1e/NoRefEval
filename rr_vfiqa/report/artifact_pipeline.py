@@ -114,7 +114,7 @@ def build_report_artifacts(
     try:
         _render_issue_heatmaps(ctx, report)
     except Exception as exc:  # noqa: BLE001
-        status.heatmaps["status"] = "failed"
+        status.heatmaps["status"] = "degraded"
         status.heatmaps["errors"].append(repr(exc))
         if report.meta is not None:
             report.meta["heatmap_render_error"] = repr(exc)
