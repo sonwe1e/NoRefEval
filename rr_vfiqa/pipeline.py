@@ -19,7 +19,11 @@ from .calibration.provenance import (
     report_provenance,
 )
 from .config import EvalConfig, EvaluationMode
-from .diagnosis import build_diagnostics_block, diagnose_windows
+from .diagnosis import (
+    build_diagnostics_block,
+    diagnose_windows,
+    select_map_name,
+)
 from .fusion import (build_category_errors, compute_confidence, compute_scores,
                      maybe_load)
 from .fusion.feature_registry import feature_contract_hash
@@ -382,22 +386,17 @@ def evaluate_endpoint_reference(
     # USERPLAN §7: structured multi-evidence diagnosis (endpoint scalars).
     # USERPLAN P0-1: build per-window dense error maps so issues can carry
     # spatial boxes extracted from the real diagnostic evidence.
-    _EP_ISSUE_MAP = {
-        "ghost_double_exposure": "composition_error_map",
-        "tearing_flow_folding": "flow_fold_map",
-        "duplicate_freeze": "composition_error_map",
-        "generated_blur": "composition_error_map",
-        "ui_text_instability": "composition_error_map",
-    }
+    # USERPLAN P0-6: pass every dense field per window to diagnosis; the map
+    # best matching each fired rule's issue type is chosen *inside*
+    # diagnose_windows (preferred_maps_for), so the boxes come from the same
+    # field the report renders.  No fixed-priority pre-selection here.
     by_center = {int(wf.window.center): wf for wf in wfs}
-    ep_error_maps: dict[int, np.ndarray] = {}
+    ep_error_maps: dict[int, dict[str, np.ndarray]] = {}
     for wf in wfs:
         center = int(wf.window.center)
         if not wf.error_maps:
             continue
-        # Pick the first available map for box extraction; the preferred
-        # map is chosen per-issue below.
-        ep_error_maps[center] = next(iter(wf.error_maps.values()))
+        ep_error_maps[center] = wf.error_maps
 
     ep_diag_ws = [
         (window_times(wf.window, candidate.meta)[0],
@@ -409,18 +408,15 @@ def evaluate_endpoint_reference(
     ep_issues = diagnose_windows(ep_diag_ws, p.temporal_nms_seconds,
                                  error_maps=ep_error_maps)
 
-    # USERPLAN P1: associate each endpoint issue with its preferred dense
-    # error map (by center_index), so the HTML report and overlay clips can
-    # render the real diagnostic evidence.
+    # USERPLAN P0-6: record, for each endpoint issue, the map name used for
+    # its boxes so the rendered heatmap matches the annotation.
     for issue in ep_issues:
         wf = by_center.get(int(issue.center_index))
         if wf is None:
             continue
-        preferred = _EP_ISSUE_MAP.get(issue.issue_type)
-        available = [preferred] if preferred and preferred in wf.error_maps \
-            else list(wf.error_maps.keys())
-        if available:
-            issue.maps = [available[0]]
+        name = select_map_name(wf.error_maps, issue.issue_type)
+        if name is not None:
+            issue.maps = [name]
 
     # Feature export: robust per-key median across windows + globals.
     feat_out: dict[str, float] = {}

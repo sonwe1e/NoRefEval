@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rr-vfiqa"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Mode-aware no-reference, endpoint-reference, and full-reference VFI quality assessment"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,6 +29,9 @@ rr-vfiqa = "rr_vfiqa.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["rr_vfiqa*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "rr_vfiqa._version.VERSION"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

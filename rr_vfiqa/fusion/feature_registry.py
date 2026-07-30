@@ -65,8 +65,10 @@ _UNIT_OVERRIDES = {
 # FeatureRegistry 逐项显式定义 units 和 resolution_invariant，不再从名称猜.
 # Mapping: feature_name -> (units, resolution_invariant).
 _FEATURE_CONTRACT_OVERRIDES: dict[str, tuple[str, bool]] = {
-    "edge_chamfer_sup_to_em": ("normalized", False),
-    "char_chamfer": ("normalized", False),
+    "edge_chamfer_sup_to_em": ("frame-diagonal-ratio", True),
+    "char_chamfer": ("frame-diagonal-ratio", True),
+    "fr_edge_chamfer": ("frame-diagonal-ratio", True),
+    "fr_trajectory_deviation": ("frame-diagonal-ratio", True),
     "ui_static_l1": ("rgb", True),
     "ui_comp_drift_p90": ("rgb", True),
     "ui_gen_drift": ("rgb", True),
@@ -131,12 +133,20 @@ def definitions(mode: str | EvaluationMode) -> tuple[FeatureDefinition, ...]:
     rows = []
     for category, features in schema.items():
         for name, spec in features.items():
+            if name in _FEATURE_CONTRACT_OVERRIDES:
+                units, resolution_invariant = (
+                    _FEATURE_CONTRACT_OVERRIDES[name])
+            else:
+                units, resolution_invariant = (
+                    _unit(name),
+                    not any(token in name
+                            for token in ("chamfer", "trajectory")),
+                )
             rows.append(FeatureDefinition(
-                name=name, mode=parsed, category=category, units=_unit(name),
+                name=name, mode=parsed, category=category, units=units,
                 direction=("lower_is_better" if spec.lower_is_better
                            else "higher_is_better"),
-                resolution_invariant=not any(
-                    token in name for token in ("chamfer", "trajectory")),
+                resolution_invariant=resolution_invariant,
                 required=name in _REQUIRED[parsed],
                 scale=float(spec.scale),
             ))

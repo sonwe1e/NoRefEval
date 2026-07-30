@@ -443,3 +443,48 @@ class TestMediaE2E:
         if clip_count > 0:
             assert decoded_any, (
                 f"no clip could be decoded by PyAV across {clip_count} clips")
+
+    def test_multi_issue_files_are_distinct(self, rpg_cases, tmp_path):
+        """When 3+ issues fire, overlay/compare files must NOT overwrite each
+        other (USERPLAN P0-1 regression).  Verifies issue_000/001/002 all exist
+        and differ in content."""
+        import hashlib
+        from rr_vfiqa.cli import main
+
+        # Pick the NR case with the most issues (most likely to have 3+)
+        nr_cases = [c for c in rpg_cases if c["mode"] == "nr"]
+        assert nr_cases, "no NR cases"
+        best = None
+        best_n = 0
+        for case in nr_cases:
+            out = tmp_path / f"multi_{case['case_id']}"
+            main(["inspect", "--candidate", str(case["candidate"]), "--out",
+                  str(out), "--speed", "fast", "--flow-backend", "farneback",
+                  "--device", "cpu", "--quiet"])
+            rjson = out / "report.json"
+            if not rjson.exists():
+                continue
+            rep = json.loads(rjson.read_text(encoding="utf-8"))
+            n = len((rep.get("meta", {}).get("diagnostics") or {}).get("issues") or [])
+            if n > best_n:
+                best_n = n
+                best = (case, out, rep)
+        if best is None or best_n < 3:
+            pytest.skip(f"no NR case produced 3+ issues (max {best_n})")
+        case, out, rep = best
+        issues = (rep.get("meta", {}).get("diagnostics") or {}).get("issues") or []
+        # Collect overlay clip paths
+        overlays = []
+        for issue in issues:
+            p = (issue.get("clip_paths") or {}).get("overlay")
+            if p:
+                overlays.append(out / p)
+        assert len(overlays) >= 3, f"expected 3+ overlays, got {len(overlays)}"
+        # All must exist
+        for path in overlays:
+            assert path.exists(), f"overlay missing: {path}"
+        # All must have distinct content (no overwrite)
+        hashes = {hashlib.md5(path.read_bytes()).hexdigest() for path in overlays}
+        assert len(hashes) == len(overlays), (
+            f"overlays are not distinct: {len(hashes)} unique out of "
+            f"{len(overlays)} files (overwrite bug)")

@@ -18,6 +18,9 @@ from .rules import (
     build_diagnostics_block,
     diagnose_windows,
     merge_issues,
+    preferred_maps_for,
+    select_map,
+    select_map_name,
 )
 from .cadence import cadence_integrity, cadence_penalty
 
@@ -27,6 +30,9 @@ __all__ = [
     "TRACKS",
     "diagnose_windows",
     "merge_issues",
+    "preferred_maps_for",
+    "select_map",
+    "select_map_name",
     "affected_duration_fraction",
     "build_diagnostics_block",
     "cadence_integrity",

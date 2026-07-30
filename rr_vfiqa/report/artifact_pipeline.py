@@ -70,6 +70,8 @@ class ArtifactStatus:
     overlay_clips: dict[str, Any] = field(default_factory=lambda: {"status": "ok", "errors": []})
     compare_clips: dict[str, Any] = field(default_factory=lambda: {"status": "ok", "errors": []})
     keyframes: dict[str, Any] = field(default_factory=lambda: {"status": "ok", "errors": []})
+    timeline: dict[str, Any] = field(default_factory=lambda: {"status": "ok", "errors": []})
+    report_write: dict[str, Any] = field(default_factory=lambda: {"status": "ok", "errors": []})
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +80,8 @@ class ArtifactStatus:
             "overlay_clips": dict(self.overlay_clips),
             "compare_clips": dict(self.compare_clips),
             "keyframes": dict(self.keyframes),
+            "timeline": dict(self.timeline),
+            "report_write": dict(self.report_write),
         }
 
     @property
@@ -85,7 +89,7 @@ class ArtifactStatus:
         return all(
             self[k]["status"] == "ok"
             for k in ("heatmaps", "original_clips", "overlay_clips",
-                      "compare_clips", "keyframes")
+                      "compare_clips", "keyframes", "timeline", "report_write")
         )
 
 
@@ -151,6 +155,11 @@ def build_report_artifacts(
             tp = thumb_paths[idx] if idx < len(thumb_paths) else None
             if tp is not None:
                 issue["thumbnail"] = f"badcases/{tp.name}"
+    else:
+        # No issues — nothing to export for overlay/compare/keyframes.
+        status.overlay_clips["status"] = "skipped"
+        status.compare_clips["status"] = "skipped"
+        status.keyframes["status"] = "skipped"
 
     # --- 5. Timeline ------------------------------------------------------
     try:
@@ -160,15 +169,22 @@ def build_report_artifacts(
         render_timeline_png_fn(ctx.windows, ctx.candidate_meta, report,
                                out / "timeline.png")
     except Exception as exc:  # noqa: BLE001
+        status.timeline["status"] = "degraded"
+        status.timeline["errors"].append(repr(exc))
         if report.meta is not None:
             report.meta["timeline_error"] = repr(exc)
 
-    # --- 6. Atomic re-write of the report with media links ----------------
-    _atomic_write_report(report, json_path, html_path)
-
-    # --- 7. Attach artifact status to report meta ------------------------
+    # --- 6. Attach artifact status to report meta -----------------------
+    # Set BEFORE the atomic write so the on-disk report.json persists it.
     if report.meta is not None:
         report.meta["artifact_status"] = status.to_dict()
+
+    # --- 7. Atomic re-write of the report with media links ---------------
+    try:
+        _atomic_write_report(report, json_path, html_path)
+    except Exception as exc:  # noqa: BLE001
+        status.report_write["status"] = "degraded"
+        status.report_write["errors"].append(repr(exc))
 
     return status
 
@@ -202,41 +218,64 @@ def _render_issue_heatmaps(ctx: ArtifactContext, report: Report) -> None:
 
 
 def _export_overlay(ctx: ArtifactContext, status: ArtifactStatus) -> list[Path | None]:
-    """One overlay clip per issue (capped at 12)."""
-    paths: list[Path | None] = []
-    for n, issue in enumerate(ctx.issues[:12]):
-        try:
-            emap = ctx.error_maps.get(n)
-            result = export_overlay_clips(
-                ctx.candidate_video, [issue], ctx.output_dir / "badcases",
-                out_fps=ctx.candidate_meta.fps,
-                error_maps={0: emap} if emap is not None else None)
-            paths.append(result[0] if result else None)
-        except Exception as exc:  # noqa: BLE001
-            status.overlay_clips["status"] = "degraded"
-            status.overlay_clips["errors"].append(repr(exc))
-            paths.append(None)
-    return paths
+    """One overlay clip per issue (capped at 12) — batch call."""
+    issues = ctx.issues[:12]
+    if not issues:
+        return []
+    try:
+        # Build error_maps dict keyed by LOCAL index for this batch
+        error_maps = {}
+        for i, issue in enumerate(issues):
+            if i in ctx.error_maps:
+                error_maps[i] = ctx.error_maps[i]
+        results = export_overlay_clips(
+            ctx.candidate_video, issues, ctx.output_dir / "badcases",
+            out_fps=ctx.candidate_meta.fps,
+            error_maps=error_maps if error_maps else None)
+        # Pad to len(issues) if fewer results
+        while len(results) < len(issues):
+            results.append(None)
+        return results[:len(issues)]
+    except Exception as exc:  # noqa: BLE001
+        status.overlay_clips["status"] = "degraded"
+        status.overlay_clips["errors"].append(repr(exc))
+        return [None] * len(issues)
 
 
 def _export_compare(ctx: ArtifactContext, status: ArtifactStatus) -> list[Path | None]:
-    """One compare clip per issue (capped at 12)."""
-    paths: list[Path | None] = []
-    for n, issue in enumerate(ctx.issues[:12]):
-        try:
-            emap = ctx.error_maps.get(n)
-            result = export_compare_clips(
-                [issue], ctx.output_dir / "badcases",
-                out_fps=30.0,
-                candidate_video=ctx.candidate_video,
-                reference_video=ctx.reference_video,
-                error_maps={0: emap} if emap is not None else None)
-            paths.append(result[0] if result else None)
-        except Exception as exc:  # noqa: BLE001
-            status.compare_clips["status"] = "degraded"
-            status.compare_clips["errors"].append(repr(exc))
-            paths.append(None)
-    return paths
+    """One compare clip per issue (capped at 12) — batch call."""
+    issues = ctx.issues[:12]
+    if not issues:
+        return []
+    try:
+        # Build error_maps dict keyed by LOCAL index for this batch
+        error_maps = {}
+        for i, issue in enumerate(issues):
+            if i in ctx.error_maps:
+                error_maps[i] = ctx.error_maps[i]
+        # Panel layout is driven by the explicit evaluation mode (P0-5): the
+        # exporter can no longer guess from ``reference_video`` presence,
+        # otherwise Endpoint (which has a reference) is mislabeled as FR.
+        mode = {
+            EvaluationMode.NO_REFERENCE: "NR",
+            EvaluationMode.ENDPOINT_2X: "endpoint-2x",
+            EvaluationMode.FULL_REFERENCE: "full-reference",
+        }.get(ctx.mode, "NR")
+        results = export_compare_clips(
+            issues, ctx.output_dir / "badcases",
+            out_fps=30.0,
+            candidate_video=ctx.candidate_video,
+            reference_video=ctx.reference_video,
+            error_maps=error_maps if error_maps else None,
+            mode=mode)
+        # Pad to len(issues) if fewer results
+        while len(results) < len(issues):
+            results.append(None)
+        return results[:len(issues)]
+    except Exception as exc:  # noqa: BLE001
+        status.compare_clips["status"] = "degraded"
+        status.compare_clips["errors"].append(repr(exc))
+        return [None] * len(issues)
 
 
 def _export_keyframes(ctx: ArtifactContext, status: ArtifactStatus) -> list[Path | None]:

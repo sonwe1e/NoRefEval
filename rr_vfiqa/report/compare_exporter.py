@@ -46,6 +46,19 @@ def _heat_bgr(x: np.ndarray) -> np.ndarray:
     return np.stack([b, g, r], axis=-1)
 
 
+def _normalize_map_for_display(array: np.ndarray) -> np.ndarray:
+    """Normalize an error map to 0-1 for display using P99.5 percentile.
+
+    FR error maps (luma_error_map, mcr_difference_map) arrive in range 0-255,
+    while NR maps are already ~0-1.  Naively clipping either to 0-1 loses all
+    detail in the 0-255 case.  Scaling by the P99.5 percentile (floored to a
+    small epsilon) maps the meaningful dynamic range into 0-1 for both.
+    """
+    m = np.nan_to_num(array.astype(np.float32), nan=0.0)
+    vmax = max(float(np.percentile(m, 99.5)), 1e-6)
+    return np.clip(m / vmax, 0.0, 1.0)
+
+
 def _label(frame: np.ndarray, text: str, scale: float = 0.6) -> np.ndarray:
     """Draw a dark label box at the top-left of ``frame``."""
     out = frame.copy()
@@ -90,6 +103,7 @@ def export_compare_clips(
     candidate_video: str | None = None,
     reference_video: str | None = None,
     error_maps: Sequence[np.ndarray | None] | dict[int, np.ndarray] | None = None,
+    mode: str = "NR",
 ) -> list[Path]:
     """Write ``issue_NNN_compare.mp4`` per issue.
 
@@ -123,7 +137,8 @@ def export_compare_clips(
             issue_emap = None
         out_path = out_dir / f"issue_{n:03d}_compare.mp4"
         _write_compare_clip(issue, issue_panels, out_path, out_fps,
-                            candidate_video, reference_video, issue_emap)
+                            candidate_video, reference_video, issue_emap,
+                            mode=mode)
         paths.append(out_path)
     return paths
 
@@ -183,7 +198,7 @@ def _panel_size(nat_w: int, nat_h: int) -> tuple[int, int]:
 
 def _render_heat(emap: np.ndarray, h: int, w: int) -> np.ndarray:
     """Jet heat ``emap`` (0..1) resized to ``(h, w)`` as uint8 BGR."""
-    heat = _heat_bgr(emap)
+    heat = _heat_bgr(_normalize_map_for_display(emap))
     heat_u8 = (heat * 255).astype(np.uint8)
     if heat_u8.shape[:2] != (h, w):
         heat_u8 = cv2.resize(heat_u8, (w, h), interpolation=cv2.INTER_LINEAR)
@@ -195,11 +210,11 @@ def _write_compare_clip(issue: dict,
                         dst: Path, fps: float,
                         candidate_video: str | None = None,
                         reference_video: str | None = None,
-                        error_map: np.ndarray | None = None) -> None:
+                        error_map: np.ndarray | None = None,
+                        mode: str = "NR") -> None:
     band = issue.get("severity_band", "low")
     bgr = _BAND_BGR.get(band, (120, 120, 120))
     title = issue.get("title", issue.get("issue_type", "issue"))
-    mode = "FR" if reference_video is not None else "NR"
 
     # Try to build a real sequence from the candidate video first.
     t0 = max(0.0, float(issue.get("start_time") or 0) - _PAD_SECONDS)
@@ -220,10 +235,15 @@ def _write_compare_clip(issue: dict,
                 ph, pw = 360, 640
         pw, ph = _panel_size(pw, ph)
         decoded = _decode_window_frames(candidate_video, t0, t1, ph, pw)
-        # For FR, decode the reference stream in the same window so we can
-        # show reference | candidate | heat.
+        # Decode the reference stream only for the two reference-bearing modes
+        # so we can show reference | candidate | heat.  The panel layout and
+        # the reference label are driven by the explicit ``mode`` (see P0-5):
+        #   NR             -> candidate | heat
+        #   endpoint-2x    -> source    | candidate | heat
+        #   full-reference -> reference | candidate | heat
+        show_ref = mode in ("endpoint-2x", "full-reference")
         ref_decoded = (_decode_window_frames(reference_video, t0, t1, ph, pw)
-                       if reference_video else [])
+                       if show_ref and reference_video else [])
         if len(decoded) >= 2:
             t_start = decoded[0][1]
             t_end = decoded[-1][1]
@@ -244,7 +264,9 @@ def _write_compare_clip(issue: dict,
                     ref_frame, _ = min(ref_decoded,
                                        key=lambda x: abs(x[1] - target_pts))
                     panel_frames.append(ref_frame)
-                    panel_labels.append("reference")
+                    # Endpoint uses the reference as the interpolation source.
+                    panel_labels.append(
+                        "source" if mode == "endpoint-2x" else "reference")
                 panel_frames.append(cur)
                 panel_labels.append(f"{mode}/candidate  t={out_t:.3f}")
                 if use_emap:
@@ -339,7 +361,7 @@ def extract_compare_panels(candidate_video: str, issue: dict,
                             break
 
             if error_map is not None:
-                heat = _heat_bgr(error_map)[..., ::-1]  # RGB->BGR
+                heat = _heat_bgr(_normalize_map_for_display(error_map))[..., ::-1]
                 heat_u8 = np.clip(heat * 255, 0, 255).astype(np.uint8)
                 if heat_u8.shape[:2] != (h, w):
                     heat_u8 = cv2.resize(heat_u8, (w, h))

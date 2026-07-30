@@ -78,8 +78,14 @@ def _overlay_cut(src: str, t0: float, t1: float, dst: Path, fps: float,
                     prev = frame.to_ndarray(format="bgr24")
                     continue
                 bgr_frame = frame.to_ndarray(format="bgr24")
-                heat = (error_map if has_map and error_map.shape[:2] == (h, w)
-                        else _motion_proxy(bgr_frame, prev))
+                if has_map:
+                    # Map may be at working resolution (e.g. 960px); resize to frame.
+                    heat_norm = _normalize_map(error_map)
+                    heat = (heat_norm if heat_norm.shape[:2] == (h, w)
+                            else cv2.resize(heat_norm, (w, h),
+                                            interpolation=cv2.INTER_LINEAR))
+                else:
+                    heat = _motion_proxy(bgr_frame, prev)
                 annotated = _annotate(bgr_frame, heat, bgr, bar_text, note, t)
                 of = av.VideoFrame.from_ndarray(annotated, format="bgr24")
                 of.pts = out_idx
@@ -90,6 +96,13 @@ def _overlay_cut(src: str, t0: float, t1: float, dst: Path, fps: float,
                     out.mux(packet)
             for packet in os_.encode():
                 out.mux(packet)
+
+
+def _normalize_map(array: np.ndarray) -> np.ndarray:
+    """Normalize an error map to 0..1 using P99.5 (robust to outliers)."""
+    m = np.nan_to_num(array.astype(np.float32), nan=0.0)
+    vmax = max(float(np.percentile(m, 99.5)), 1e-6)
+    return np.clip(m / vmax, 0.0, 1.0)
 
 
 def _motion_proxy(frame: np.ndarray, prev: np.ndarray | None) -> np.ndarray:

@@ -66,6 +66,13 @@ class Rule:
     min_mass: float = 0.6                # weighted evidence required to fire
     min_evidence: int = 2                # hard multi-signal floor
     probable_causes: tuple[str, ...] = ()
+    # Ordered dense-map names that best illustrate this issue type.  The first
+    # name that exists in a window's available maps is used for both box
+    # extraction and the rendered heatmap, so the annotation and the heatmap
+    # always come from the *same* field (USERPLAN P0-6).  Names span modes
+    # (NR / FR / endpoint); the selection falls through to whatever a mode
+    # actually produced.
+    preferred_maps: tuple[str, ...] = ()
 
     def evaluate(self, scalars: dict[str, float]) -> tuple[list[Evidence], float]:
         """Return (fired evidence, weighted mass)."""
@@ -110,6 +117,8 @@ RULES: tuple[Rule, ...] = (
             "推理循环重复写入同一帧",
             "时间戳错误导致帧被复用",
         ),
+        preferred_maps=("duplicate_frame_indicator", "mct_residual_map",
+                        "composition_error_map"),
     ),
     Rule(
         issue_type="generated_blur",
@@ -133,6 +142,7 @@ RULES: tuple[Rule, ...] = (
             "motion compensation 不准确",
             "编码质量不足",
         ),
+        preferred_maps=("phase_sharpness_map", "composition_error_map"),
     ),
     Rule(
         issue_type="ghost_double_exposure",
@@ -157,6 +167,8 @@ RULES: tuple[Rule, ...] = (
             "遮挡处理失败",
             "前后运动层被错误混合",
         ),
+        preferred_maps=("composition_error_map", "edge_mismatch_map",
+                        "flow_fold_map"),
     ),
     Rule(
         issue_type="tearing_flow_folding",
@@ -179,6 +191,8 @@ RULES: tuple[Rule, ...] = (
             "形变过强",
             "遮挡区域错误传播",
         ),
+        preferred_maps=("flow_fold_map", "flow_error_map",
+                        "composition_error_map"),
     ),
     Rule(
         issue_type="ui_text_instability",
@@ -202,6 +216,8 @@ RULES: tuple[Rule, ...] = (
             "文字区域融合 / 缩放错误",
             "奇偶帧处理不一致",
         ),
+        preferred_maps=("ui_edge_instability_map", "edge_mismatch_map",
+                        "composition_error_map"),
     ),
     Rule(
         issue_type="fr_color_pipeline_mismatch",
@@ -222,6 +238,7 @@ RULES: tuple[Rule, ...] = (
             "limited / full range 不一致",
             "编码器色彩矩阵 / gamma 差异",
         ),
+        preferred_maps=("luma_error_map", "edge_mismatch_map"),
     ),
     Rule(
         issue_type="fr_spatial_reference_error",
@@ -239,6 +256,7 @@ RULES: tuple[Rule, ...] = (
             "生成帧空间细节偏离参考",
             "纹理 / 边缘重建不准",
         ),
+        preferred_maps=("luma_error_map", "edge_mismatch_map"),
     ),
     Rule(
         issue_type="fr_temporal_fidelity_error",
@@ -254,6 +272,8 @@ RULES: tuple[Rule, ...] = (
             "相邻生成帧不一致",
             "闪烁 / 亮度抖动",
         ),
+        preferred_maps=("mcr_difference_map", "luma_error_map",
+                        "flow_error_map"),
     ),
 )
 
@@ -263,6 +283,53 @@ def _rule_for(issue_type: str) -> Rule | None:
         if r.issue_type == issue_type:
             return r
     return None
+
+
+def preferred_maps_for(issue_type: str) -> tuple[str, ...]:
+    """Return the ordered preferred diagnostic map names for an issue type.
+
+    The first name that exists in a window's available maps is used for both
+    box extraction and the rendered heatmap, so the annotation and the
+    heatmap always come from the *same* field (USERPLAN P0-6).  Returns an
+    empty tuple when the issue type is unknown (the caller should fall back
+    to any available map).
+    """
+    rule = _rule_for(issue_type)
+    if rule is not None and rule.preferred_maps:
+        return rule.preferred_maps
+    return ()
+
+
+def select_map(error_maps: dict[str, np.ndarray], issue_type: str,
+               ) -> np.ndarray | None:
+    """Pick the best available dense map for an issue type.
+
+    Chooses the first ``preferred_maps_for(issue_type)`` entry that is present
+    in ``error_maps``; if none match, falls back to the first available map
+    (so box extraction still works for modes that did not produce the ideal
+    field).  Returns ``None`` when the window has no maps at all.
+    """
+    if not error_maps:
+        return None
+    for name in preferred_maps_for(issue_type):
+        if name in error_maps:
+            return error_maps[name]
+    return next(iter(error_maps.values()))
+
+
+def select_map_name(error_maps: dict[str, np.ndarray], issue_type: str,
+                    ) -> str | None:
+    """Like :func:`select_map` but returns the *name* of the chosen map.
+
+    Used by callers that record ``issue.maps`` (the rendered heatmap name) so
+    the recorded name matches the map used for box extraction.
+    """
+    if not error_maps:
+        return None
+    for name in preferred_maps_for(issue_type):
+        if name in error_maps:
+            return name
+    return next(iter(error_maps))
 
 
 def evaluate_rules(scalars: dict[str, float]) -> list[tuple[Rule, list[Evidence], float]]:
@@ -280,7 +347,7 @@ def diagnose_windows(
     nms_seconds: float = 0.5,
     severity_floor: float = 0.10,
     *,
-    error_maps: dict[int, np.ndarray] | None = None,
+    error_maps: dict[int, dict[str, np.ndarray]] | None = None,
 ) -> list[DiagnosticIssue]:
     """Build issues from per-window data.
 
@@ -289,14 +356,17 @@ def diagnose_windows(
     same-type issues close in time are merged so a sustained defect reads as
     one card rather than a stack.
 
-    ``error_maps`` maps ``center_index`` -> a dense (H, W) field; when supplied
-    the hottest issue per window gets spatial ``boxes`` extracted from that
-    window's map so the report can annotate *where* the defect sits
-    (USERPLAN P1).
+    ``error_maps`` maps ``center_index`` -> ``{map_name: dense_field}``; when
+    supplied the dominant issue per window gets spatial ``boxes`` extracted
+    from the dense field that best matches its issue type.  The map is chosen
+    per-issue via :func:`preferred_maps_for`, so the boxes come from the same
+    field the report renders as the heatmap (USERPLAN P0-6).
     """
     raw: list[DiagnosticIssue] = []
     for start, end, center, scalars, win_conf in windows_scalars:
-        emap = error_maps.get(center) if error_maps else None
+        # All dense fields available for this window; selection below picks the
+        # one that best illustrates each fired rule's issue type.
+        maps = error_maps.get(center) if error_maps else None
         fired = evaluate_rules(scalars)
         for rule, evs, mass in fired:
             severity = float(np.clip(mass, 0.0, 1.0))
@@ -307,10 +377,15 @@ def diagnose_windows(
                 0.55 * win_conf + 0.45 * min(1.0, len(evs) / 3.0)
                 + 0.10 * strength_mean, 0.0, 1.0))
             # Attach boxes from the error map to the strongest issue only, so
-            # the annotation reflects the dominant defect in this window.
+            # the annotation reflects the dominant defect in this window.  The
+            # map is chosen per-issue-type (preferred_maps_for) instead of a
+            # fixed priority, so a duplicate_freeze issue gets boxes from the
+            # duplicate field while the HTML renders that same field.
             boxes: list[list[int]] = []
-            if emap is not None and rule is fired[0][0]:
-                boxes = boxes_from_error_map(emap)
+            if maps is not None and rule is fired[0][0]:
+                emap = select_map(maps, rule.issue_type)
+                if emap is not None:
+                    boxes = boxes_from_error_map(emap)
             raw.append(DiagnosticIssue(
                 issue_type=rule.issue_type,
                 title=rule.title,

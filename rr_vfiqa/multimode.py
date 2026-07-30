@@ -17,6 +17,7 @@ from .diagnosis import (
     build_diagnostics_block,
     cadence_integrity,
     diagnose_windows,
+    select_map_name,
 )
 from .fusion.feature_registry import feature_contract_hash, required_features
 from .fusion.mode_score_schemas import (
@@ -407,10 +408,17 @@ def _write_outputs(
         error_maps=overlay_maps,
         map_dimensions=map_dims,
     )
-    # Fix: mode should reflect actual evaluation mode from report meta.
-    mode_str = (report.meta or {}).get("mode")
-    if mode_str == "full-reference":
-        ctx.mode = EvaluationMode.FULL_REFERENCE
+    # Mode should reflect the actual evaluation mode from report meta so the
+    # compare exporter can pick the right panel layout (P0-5): NR keeps the
+    # 2-panel candidate | heat layout, while endpoint-2x / full-reference add
+    # the reference panel.  Without this, Endpoint (which has a reference) is
+    # mislabeled as FR by the compare exporter's ``reference_video`` guess.
+    mode_str = (report.meta or {}).get("mode", "no-reference")
+    ctx.mode = {
+        "no-reference": EvaluationMode.NO_REFERENCE,
+        "endpoint-2x": EvaluationMode.ENDPOINT_2X,
+        "full-reference": EvaluationMode.FULL_REFERENCE,
+    }.get(mode_str, EvaluationMode.NO_REFERENCE)
 
     build_report_artifacts(
         ctx, report,
@@ -546,12 +554,18 @@ def _export_keyframes(candidate_video: str, issues: list[dict],
 def _export_compare(candidate_video: str, issues: list[dict],
                     windows: list[WindowFeatures],
                     overlay_maps: dict[int, np.ndarray],
-                    out_dir: Path, reference_video: str | None = None) -> list[Path]:
+                    out_dir: Path, reference_video: str | None = None,
+                    mode: str = "NR") -> list[Path]:
     """Build the multi-panel compare clip per issue (USERPLAN §10).
 
     Returns the list of generated compare-clip paths (one per issue that
     yielded panels).  Issues without panels are skipped, so the returned
     list may be shorter than ``issues``.
+
+    ``mode`` selects the panel layout (P0-5): ``NR`` (candidate | heat),
+    ``endpoint-2x`` (source | candidate | heat) or ``full-reference``
+    (reference | candidate | heat).  It is forwarded to the clip exporter so
+    Endpoint is not mislabeled as FR.
     """
     all_panels: list[list[tuple[np.ndarray, str]]] = []
     for n, issue in enumerate(issues[:12]):
@@ -566,18 +580,18 @@ def _export_compare(candidate_video: str, issues: list[dict],
     return export_compare_clips(issues, out_dir, panels=all_panels,
                                 candidate_video=candidate_video,
                                 reference_video=reference_video,
-                                error_maps=overlay_maps)
+                                error_maps=overlay_maps, mode=mode)
 
 
 def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],
                            out: Path) -> None:
     """Write ``heatmaps/issue_NNN_<map>.png`` for issues carrying a map name.
 
-    Each issue was associated with one preferred error map (see the
-    ``_NR_ISSUE_MAP`` table in ``evaluate_no_reference``); here we look up that
-    map on the matching window and save a jet PNG.  The issue's ``maps`` list
-    is rewritten from the map-name to the relative path so the HTML report can
-    link to it (USERPLAN §9 directory layout).
+    Each issue was associated with one preferred error map via
+    ``select_map_name`` (preferred_maps_for, USERPLAN P0-6); here we look up
+    that map on the matching window and save a jet PNG.  The issue's ``maps``
+    list is rewritten from the map-name to the relative path so the HTML
+    report can link to it (USERPLAN §9 directory layout).
     """
     from rr_vfiqa.visualization import save_heatmap
     diag = ((report.meta or {}).get("diagnostics") or {})
@@ -799,53 +813,26 @@ def evaluate_no_reference(
          float(wf.labels.get("metric_confidence", 1.0)))
         for wf in window_features
     ]
-    # Per center, pick the single most diagnostic map for box extraction.
-    _NR_BOX_MAP = {
-        "duplicate_freeze": "duplicate_frame_indicator",
-        "generated_blur": "phase_sharpness_map",
-        "ghost_double_exposure": "composition_error_map",
-        "tearing_flow_folding": "flow_fold_map",
-        "ui_text_instability": "ui_edge_instability_map",
-    }
-    nr_error_by_center: dict[int, np.ndarray] = {}
-    for c, maps in nr_error_maps.items():
-        if not maps:
-            continue
-        preferred_name = None
-        # Choose by the issue type is not known yet at this stage; fall back to
-        # the first available map after normalization.
-        for name in ("composition_error_map", "mct_residual_map",
-                     "flow_fold_map", "duplicate_frame_indicator"):
-            if name in maps:
-                preferred_name = name
-                break
-        nr_error_by_center[c] = maps[preferred_name or next(iter(maps))]
+    # Pass every dense field per window to diagnosis; the map best matching
+    # each fired rule's issue type is chosen *inside* diagnose_windows
+    # (preferred_maps_for), so the boxes come from the same field the report
+    # renders (USERPLAN P0-6).  No fixed-priority pre-selection here.
     nr_issues = diagnose_windows(diag_ws, cfg.preset.temporal_nms_seconds,
-                                 error_maps=nr_error_by_center)
+                                 error_maps=nr_error_maps)
 
-    # Pick, for each issue, the single most diagnostic map to render: the
-    # map whose family best explains the issue's evidence.  The mapping is by
-    # issue_type -> preferred NR map name (USERPLAN §8).
-    _NR_ISSUE_MAP = {
-        "duplicate_freeze": "duplicate_frame_indicator",
-        "generated_blur": "phase_sharpness_map",
-        "ghost_double_exposure": "composition_error_map",
-        "tearing_flow_folding": "flow_fold_map",
-        "ui_text_instability": "ui_edge_instability_map",
-    }
+    # Record, for each issue, the map name used for its boxes so the rendered
+    # heatmap matches the annotation (USERPLAN P0-6).
     if nr_error_maps:
         by_center = {int(wf.window.center): wf for wf in window_features}
         for issue in nr_issues:
             wf = by_center.get(int(issue.center_index))
             if wf is None:
                 continue
-            preferred = _NR_ISSUE_MAP.get(issue.issue_type)
-            available = [preferred] if preferred and preferred in wf.error_maps \
-                else list(wf.error_maps.keys())
-            if available:
-                # record the chosen map name; the heatmap PNG is written later
-                # in _write_outputs, keyed by (issue_index, map_name).
-                issue.maps = [available[0]]
+            name = select_map_name(wf.error_maps, issue.issue_type)
+            if name is not None:
+                # the heatmap PNG is written later in _write_outputs, keyed by
+                # (issue_index, map_name).
+                issue.maps = [name]
 
     score_schema = SCHEMA_IDS[EvaluationMode.NO_REFERENCE] + (
         "+niqe" if learned is not None else "")
@@ -1129,40 +1116,24 @@ def evaluate_full_reference(
          float(wf.labels.get("metric_confidence", 1.0)))
         for wf in window_features
     ]
-    # Per center, pick the single most diagnostic map for box extraction.
-    fr_error_by_center: dict[int, np.ndarray] = {}
-    for c, maps in fr_error_maps.items():
-        if not maps:
-            continue
-        for name in ("luma_error_map", "mcr_difference_map",
-                     "flow_error_map", "edge_mismatch_map"):
-            if name in maps:
-                fr_error_by_center[c] = maps[name]
-                break
-        else:
-            fr_error_by_center[c] = next(iter(maps.values()))
+    # Pass every dense field per window to diagnosis; the map best matching
+    # each fired rule's issue type is chosen *inside* diagnose_windows
+    # (preferred_maps_for), so the boxes come from the same field the report
+    # renders (USERPLAN P0-6).  No fixed-priority pre-selection here.
     fr_issues = diagnose_windows(fr_diag_ws, cfg.preset.temporal_nms_seconds,
-                                 error_maps=fr_error_by_center)
+                                 error_maps=fr_error_maps)
 
-    # Associate each FR issue with its preferred error map (by center_index).
-    _FR_ISSUE_MAP = {
-        "fr_spatial_reference_error": "luma_error_map",
-        "fr_temporal_fidelity_error": "mcr_difference_map",
-        "ghost_double_exposure": "edge_mismatch_map",
-        "tearing_flow_folding": "flow_error_map",
-        "ui_text_instability": "edge_mismatch_map",
-    }
+    # Record, for each FR issue, the map name used for its boxes so the
+    # rendered heatmap matches the annotation (USERPLAN P0-6).
     if fr_error_maps:
         by_center = {int(wf.window.center): wf for wf in window_features}
         for issue in fr_issues:
             wf = by_center.get(int(issue.center_index))
             if wf is None:
                 continue
-            preferred = _FR_ISSUE_MAP.get(issue.issue_type)
-            available = [preferred] if preferred and preferred in wf.error_maps \
-                else list(wf.error_maps.keys())
-            if available:
-                issue.maps = [available[0]]
+            name = select_map_name(wf.error_maps, issue.issue_type)
+            if name is not None:
+                issue.maps = [name]
 
     fr_score_schema = SCHEMA_IDS[EvaluationMode.FULL_REFERENCE] + (
         "" if geometry_policy == "strict" else f"+{geometry_policy}")
