@@ -13,6 +13,7 @@ from ..config import EvalConfig
 from ..models.vqa_backend import VQABackend
 from ..motion.flow_composition import composition_error
 from ..motion.flow_geometry import geometry_stats, jacobian_det
+from ..motion.global_camera_motion import dense_affine_residual
 from ..motion.occlusion import cycle_occlusion
 from ..models.tracker_backend import KLTTracker
 from ..sampling.temporal_plan import TemporalLagPlan, TemporalTriplet
@@ -292,10 +293,14 @@ def _tile_motion_dynamics(
         dt = max(float(bundle.times[b] - bundle.times[a]), 1e-6)
         field = flows.forward(a, b)
         h, w = field.shape[:2]
+        # USERPLAN P2: remove affine camera motion (rotation/zoom/translation)
+        # before measuring per-tile dynamics, so camera pans do not read as
+        # local acceleration/jerk.
+        residual = dense_affine_residual(field)
         tiles = []
         for gy in range(grid):
             for gx in range(grid):
-                tile = field[
+                tile = residual[
                     gy * h // grid:(gy + 1) * h // grid,
                     gx * w // grid:(gx + 1) * w // grid,
                 ]
@@ -436,14 +441,15 @@ def compute_window(
     })
     out.update(_tile_motion_dynamics(bundle, flows, short_pairs))
 
-    # Local flow geometry after removing the robust global translation proxy.
+    # Local flow geometry after removing the affine camera motion (USERPLAN P2).
     # Negative/low Jacobian determinants expose folding and tearing without an
-    # endpoint reference.
+    # endpoint reference; using the affine residual stops camera rotation/zoom
+    # from being mistaken for local folding.
     geometry: list[dict[str, float]] = []
     for a, b in short_pairs:
         field = flows.forward(a, b)
-        global_translation = np.median(field.reshape(-1, 2), axis=0)
-        geometry.append(geometry_stats(field - global_translation))
+        residual = dense_affine_residual(field)
+        geometry.append(geometry_stats(residual))
     for source_key, output_key in (
         ("flow_fold_frac", "nr_flow_fold_fraction"),
         ("flow_jdet_low_frac", "nr_flow_jdet_low_fraction"),
@@ -639,13 +645,11 @@ def compute_window_maps(bundle: FrameBundle, flows: WindowFlows, cfg: EvalConfig
     out["composition_error_map"] = _stack_mean(comp_fields, h, w)
     out["self_cycle_residual_map"] = _stack_mean(cycle_fields, h, w)
 
-    # --- flow-fold / jacobian maps (1/60 s, minus global translation) -----
+    # --- flow-fold / jacobian maps (1/60 s, affine camera residual) --------
     fold_fields: list[np.ndarray] = []
     jdet_fields: list[np.ndarray] = []
     for a, b in short_pairs:
-        field = flows.forward(a, b)
-        global_translation = np.median(field.reshape(-1, 2), axis=0)
-        residual = field - global_translation
+        residual = dense_affine_residual(flows.forward(a, b))
         jdet = jacobian_det(residual)
         jdet_fields.append(jdet.astype(np.float32))
         fold_fields.append(np.clip(1.0 - jdet, 0.0, None).astype(np.float32))

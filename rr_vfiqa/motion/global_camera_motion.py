@@ -101,6 +101,44 @@ def estimate_camera_motion(a_rgb: np.ndarray, b_rgb: np.ndarray,
     return _upscale(best, scale)
 
 
+def dense_affine_residual(flow: np.ndarray, *,
+                          ransac_threshold_px: float = 2.5,
+                          min_inlier_ratio: float = 0.45) -> np.ndarray:
+    """Subtract the best affine camera motion from a dense flow field.
+
+    Samples a coarse grid, fits ``cv2.estimateAffine2D`` by RANSAC, validates
+    the affine (finite, near-similarity linear part, sane translation) and
+    returns ``flow - camera``.  When the fit is rejected it falls back to
+    subtracting the median translation only.  This is the shared camera-
+    residual used by both the NR flow-geometry features and the FR camera-
+    residual flow error (USERPLAN P2).
+    """
+    h, w = flow.shape[:2]
+    step_y, step_x = max(1, h // 12), max(1, w // 12)
+    yy, xx = np.mgrid[0:h:step_y, 0:w:step_x].astype(np.float32)
+    source = np.stack([xx.ravel(), yy.ravel()], axis=1)
+    sampled = flow[::step_y, ::step_x].reshape(-1, 2)
+    target = source + sampled
+    affine, inliers = cv2.estimateAffine2D(
+        source, target, method=cv2.RANSAC,
+        ransacReprojThreshold=ransac_threshold_px, maxIters=1000,
+        confidence=0.99, refineIters=10)
+    median_fallback = flow - np.median(flow.reshape(-1, 2), axis=0)
+    if affine is None or inliers is None or np.mean(inliers) < min_inlier_ratio:
+        return median_fallback
+    singular_values = np.linalg.svd(affine[:, :2], compute_uv=False)
+    if (not np.all(np.isfinite(affine))
+            or singular_values.min() < 0.5
+            or singular_values.max() > 1.5
+            or np.linalg.norm(affine[:, 2]) > max(h, w)):
+        return median_fallback
+    full_y, full_x = np.mgrid[0:h, 0:w].astype(np.float32)
+    camera_x = affine[0, 0] * full_x + affine[0, 1] * full_y + affine[0, 2] - full_x
+    camera_y = affine[1, 0] * full_x + affine[1, 1] * full_y + affine[1, 2] - full_y
+    camera = np.stack([camera_x, camera_y], axis=-1)
+    return flow - camera
+
+
 def _upscale(motion: CameraMotion, scale: float) -> CameraMotion:
     """Convert a motion estimated at reduced resolution back to native pixels."""
     if scale == 1.0:

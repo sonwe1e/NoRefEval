@@ -31,6 +31,16 @@ def clean_mask(mask: np.ndarray, min_area: int = 64, close_k: int = 5) -> np.nda
     return out
 
 
+def spatial_norm_factor(h: int, w: int) -> float:
+    """Reference length for making pixel distances resolution-independent.
+
+    Per USERPLAN §6.2 a pixel distance ``d`` is reported as
+    ``d / sqrt(h^2 + w^2)`` so the same *relative* defect scores identically
+    across 480p / 1080p / 4K and across presets with different flow_width.
+    """
+    return float(np.hypot(h, w))
+
+
 def mask_chamfer(a: np.ndarray, b: np.ndarray) -> float:
     """Mean distance from mask a boundary pixels to mask b (pixels)."""
     a = a.astype(np.uint8)

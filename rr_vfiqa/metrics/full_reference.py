@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from ..config import EvalConfig
+from ..imutils import spatial_norm_factor
 from ..schema import FrameBundle, backward_warp, flow_magnitude
 from .window_flows import WindowFlows
 
@@ -60,14 +61,19 @@ def _edge_metrics(
         cv2.distanceTransform((~er).astype(np.uint8), cv2.DIST_L2, 3)
         if er.any()
         else np.full(reference.shape, fallback_distance, np.float32))
-    recall = float(np.mean(dist_c[er] <= 2.0)) if er.any() else 1.0
-    precision = float(np.mean(dist_r[ec] <= 2.0)) if ec.any() else 1.0
+    # USERPLAN §6.2: Chamfer tolerance + distances are resolution-normalized
+    # (fraction of frame diagonal) so the same relative defect scores across
+    # resolutions and presets.
+    norm = spatial_norm_factor(*reference.shape[:2])
+    tol = 2.0 / norm
+    recall = float(np.mean(dist_c[er] <= tol)) if er.any() else 1.0
+    precision = float(np.mean(dist_r[ec] <= tol)) if ec.any() else 1.0
     f1 = 2.0 * precision * recall / max(precision + recall, 1e-6)
     chamfer_parts = []
     if er.any():
-        chamfer_parts.append(float(np.mean(dist_c[er])))
+        chamfer_parts.append(float(np.mean(dist_c[er])) / norm)
     if ec.any():
-        chamfer_parts.append(float(np.mean(dist_r[ec])))
+        chamfer_parts.append(float(np.mean(dist_r[ec])) / norm)
     return recall, precision, float(f1), float(np.mean(chamfer_parts))
 
 
@@ -100,6 +106,8 @@ def _reference_rois(reference_y: np.ndarray) -> dict[str, np.ndarray]:
     band = np.zeros((h, w), bool)
     band[:max(1, h // 5)] = True
     band[-max(1, h // 5):] = True
+    band[:, :max(1, w // 6)] = True      # USERPLAN P2: left/right HUD rails
+    band[:, -max(1, w // 6):] = True
     persistent = edges.mean(0) >= 0.35
     ui = band & cv2.dilate(
         persistent.astype(np.uint8), np.ones((7, 7), np.uint8)
@@ -138,38 +146,9 @@ def _masked_l1(
 
 
 def _camera_residual_flow(flow: np.ndarray) -> np.ndarray:
-    h, w = flow.shape[:2]
-    step_y, step_x = max(1, h // 12), max(1, w // 12)
-    yy, xx = np.mgrid[0:h:step_y, 0:w:step_x].astype(np.float32)
-    source = np.stack([xx.ravel(), yy.ravel()], axis=1)
-    sampled = flow[::step_y, ::step_x].reshape(-1, 2)
-    target = source + sampled
-    affine, inliers = cv2.estimateAffine2D(
-        source,
-        target,
-        method=cv2.RANSAC,
-        ransacReprojThreshold=2.5,
-        maxIters=1000,
-        confidence=0.99,
-        refineIters=10,
-    )
-    if affine is None or inliers is None or np.mean(inliers) < 0.45:
-        return flow - np.median(flow.reshape(-1, 2), axis=0)
-    singular_values = np.linalg.svd(affine[:, :2], compute_uv=False)
-    if (not np.all(np.isfinite(affine))
-            or singular_values.min() < 0.5
-            or singular_values.max() > 1.5
-            or np.linalg.norm(affine[:, 2]) > max(h, w)):
-        return flow - np.median(flow.reshape(-1, 2), axis=0)
-    full_y, full_x = np.mgrid[0:h, 0:w].astype(np.float32)
-    camera_x = (
-        affine[0, 0] * full_x + affine[0, 1] * full_y + affine[0, 2]
-        - full_x)
-    camera_y = (
-        affine[1, 0] * full_x + affine[1, 1] * full_y + affine[1, 2]
-        - full_y)
-    camera = np.stack([camera_x, camera_y], axis=-1)
-    return flow - camera
+    """Dense flow minus its affine camera motion (USERPLAN P2, shared impl)."""
+    from ..motion import dense_affine_residual
+    return dense_affine_residual(flow)
 
 
 def _tile_flow_errors(
@@ -191,6 +170,26 @@ def _tile_flow_errors(
                 np.linalg.norm(cand_vector - ref_vector)
                 / (np.linalg.norm(ref_vector) + 2.0)))
     return errors
+
+
+def _frame_gaps(yr: np.ndarray, z_thresh: float = 6.0) -> list[bool]:
+    """Detect scene cuts between consecutive frames (USERPLAN P2).
+
+    Returns a list of length ``len(yr) - 1`` where ``True`` marks a *gap*
+    between frame ``i`` and ``i + 1``.  Cuts are found from robust-z jumps in
+    per-frame mean luma, so a global brightness drift does not fire while a
+    genuine scene switch (large content change) does.
+    """
+    if yr.shape[0] < 2:
+        return []
+    mean_luma = np.mean(yr, axis=(1, 2))
+    diffs = np.abs(np.diff(mean_luma))
+    med = float(np.median(diffs))
+    mad = float(np.median(np.abs(diffs - med)))
+    if mad < 1e-6:
+        return [False] * (yr.shape[0] - 1)
+    z = (diffs - med) / (1.4826 * mad)
+    return (z > z_thresh).tolist()
 
 
 def compute_window(
@@ -248,6 +247,12 @@ def compute_window(
             _, _, f1, _ = _edge_metrics(a, b, rois["text"])
             text_edge_f1.append(f1)
 
+    # --- gap detection (USERPLAN P2) -------------------------------------
+    # A scene cut inside the window makes cross-frame chains (trajectory
+    # cumsum, mcr_error, structure_persistence) meaningless across the cut.
+    # Detect cuts from robust-z jumps in per-frame mean luma and reset state.
+    gaps = _frame_gaps(yr)
+
     temporal_diff: list[float] = []
     flow_error: list[float] = []
     trajectory: list[float] = []
@@ -258,6 +263,10 @@ def compute_window(
     tile_flow_errors: list[float] = []
     camera_residual_errors: list[float] = []
     salient_flow_errors: list[float] = []
+    # cumsum segments are restarted at each gap; we keep per-segment paths so
+    # a cut corrupts only its own segment, not the whole window.
+    seg_ref: list[list[np.ndarray]] = [[]]
+    seg_cand: list[list[np.ndarray]] = [[]]
     for i in range(len(yr) - 1):
         dr = yr[i + 1] - yr[i]
         dc = yc[i + 1] - yc[i]
@@ -279,6 +288,15 @@ def compute_window(
         ref_vectors.append(np.median(fr.reshape(-1, 2), axis=0))
         cand_vectors.append(np.median(fc.reshape(-1, 2), axis=0))
 
+        # Reset the trajectory chain at a gap; the mcr / structure-persistence
+        # pair that straddles a cut is dropped (it compares unrelated frames).
+        if gaps[i]:
+            seg_ref.append([])
+            seg_cand.append([])
+            continue
+        seg_ref[-1].append(ref_vectors[-1])
+        seg_cand[-1].append(cand_vectors[-1])
+
         wr = backward_warp(yr[i + 1], fr)
         wc = backward_warp(yc[i + 1], fc)
         rr = np.abs(wr - yr[i])
@@ -292,10 +310,16 @@ def compute_window(
         structure_persistence.append(float(np.mean(
             np.logical_xor(np.logical_xor(er0, er1), np.logical_xor(ec0, ec1)))))
 
-    if ref_vectors:
-        ref_path = np.cumsum(np.asarray(ref_vectors), axis=0)
-        cand_path = np.cumsum(np.asarray(cand_vectors), axis=0)
-        trajectory.append(float(np.mean(np.linalg.norm(cand_path - ref_path, axis=1))))
+    # Trajectory = worst (longest) per-segment cumsum deviation (USERPLAN P2).
+    # USERPLAN §6.2: normalize by frame diagonal so the metric is resolution-
+    # independent (the per-frame flow vectors are in working-resolution px).
+    norm = spatial_norm_factor(yr.shape[1], yr.shape[2])
+    for seg_r, seg_c in zip(seg_ref, seg_cand):
+        if len(seg_r) >= 2:
+            ref_path = np.cumsum(np.asarray(seg_r), axis=0)
+            cand_path = np.cumsum(np.asarray(seg_c), axis=0)
+            trajectory.append(float(
+                np.mean(np.linalg.norm(cand_path - ref_path, axis=1)) / norm))
 
     ref_flicker = float(np.std(np.diff(np.mean(yr, axis=(1, 2))))) if len(yr) > 1 else 0.0
     cand_flicker = float(np.std(np.diff(np.mean(yc, axis=(1, 2))))) if len(yc) > 1 else 0.0

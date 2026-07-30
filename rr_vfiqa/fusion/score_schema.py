@@ -88,6 +88,19 @@ CATEGORY_REQUIRED_FEATURE_GROUPS: dict[
 }
 
 
+# USERPLAN P2: per-category minimum instance-count / coverage gates.  A window
+# contributes to a category only if it actually *contains* the thing being
+# measured — a window with zero matched thin objects or a negligible UI mask
+# must not dilute (or fabricate) that category's score.
+CATEGORY_MIN_INSTANCES: dict[str, tuple[str, float]] = {
+    "thin_weapon": ("thin_matched_count", 1.0),
+    "structure": ("edge_inst_count", 1.0),
+}
+CATEGORY_MIN_COVERAGE: dict[str, tuple[str, float]] = {
+    "ui": ("ui_coverage", 0.004),
+}
+
+
 def category_window_valid(wf: WindowFeatures, category: str) -> bool:
     failed = {
         key[len("error_"):] for key in wf.labels if key.startswith("error_")
@@ -100,6 +113,21 @@ def category_window_valid(wf: WindowFeatures, category: str) -> bool:
         if not any(
                 key in wf.scalars and np.isfinite(wf.scalars[key])
                 for key in alternatives):
+            return False
+    # Instance-count gate: the window must contain at least one instance of the
+    # category's target (thin object, edge instance, ...).
+    inst_req = CATEGORY_MIN_INSTANCES.get(category)
+    if inst_req is not None:
+        req_key, req_min = inst_req
+        val = wf.scalars.get(req_key, 0.0)
+        if not (np.isfinite(val) and float(val) >= req_min):
+            return False
+    # Coverage gate: the region-of-interest must occupy enough of the frame.
+    cov_req = CATEGORY_MIN_COVERAGE.get(category)
+    if cov_req is not None:
+        req_key, req_min = cov_req
+        val = wf.scalars.get(req_key, 0.0)
+        if not (np.isfinite(val) and float(val) >= req_min):
             return False
     return True
 

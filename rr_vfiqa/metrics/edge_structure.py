@@ -13,6 +13,7 @@ import numpy as np
 
 from ..cache.source_cache import SourceCache, SourcePairData
 from ..config import EvalConfig
+from ..imutils import spatial_norm_factor
 from ..schema import FrameBundle, forward_splat, resize_flow
 from .window_flows import WindowFlows
 
@@ -80,9 +81,12 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cache: SourceCache,
     out["edge_ghost_frac"] = float(
         ((dist_to_sup[em_tex] > 2.0) & (dist_to_sup[em_tex] <= 4.0)).mean())
 
-    # --- chamfer distances -----------------------------------------------------
-    out["edge_chamfer_sup_to_em"] = float(dist_to_em[sup_tex].mean()) if sup_tex.any() else float("nan")
-    out["edge_chamfer_em_to_sup"] = float(dist_to_sup[em_tex].mean()) if em_tex.any() else float("nan")
+    # --- chamfer distances (USERPLAN §6.2: normalized by frame diagonal) ----
+    norm = spatial_norm_factor(h, w)
+    out["edge_chamfer_sup_to_em"] = (float(dist_to_em[sup_tex].mean()) / norm) \
+        if sup_tex.any() else float("nan")
+    out["edge_chamfer_em_to_sup"] = (float(dist_to_sup[em_tex].mean()) / norm) \
+        if em_tex.any() else float("nan")
 
     # --- per-instance aggregation (§7.2) ---------------------------------------
     n_lab, labels, stats, _ = cv2.connectedComponentsWithStats(support, connectivity=8)

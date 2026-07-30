@@ -266,6 +266,15 @@ def _write_outputs(
     if not out_dir:
         return
     out = Path(out_dir)
+    # --- USERPLAN §8: render heatmap PNGs for issues that have a map -----
+    # Done before the JSON/HTML writers so both embed the final relative
+    # paths.  Failures here must never abort the report, so the whole step is
+    # guarded and the issue's ``maps`` list falls back to the raw map name.
+    try:
+        _render_issue_heatmaps(report, windows, out)
+    except Exception as exc:  # noqa: BLE001
+        if report.meta is not None:
+            report.meta["heatmap_render_error"] = repr(exc)
     write_json_report(report, out / "report.json")
     write_html_report(report, out / "report.html")
     (out / "timeline.md").write_text(
@@ -286,9 +295,6 @@ def _write_outputs(
         export_overlay_clips(
             candidate_video, diag_issues, out / "badcases",
             out_fps=candidate.meta.fps)
-
-    # --- USERPLAN §8: render heatmap PNGs for issues that have a map -----
-    _render_issue_heatmaps(report, windows, out)
 
 
 def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],

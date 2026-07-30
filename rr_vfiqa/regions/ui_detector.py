@@ -16,7 +16,7 @@ import numpy as np
 
 from ..config import EvalConfig
 from ..io.video_reader import VideoReader
-from ..imutils import alpha_blend_fit
+from ..imutils import alpha_blend_fit, spatial_norm_factor
 from ..schema import FrameBundle
 from ._common import clean_mask, luma
 
@@ -108,14 +108,18 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
     xj = bundle.rgb[3].astype(np.float32)
     m = mask.astype(bool)
 
-    endpoint_change = float(np.abs(xi - xj)[m].mean())
+    # USERPLAN §6.2: decision thresholds are resolution-normalized (fraction
+    # of frame diagonal) so the static/dynamic UI decision is consistent
+    # across resolutions and presets.
+    norm = spatial_norm_factor(h, w)
+    endpoint_change = float(np.abs(xi - xj)[m].mean()) / norm
     out["ui_endpoint_change"] = endpoint_change
-    static = endpoint_change < 6.0
+    static = endpoint_change < 6.0 / norm
     out["ui_mode"] = 0.0 if static else 1.0
 
     if static:
         # §8.4 E_UI-static: M_i should equal the (identical) endpoint content.
-        out["ui_static_l1"] = float(np.abs(xm - xi)[m].mean())
+        out["ui_static_l1"] = float(np.abs(xm - xi)[m].mean()) / norm
         gm = cv2.Sobel(luma(xm.astype(np.uint8)), cv2.CV_32F, 1, 0)
         gi = cv2.Sobel(luma(xi.astype(np.uint8)), cv2.CV_32F, 1, 0)
         out["ui_static_grad"] = float(np.abs(gm - gi)[m].mean())
@@ -127,7 +131,7 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
         # level, not whole-HUD average).
         n_lab, labels, stats_cc, _ = cv2.connectedComponentsWithStats(
             mask.astype(np.uint8), 8)
-        drifts = [float(np.abs(xm - xi)[labels == lab].mean())
+        drifts = [float(np.abs(xm - xi)[labels == lab].mean()) / norm
                   for lab in range(1, n_lab)
                   if stats_cc[lab, cv2.CC_STAT_AREA] >= 40]
         if drifts:
@@ -135,25 +139,25 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
         # Cross-generated drift: M_{i-1} vs M_i inside UI (persistent drift).
         if bundle.rgb.shape[0] >= 5:
             out["ui_gen_drift"] = float(
-                np.abs(bundle.rgb[0].astype(np.float32) - xm)[m].mean())
+                np.abs(bundle.rgb[0].astype(np.float32) - xm)[m].mean()) / norm
     else:
         # §8.4 dynamic UI / §8.6 discrete events: only penalize mixing defects.
-        d0 = np.abs(xm - xi).mean(-1)
-        d1 = np.abs(xm - xj).mean(-1)
-        diff01m = np.abs(xi - xj).mean(-1)
-        ch = m & (diff01m > 12.0)
+        d0 = np.abs(xm - xi).mean(-1) / norm
+        d1 = np.abs(xm - xj).mean(-1) / norm
+        diff01m = np.abs(xi - xj).mean(-1) / norm
+        ch = m & (diff01m > 12.0 / norm)
         n_ch = max(int(ch.sum()), 1)
 
         # Alpha-mixing evidence: M fits α·Xi + (1−α)·Xj with α strictly inside
         # (0,1) and tiny residual — impossible for a correct hard switch, and
         # not tripped by the triangle-inequality-violating old d0<τ & d1<τ.
         alpha, resid = alpha_blend_fit(xi, xm, xj)
-        blend = ch & (resid < 6.0) & (alpha > 0.15) & (alpha < 0.85)
+        blend = ch & (resid < 6.0 / norm) & (alpha > 0.15) & (alpha < 0.85)
         out["ui_dyn_blend_frac"] = float(blend.sum() / n_ch)
         out["ui_dyn_blend_resid"] = float(resid[ch].mean()) if ch.any() else float("nan")
 
-        out_of_range = ((xm < np.minimum(xi, xj) - 8.0) |
-                        (xm > np.maximum(xi, xj) + 8.0)).any(-1)
+        out_of_range = ((xm < np.minimum(xi, xj) - 8.0 / norm) |
+                        (xm > np.maximum(xi, xj) + 8.0 / norm)).any(-1)
         out["ui_dyn_out_of_range_frac"] = float((out_of_range & ch).sum() / n_ch)
 
         # State regression (§3.6 fixed sign): M_i returns TOWARD X_i relative
@@ -161,7 +165,7 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
         # M_i FURTHER from X_i than M_{i-1}, so only a shrink counts.
         if bundle.rgb.shape[0] >= 5:
             m_prev = bundle.rgb[0].astype(np.float32)
-            d0_prev = np.abs(m_prev - xi).mean(-1)
+            d0_prev = np.abs(m_prev - xi).mean(-1) / norm
             back = ch & (d0 < d0_prev - 0.2 * diff01m)
             out["ui_dyn_regression"] = float(back.sum() / n_ch)
     return out

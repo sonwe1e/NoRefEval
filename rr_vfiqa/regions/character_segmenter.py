@@ -12,6 +12,7 @@ import numpy as np
 
 from ..cache.source_cache import SourcePairData
 from ..config import EvalConfig
+from ..imutils import spatial_norm_factor
 from ..metrics.window_flows import WindowFlows
 from ..models.segmentation_backend import SegmentationBackend, get_segmentation_backend
 from ..schema import FrameBundle, flow_magnitude, forward_splat, resize_flow
@@ -71,7 +72,8 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, pair: SourcePairData,
     hat_tol = cv2.dilate(hat, k7).astype(bool)
     out["char_missing_frac"] = float(np.mean(hb & ~sm_tol))
     out["char_extra_frac"] = float(np.mean(mb & ~hat_tol))
-    out["char_chamfer"] = mask_chamfer(hat, sm)
+    # USERPLAN §6.2: Chamfer distance normalized by frame diagonal.
+    out["char_chamfer"] = mask_chamfer(hat, sm) / spatial_norm_factor(h, w)
     n_hat = cv2.connectedComponents(hat)[0] - 1
     n_sm = cv2.connectedComponents(sm)[0] - 1
     out["char_components_delta"] = float(abs(n_hat - n_sm))
