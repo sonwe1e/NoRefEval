@@ -33,14 +33,12 @@ from .models.vqa_backend import get_vqa_backend
 from .motion.flow_estimator import get_flow_backend
 from .pipeline import evaluate_endpoint_reference
 from .report import (
-    export_badcase_clips,
+    ArtifactContext,
+    build_report_artifacts,
     export_compare_clips,
-    export_overlay_clips,
     extract_compare_panels,
     render_timeline_md,
     render_timeline_png,
-    write_html_report,
-    write_json_report,
 )
 from .sampling.cheap_scan import scan_candidate, scene_cuts_from_scan
 from .sampling.time_window_selector import select_time_windows
@@ -385,70 +383,40 @@ def _write_outputs(
     candidate_video: str,
     out_dir: str | None,
     export_clips: bool,
+    reference_video: str | None = None,
 ) -> None:
+    """NR/FR output entry point — delegates to the unified artifact pipeline."""
     if not out_dir:
         return
-    out = Path(out_dir)
     diag_issues = ((report.meta or {}).get("diagnostics") or {}).get("issues") or []
+    out = Path(out_dir)
 
-    # --- USERPLAN §8: render heatmap PNGs for issues that have a map -----
-    # Done before the JSON/HTML writers so both embed the final relative
-    # paths.  Failures here must never abort the report, so the whole step is
-    # guarded and the issue's ``maps`` list falls back to the raw map name.
-    try:
-        _render_issue_heatmaps(report, windows, out)
-    except Exception as exc:  # noqa: BLE001
-        if report.meta is not None:
-            report.meta["heatmap_render_error"] = repr(exc)
+    # Build per-issue error maps (ndarray + dimensions) for the pipeline.
+    overlay_maps, map_dims = _issue_error_maps_with_dims(diag_issues, windows)
 
-    # --- USERPLAN P2-R2: generate ALL media before writing JSON/HTML -----
-    # The report files must embed the final clip_paths / thumbnail / map
-    # links, so every companion asset has to be produced first.  The old
-    # order wrote JSON/HTML before the overlay/compare clips existed, so the
-    # HTML showed no video links even when the MP4s were on disk.
-    if export_clips and report.worst_windows:
-        export_badcase_clips(
-            candidate_video,
-            report.worst_windows,
-            out / "badcases",
-            out_fps=candidate.meta.fps,
-        )
-    # USERPLAN §10: overlay companion clips (severity bar + timecode + heat).
-    # USERPLAN P1-R1: pass the real per-issue error map to the exporter so the
-    # heat overlay shows the actual diagnostic evidence, not the motion-proxy
-    # fallback (the proxy is only used when an issue has no map).
-    if export_clips and diag_issues:
-        overlay_maps = _issue_error_maps(diag_issues, windows)
-        overlay_paths = export_overlay_clips(
-            candidate_video, diag_issues, out / "badcases",
-            out_fps=candidate.meta.fps, error_maps=overlay_maps)
-        # USERPLAN §10 item 3: diagnostic compare clip (multi-panel).
-        compare_paths = _export_compare(candidate_video, diag_issues, windows,
-                                        overlay_maps, out / "badcases",
-                                        reference_video=None)
-        # USERPLAN §10: keyframe thumbnail with defect boxes drawn.
-        thumb_paths = _export_keyframes(candidate_video, diag_issues,
-                                        out / "badcases")
-        # Write the paths back into the issues so the HTML report can link them.
-        for idx, issue in enumerate(diag_issues):
-            clips = {}
-            if idx < len(overlay_paths) and overlay_paths[idx].exists():
-                clips["overlay"] = f"badcases/{overlay_paths[idx].name}"
-            if idx < len(compare_paths) and compare_paths[idx].exists():
-                clips["compare"] = f"badcases/{compare_paths[idx].name}"
-            if clips:
-                issue["clip_paths"] = clips
-            if idx < len(thumb_paths) and thumb_paths[idx].exists():
-                issue["thumbnail"] = f"badcases/{thumb_paths[idx].name}"
-
-    # --- NOW write the JSON/HTML reports with all media links in place ---
-    write_json_report(report, out / "report.json")
-    write_html_report(report, out / "report.html")
-    (out / "timeline.md").write_text(
-        render_timeline_md(windows, candidate.meta, report),
-        encoding="utf-8",
+    ctx = ArtifactContext(
+        mode=EvaluationMode.NO_REFERENCE,  # overridden by caller context below
+        candidate_video=candidate_video,
+        reference_video=reference_video,
+        windows=windows,
+        issues=diag_issues,
+        output_dir=out,
+        candidate_meta=candidate.meta,
+        worst_windows=report.worst_windows,
+        export_clips=export_clips,
+        error_maps=overlay_maps,
+        map_dimensions=map_dims,
     )
-    render_timeline_png(windows, candidate.meta, report, out / "timeline.png")
+    # Fix: mode should reflect actual evaluation mode from report meta.
+    mode_str = (report.meta or {}).get("mode")
+    if mode_str == "full-reference":
+        ctx.mode = EvaluationMode.FULL_REFERENCE
+
+    build_report_artifacts(
+        ctx, report,
+        render_timeline_md_fn=render_timeline_md,
+        render_timeline_png_fn=render_timeline_png,
+    )
 
 
 def _issue_error_maps(diag_issues: list[dict],
@@ -479,21 +447,57 @@ def _issue_error_maps(diag_issues: list[dict],
             arr = wf.error_maps.get(name)
             if arr is not None:
                 out[i] = arr
+                # Remember the map resolution on the issue so
+                # _export_keyframes can scale defect boxes from map space
+                # to the keyframe's pixel resolution.
+                issue["_map_h"] = int(arr.shape[0])
+                issue["_map_w"] = int(arr.shape[1])
                 break
     return out
 
 
+def _issue_error_maps_with_dims(
+        diag_issues: list[dict],
+        windows: list[WindowFeatures]) -> tuple[dict[int, np.ndarray], dict[int, tuple[int, int]]]:
+    """Like :func:`_issue_error_maps` but also returns per-issue map dimensions.
+
+    Returns ``(error_maps, map_dimensions)`` where ``map_dimensions[i]``
+    is ``(height, width)`` of the error map for issue ``i``.
+    """
+    by_center = {int(wf.window.center): wf for wf in windows}
+    error_maps: dict[int, np.ndarray] = {}
+    map_dims: dict[int, tuple[int, int]] = {}
+    for i, issue in enumerate(diag_issues):
+        map_names = issue.get("map_keys") or issue.get("maps") or []
+        if not map_names:
+            continue
+        wf = by_center.get(int(issue.get("center_index", -1)))
+        if wf is None:
+            continue
+        for name in map_names:
+            arr = wf.error_maps.get(name)
+            if arr is not None:
+                error_maps[i] = arr
+                map_dims[i] = (int(arr.shape[0]), int(arr.shape[1]))
+                issue["_map_h"] = int(arr.shape[0])
+                issue["_map_w"] = int(arr.shape[1])
+                break
+    return error_maps, map_dims
+
+
 def _export_keyframes(candidate_video: str, issues: list[dict],
-                      out_dir: Path) -> list[Path]:
+                      out_dir: Path) -> list[Path | None]:
     """Extract a keyframe per issue with its defect boxes drawn (USERPLAN §10).
 
-    Returns a list of PNG paths aligned with ``issues`` (Path() when the
-    frame could not be extracted).
+    Returns a list of PNG paths aligned with ``issues`` (``None`` when the
+    frame could not be extracted).  Defect boxes are at Error Map resolution;
+    they are scaled to the keyframe's pixel size using the map dimensions
+    stored on the issue by ``_issue_error_maps`` (``_map_w``/``_map_h``).
     """
     import cv2
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
+    paths: list[Path | None] = []
     for n, issue in enumerate(issues[:12]):
         t_center = 0.5 * (float(issue.get("start_time", 0)) +
                            float(issue.get("end_time", 0)))
@@ -511,15 +515,23 @@ def _export_keyframes(candidate_video: str, issues: list[dict],
                         frame = f.to_ndarray(format="bgr24")
                         break
                 if frame is None:
-                    paths.append(Path())
+                    paths.append(None)
                     continue
             annotated = frame.copy()
+            # Boxes come from boxes_from_error_map() at the Error Map
+            # resolution (the working flow-grid size).  Scale them to the
+            # keyframe's pixel dimensions using the map size stored on the
+            # issue by _issue_error_maps.
+            map_w = issue.get("_map_w")
+            map_h = issue.get("_map_h")
+            if map_w and map_h:
+                scale_x = annotated.shape[1] / map_w
+                scale_y = annotated.shape[0] / map_h
+            else:
+                scale_x = scale_y = 1.0
             for box in (issue.get("boxes") or []):
                 if len(box) == 4:
                     x, y, w, h = box
-                    # Boxes may be at working resolution; scale to frame size.
-                    scale_x = annotated.shape[1] / max(issue.get("_map_w", w + x), 1)
-                    scale_y = annotated.shape[0] / max(issue.get("_map_h", h + y), 1)
                     x, w = int(x * scale_x), int(w * scale_x)
                     y, h = int(y * scale_y), int(h * scale_y)
                     cv2.rectangle(annotated, (x, y), (x + w, y + h),
@@ -527,7 +539,7 @@ def _export_keyframes(candidate_video: str, issues: list[dict],
             cv2.imwrite(str(out_path), annotated)
             paths.append(out_path)
         except Exception:  # noqa: BLE001
-            paths.append(Path())
+            paths.append(None)
     return paths
 
 
@@ -548,9 +560,13 @@ def _export_compare(candidate_video: str, issues: list[dict],
             candidate_video, issue, error_map=emap,
             reference_video=reference_video)
         all_panels.append(panels)
+    # ``overlay_maps`` is ``{issue_index: emap}``; forward it so the clip
+    # exporter renders the real error map as a jet panel (falling back to
+    # temporal heat only for issues that have no map).
     return export_compare_clips(issues, out_dir, panels=all_panels,
                                 candidate_video=candidate_video,
-                                reference_video=reference_video)
+                                reference_video=reference_video,
+                                error_maps=overlay_maps)
 
 
 def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],
@@ -894,7 +910,7 @@ def evaluate_no_reference(
     meta.update(report_provenance(
         mode=EvaluationMode.NO_REFERENCE.value,
         score_schema=score_schema,
-        metric_contract="nr-metrics-v2",
+        metric_contract="nr-metrics-v3",
         preset_contract=f"nr-{cfg.preset.name}-v1",
         feature_contract_hash=feature_contract_hash(
             EvaluationMode.NO_REFERENCE),
@@ -1226,7 +1242,7 @@ def evaluate_full_reference(
     meta.update(report_provenance(
         mode=EvaluationMode.FULL_REFERENCE.value,
         score_schema=fr_score_schema,
-        metric_contract="fr-metrics-v2",
+        metric_contract="fr-metrics-v3",
         preset_contract=f"fr-{cfg.preset.name}-v1",
         feature_contract_hash=feature_contract_hash(
             EvaluationMode.FULL_REFERENCE),
@@ -1242,7 +1258,8 @@ def evaluate_full_reference(
         meta=meta,
     )
     _write_outputs(
-        report, valid, candidate, candidate_video, out_dir, export_clips)
+        report, valid, candidate, candidate_video, out_dir, export_clips,
+        reference_video=reference_video)
     return report
 
 

@@ -92,6 +92,12 @@ class DiagnosticIssue:
     clip_paths: dict[str, str] = field(default_factory=dict)
     # original / overlay / compare -> relative path
     thumbnail: str = ""   # keyframe with boxes drawn, relative path
+    # P0-4: for merged issues, the center_index of the representative (worst)
+    # window and the list of every center_index that was merged in. For a
+    # standalone issue these default to the issue's own center_index / [] so
+    # the dict output stays stable.
+    representative_center_index: int = -1
+    supporting_center_indices: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         band_key, band_label = severity_band(self.severity)
@@ -113,6 +119,8 @@ class DiagnosticIssue:
             "clip_paths": dict(self.clip_paths),
             "thumbnail": self.thumbnail,
             "causes_are_inferred": True,
+            "representative_center_index": int(self.representative_center_index),
+            "supporting_center_indices": list(self.supporting_center_indices),
         }
 
 

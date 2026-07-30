@@ -151,6 +151,8 @@ def report_provenance(
     feature_contract_hash: str,
     backend_contract: dict[str, Any],
     calibration_id: str | None = None,
+    artifact_contract: str = "artifact-contract-v1",
+    diagnosis_contract: str = "diagnosis-contract-v2",
 ) -> dict[str, Any]:
     """Minimal reproducibility contract embedded in every evaluation report."""
     git = _git_state()
@@ -158,6 +160,8 @@ def report_provenance(
         "metric_contract": metric_contract,
         "calibration_id": calibration_id,
         "preset_contract": preset_contract,
+        "artifact_contract": artifact_contract,
+        "diagnosis_contract": diagnosis_contract,
         "feature_contract_hash": feature_contract_hash,
         "backend_contract": backend_contract,
         "code_commit": git["commit_sha"],

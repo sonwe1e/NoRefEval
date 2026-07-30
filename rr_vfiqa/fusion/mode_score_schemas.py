@@ -157,9 +157,28 @@ CORE_CATEGORIES = {
 }
 
 SCHEMA_IDS = {
-    EvaluationMode.NO_REFERENCE: "nr-stability-risk-v3-common-time",
-    EvaluationMode.FULL_REFERENCE: "fr-same-rate-fidelity-v2",
+    EvaluationMode.NO_REFERENCE: "nr-stability-risk-v4",
+    EvaluationMode.FULL_REFERENCE: "fr-same-rate-fidelity-v3",
 }
+
+# Endpoint schema ID lives outside SCHEMA_IDS because endpoint-2x is resolved
+# through fusion.score_schema rather than the generic mode schema path.
+ENDPOINT_SCHEMA_ID = "endpoint-reduced-reference-v3"
+
+METRIC_CONTRACTS = {
+    EvaluationMode.NO_REFERENCE: "nr-metrics-v3",
+    EvaluationMode.ENDPOINT_2X: "endpoint-metrics-v3",
+    EvaluationMode.FULL_REFERENCE: "fr-metrics-v3",
+}
+
+PRESET_CONTRACTS = {
+    "fast": "fast-preset-v1",
+    "balanced": "balanced-preset-v2",
+    "thorough": "thorough-preset-v1",
+}
+
+ARTIFACT_CONTRACT = "artifact-contract-v1"
+DIAGNOSIS_CONTRACT = "diagnosis-contract-v2"
 
 
 def _schema(mode: EvaluationMode) -> dict[str, dict[str, FeatureSpec]]:

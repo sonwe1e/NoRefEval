@@ -362,34 +362,77 @@ def boxes_from_error_map(error_map: np.ndarray, *,
     return boxes
 
 
-def merge_issues(issues: list[DiagnosticIssue], nms_seconds: float) -> list[DiagnosticIssue]:
-    """Merge same-type issues within ``nms_seconds`` (keep the worst, join span)."""
-    issues = sorted(issues, key=lambda i: (i.issue_type, i.start_time))
-    merged: list[DiagnosticIssue] = []
-    for issue in issues:
-        if merged and merged[-1].issue_type == issue.issue_type and \
-                issue.start_time - merged[-1].end_time <= nms_seconds:
-            prev = merged[-1]
-            prev.end_time = max(prev.end_time, issue.end_time)
-            prev.severity = max(prev.severity, issue.severity)
-            prev.confidence = max(prev.confidence, issue.confidence)
-            if len(issue.evidence) > len(prev.evidence):
-                prev.evidence = issue.evidence
-            prev.boxes = prev.boxes or issue.boxes
-            prev.maps = prev.maps or issue.maps
-            prev.clip_paths.update(issue.clip_paths)
-            prev.thumbnail = prev.thumbnail or issue.thumbnail
+def _cluster_issues(issues: list[DiagnosticIssue], nms_seconds: float,
+                    ) -> list[list[DiagnosticIssue]]:
+    """Group issues into clusters by type and temporal proximity.
+
+    Uses the same greedy rule as the original sequential merge: issues of the
+    same type whose ``start_time`` falls within ``nms_seconds`` of the running
+    cluster end are folded into the current cluster. Returning explicit clusters
+    lets the merge step pick a single representative window, so the resulting
+    issue's span, severity, center_index, boxes, maps and evidence all describe
+    one consistent source window.
+    """
+    ordered = sorted(issues, key=lambda i: (i.issue_type, i.start_time))
+    clusters: list[list[DiagnosticIssue]] = []
+    cluster_end: float = -1.0
+    for issue in ordered:
+        if clusters and clusters[-1][-1].issue_type == issue.issue_type and \
+                issue.start_time - cluster_end <= nms_seconds:
+            clusters[-1].append(issue)
+            cluster_end = max(cluster_end, issue.end_time)
         else:
-            merged.append(DiagnosticIssue(
-                issue_type=issue.issue_type, title=issue.title,
-                severity=issue.severity, confidence=issue.confidence,
-                start_time=issue.start_time, end_time=issue.end_time,
-                track=issue.track, evidence=list(issue.evidence),
-                probable_causes=list(issue.probable_causes),
-                center_index=issue.center_index,
-                boxes=list(issue.boxes), maps=list(issue.maps),
-                clip_paths=dict(issue.clip_paths),
-                thumbnail=issue.thumbnail))
+            clusters.append([issue])
+            cluster_end = issue.end_time
+    return clusters
+
+
+def merge_issues(issues: list[DiagnosticIssue], nms_seconds: float) -> list[DiagnosticIssue]:
+    """Merge same-type issues within ``nms_seconds`` (cluster → representative).
+
+    Issues are first grouped into clusters by type and temporal proximity, then
+    each cluster is collapsed to a single issue:
+
+    * ``start_time``/``end_time`` — union of the whole cluster's time span.
+    * ``severity``/``confidence`` — max over the cluster.
+    * ``center_index``, ``boxes``, ``maps``, ``evidence`` — taken from one
+      *representative* issue (the worst by ``(severity, confidence, evidence
+      count)``), so these fields stay mutually consistent instead of being
+      drawn from different source windows.
+    * ``clip_paths`` — merged from every issue in the cluster.
+    * ``thumbnail`` — taken from whichever issue has one.
+
+    The merged issue also carries ``representative_center_index`` and
+    ``supporting_center_indices`` so downstream consumers can see which window
+    the spatial fields came from.
+    """
+    merged: list[DiagnosticIssue] = []
+    for cluster in _cluster_issues(issues, nms_seconds):
+        representative = max(
+            cluster, key=lambda x: (x.severity, x.confidence, len(x.evidence)))
+        # Merge clip_paths from all issues in the cluster.
+        merged_clip_paths: dict[str, str] = {}
+        for iss in cluster:
+            merged_clip_paths.update(iss.clip_paths)
+        # Take the thumbnail from whichever issue has one.
+        thumbnail = ""
+        for iss in cluster:
+            if iss.thumbnail:
+                thumbnail = iss.thumbnail
+                break
+        merged.append(DiagnosticIssue(
+            issue_type=representative.issue_type, title=representative.title,
+            severity=max(iss.severity for iss in cluster),
+            confidence=max(iss.confidence for iss in cluster),
+            start_time=min(iss.start_time for iss in cluster),
+            end_time=max(iss.end_time for iss in cluster),
+            track=representative.track, evidence=list(representative.evidence),
+            probable_causes=list(representative.probable_causes),
+            center_index=representative.center_index,
+            boxes=list(representative.boxes), maps=list(representative.maps),
+            clip_paths=merged_clip_paths, thumbnail=thumbnail,
+            representative_center_index=representative.center_index,
+            supporting_center_indices=[int(iss.center_index) for iss in cluster]))
     merged.sort(key=lambda i: -i.severity)
     return merged
 

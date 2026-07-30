@@ -58,6 +58,20 @@ _UNIT_OVERRIDES = {
     "nr_native_self_cycle": "luma",
 }
 
+# Explicit per-feature contracts for features whose units / resolution semantics
+# cannot be reliably inferred from the name. The ``_unit`` heuristic guesses
+# "pixels" for any "*chamfer*" name and "luma" for "*l1*", which is wrong for
+# the normalized chamfer distances and the RGB-intensity UI drifts below.
+# FeatureRegistry 逐项显式定义 units 和 resolution_invariant，不再从名称猜.
+# Mapping: feature_name -> (units, resolution_invariant).
+_FEATURE_CONTRACT_OVERRIDES: dict[str, tuple[str, bool]] = {
+    "edge_chamfer_sup_to_em": ("normalized", False),
+    "char_chamfer": ("normalized", False),
+    "ui_static_l1": ("rgb", True),
+    "ui_comp_drift_p90": ("rgb", True),
+    "ui_gen_drift": ("rgb", True),
+}
+
 _NR_DIAGNOSTICS = {
     "nr_mct_native_mean": (24.0, "temporal_native_diagnostic"),
     "nr_mct_native_p90": (36.0, "temporal_native_diagnostic"),
@@ -93,12 +107,20 @@ def definitions(mode: str | EvaluationMode) -> tuple[FeatureDefinition, ...]:
         for category, names in CATEGORY_FEATURES.items():
             for name in names:
                 spec = FEATURE_SCALES.get(name, (1.0, False))
+                # Prefer an explicit contract override; fall back to the name
+                # heuristic only when no override exists. 逐项显式定义, not guess.
+                if name in _FEATURE_CONTRACT_OVERRIDES:
+                    units, resolution_invariant = (
+                        _FEATURE_CONTRACT_OVERRIDES[name])
+                else:
+                    units, resolution_invariant = (
+                        _unit(name), "chamfer" not in name)
                 rows.append(FeatureDefinition(
                     name=name, mode=parsed, category=category,
-                    units=_unit(name),
+                    units=units,
                     direction="higher_is_better" if len(spec) == 3
                     else "lower_is_better",
-                    resolution_invariant="chamfer" not in name,
+                    resolution_invariant=resolution_invariant,
                     required=name in _REQUIRED[parsed],
                     scale=float(spec[1] if len(spec) == 3 else spec[0]),
                 ))

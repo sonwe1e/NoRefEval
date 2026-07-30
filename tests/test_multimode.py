@@ -242,7 +242,7 @@ def test_no_reference_60_and_120_are_time_normalized(mode_videos):
     for report in reports:
         assert report.meta["mode"] == "no-reference"
         assert report.meta["score_schema"] == \
-            "nr-stability-risk-v3-common-time"
+            "nr-stability-risk-v4"
         assert report.meta["status"] == "ok"
         assert 0.0 <= report.overall_score <= 100.0
         assert report.confidence <= 0.75
@@ -280,7 +280,7 @@ def test_full_reference_is_separate_and_detects_same_rate_error(mode_videos):
         **common,
     )
     assert good.meta["mode"] == "full-reference"
-    assert good.meta["score_schema"] == "fr-same-rate-fidelity-v2"
+    assert good.meta["score_schema"] == "fr-same-rate-fidelity-v3"
     assert good.meta["alignment"]["reliable"] is True
     assert np.isclose(good.overall_score, 100.0)
     assert bad.overall_score < good.overall_score
@@ -376,7 +376,7 @@ def test_no_reference_120_native_duplicate_signal(mode_videos):
     # Native cadence remains diagnostic-only in the common-time score schema;
     # do not silently make 60 and 120 FPS totals depend on different spans.
     assert duplicated.meta["score_schema"] == \
-        "nr-stability-risk-v3-common-time"
+        "nr-stability-risk-v4"
 
 
 def test_no_reference_60_freeze_lowers_common_time_score(mode_videos):

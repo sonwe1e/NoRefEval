@@ -12,8 +12,8 @@ from rr_vfiqa.calibration import mode_validation
 def _report(score: float, mode: str):
     meta = {
         "score_schema": (
-            "nr-stability-risk-v3-common-time"
-            if mode == "no-reference" else "fr-same-rate-fidelity-v2"),
+            "nr-stability-risk-v4"
+            if mode == "no-reference" else "fr-same-rate-fidelity-v3"),
         "metric_contract": (
             "nr-metrics-v2"
             if mode == "no-reference" else "fr-metrics-v2"),

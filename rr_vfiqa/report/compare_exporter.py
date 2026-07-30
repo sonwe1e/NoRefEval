@@ -26,6 +26,9 @@ from ..diagnosis.schema import severity_band
 
 _PAD_SECONDS = 0.5
 _MAX_CLIPS = 12
+# Per-panel width cap (USERPLAN P0-7): prevents 4K sources producing 8K+
+# output videos. Sources narrower than this are never upscaled.
+_PANEL_TARGET_W = 560
 _BAND_BGR = {
     "severe": (43, 57, 192), "high": (34, 126, 230),
     "medium": (40, 196, 241), "low": (165, 165, 150),
@@ -86,6 +89,7 @@ def export_compare_clips(
     panels: Sequence[Sequence[tuple[np.ndarray, str]]] | None = None,
     candidate_video: str | None = None,
     reference_video: str | None = None,
+    error_maps: Sequence[np.ndarray | None] | dict[int, np.ndarray] | None = None,
 ) -> list[Path]:
     """Write ``issue_NNN_compare.mp4`` per issue.
 
@@ -93,10 +97,15 @@ def export_compare_clips(
     the issue's centre time; used as a fallback when ``candidate_video`` is not
     given or when decoding the issue window fails.
 
+    ``error_maps`` is a per-issue error map (aligned with ``issues`` by index,
+    or a dict ``{issue_index: array}``).  When present for an issue it is
+    rendered as a jet heat panel alongside the candidate; the temporal-heat
+    proxy is only the fallback when no real map exists.
+
     When ``candidate_video`` is supplied, the exporter decodes the actual
     frames in the issue's time window (with ``_PAD_SECONDS`` of padding) and
     writes a *real* video sequence: each output frame is a multi-panel
-    composition of the candidate frame alongside a temporal-heat proxy, so
+    composition of the candidate frame alongside the diagnostic heat, so
     flicker / freeze / UI drift / temporal ghosting become visible.  If the
     decode fails or the window is too short, we fall back to holding the
     supplied ``panels`` for ~2 seconds (the old static behaviour).
@@ -106,23 +115,31 @@ def export_compare_clips(
     paths: list[Path] = []
     for n, issue in enumerate(issues[:_MAX_CLIPS]):
         issue_panels = panels[n] if panels and n < len(panels) else None
+        if isinstance(error_maps, dict):
+            issue_emap = error_maps.get(n)
+        elif error_maps is not None and n < len(error_maps):
+            issue_emap = error_maps[n]
+        else:
+            issue_emap = None
         out_path = out_dir / f"issue_{n:03d}_compare.mp4"
         _write_compare_clip(issue, issue_panels, out_path, out_fps,
-                            candidate_video, reference_video)
+                            candidate_video, reference_video, issue_emap)
         paths.append(out_path)
     return paths
 
 
 def _decode_window_frames(video_path: str, t0: float, t1: float,
                           target_h: int, target_w: int,
-                          ) -> list[np.ndarray]:
+                          ) -> list[tuple[np.ndarray, float]]:
     """Decode BGR frames from ``video_path`` in ``[t0, t1]`` resized to target.
 
     Best-effort: returns an empty list on any failure.  Frames are resized to
     exactly ``(target_h, target_w)`` so they can be composed into panels.
+    Each element is ``(bgr_frame, pts_seconds)`` so callers can resample to
+    the output FPS by real timestamps instead of assuming a constant rate.
     """
     try:
-        frames: list[np.ndarray] = []
+        frames: list[tuple[np.ndarray, float]] = []
         with av.open(video_path) as inp:
             vs = inp.streams.video[0]
             inp.seek(int(t0 * av.time_base), any_frame=False, backward=True)
@@ -136,7 +153,7 @@ def _decode_window_frames(video_path: str, t0: float, t1: float,
                 if bgr.shape[:2] != (target_h, target_w):
                     bgr = cv2.resize(bgr, (target_w, target_h),
                                      interpolation=cv2.INTER_LINEAR)
-                frames.append(bgr)
+                frames.append((bgr, t))
         return frames
     except Exception:  # noqa: BLE001
         return []
@@ -151,11 +168,34 @@ def _temporal_heat(cur: np.ndarray, prev: np.ndarray | None) -> np.ndarray:
     return np.clip(d / max(float(np.percentile(d, 95)), 1e-3), 0.0, 1.0)
 
 
+def _panel_size(nat_w: int, nat_h: int) -> tuple[int, int]:
+    """Cap panel width at ``_PANEL_TARGET_W`` (never upscale narrow sources).
+
+    Width and height are forced even so the composed yuv420p frame meets H.264's
+    requirement (an odd height makes ``avcodec_open2`` fail to open libx264).
+    """
+    if nat_w <= _PANEL_TARGET_W:
+        return nat_w & ~1, nat_h & ~1
+    w = _PANEL_TARGET_W & ~1
+    h = max(2, int(round(nat_h * w / nat_w)) & ~1)
+    return w, h
+
+
+def _render_heat(emap: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Jet heat ``emap`` (0..1) resized to ``(h, w)`` as uint8 BGR."""
+    heat = _heat_bgr(emap)
+    heat_u8 = (heat * 255).astype(np.uint8)
+    if heat_u8.shape[:2] != (h, w):
+        heat_u8 = cv2.resize(heat_u8, (w, h), interpolation=cv2.INTER_LINEAR)
+    return heat_u8
+
+
 def _write_compare_clip(issue: dict,
                         panels: Sequence[tuple[np.ndarray, str]] | None,
                         dst: Path, fps: float,
                         candidate_video: str | None = None,
-                        reference_video: str | None = None) -> None:
+                        reference_video: str | None = None,
+                        error_map: np.ndarray | None = None) -> None:
     band = issue.get("severity_band", "low")
     bgr = _BAND_BGR.get(band, (120, 120, 120))
     title = issue.get("title", issue.get("issue_type", "issue"))
@@ -167,7 +207,8 @@ def _write_compare_clip(issue: dict,
     sequence: list[np.ndarray] = []
     if candidate_video and t1 > t0 + 0.05:
         # Pick a target size: prefer the first supplied panel's size, then
-        # the candidate video's native size, then a sane default.
+        # the candidate video's native size, then a sane default.  Panel width
+        # is capped so 4K sources do not blow the output resolution up.
         if panels:
             ph, pw = panels[0][0].shape[:2]
         else:
@@ -177,17 +218,45 @@ def _write_compare_clip(issue: dict,
                     pw, ph = vs.codec_context.width, vs.codec_context.height
             except Exception:  # noqa: BLE001
                 ph, pw = 360, 640
+        pw, ph = _panel_size(pw, ph)
         decoded = _decode_window_frames(candidate_video, t0, t1, ph, pw)
+        # For FR, decode the reference stream in the same window so we can
+        # show reference | candidate | heat.
+        ref_decoded = (_decode_window_frames(reference_video, t0, t1, ph, pw)
+                       if reference_video else [])
         if len(decoded) >= 2:
+            t_start = decoded[0][1]
+            t_end = decoded[-1][1]
+            duration = max(t_end - t_start, 1e-3)
+            # Resample decoded frames to the output FPS by real PTS so a
+            # 60/120 FPS source plays back at real speed in a 30 FPS file
+            # instead of slow motion.
+            output_times = np.arange(0.0, duration, 1.0 / fps)
+            use_emap = error_map is not None
             prev: np.ndarray | None = None
-            for i, cur in enumerate(decoded):
-                heat = _temporal_heat(cur, prev)
-                heat_u8 = (_heat_bgr(heat) * 255).astype(np.uint8)
-                t_cur = t0 + i / float(fps)
-                left = _label(cur.copy(), f"{mode}/candidate  t={t_cur:.3f}")
-                right = _label(heat_u8.copy(), "temporal heat")
-                composed = np.concatenate([left, right], axis=1)
-                sequence.append(composed)
+            for out_t in output_times:
+                target_pts = t_start + out_t
+                # Nearest decoded frame by PTS (candidate and ref share PTS).
+                cur, _ = min(decoded, key=lambda x: abs(x[1] - target_pts))
+                panel_frames: list[np.ndarray] = []
+                panel_labels: list[str] = []
+                if ref_decoded:
+                    ref_frame, _ = min(ref_decoded,
+                                       key=lambda x: abs(x[1] - target_pts))
+                    panel_frames.append(ref_frame)
+                    panel_labels.append("reference")
+                panel_frames.append(cur)
+                panel_labels.append(f"{mode}/candidate  t={out_t:.3f}")
+                if use_emap:
+                    panel_frames.append(
+                        _render_heat(error_map, ph, pw))
+                    panel_labels.append("error map")
+                else:
+                    heat = _temporal_heat(cur, prev)
+                    heat_u8 = (_heat_bgr(heat) * 255).astype(np.uint8)
+                    panel_frames.append(heat_u8)
+                    panel_labels.append("temporal heat")
+                sequence.append(_panels_to_frame(panel_frames, panel_labels))
                 prev = cur
 
     # Fall back to the static held-frame behaviour if we have no sequence.

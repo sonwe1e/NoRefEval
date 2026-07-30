@@ -118,7 +118,7 @@ def test_build_and_calibrator_hashes_are_recorded(tmp_path):
         backend_contract={"flow": {"backend": "farneback"}},
     )
     build = report["build_contract"]
-    assert build["source_version"] == "0.3.0"
+    assert build["source_version"] == "0.4.0"
     assert len(build["package_source_sha256"]) == 64
 
 

@@ -18,7 +18,7 @@ from .calibration.provenance import (
     calibrator_provenance,
     report_provenance,
 )
-from .config import EvalConfig
+from .config import EvalConfig, EvaluationMode
 from .diagnosis import build_diagnostics_block, diagnose_windows
 from .fusion import (build_category_errors, compute_confidence, compute_scores,
                      maybe_load)
@@ -36,9 +36,13 @@ from .regions import (card_tracker, character_segmenter, text_evaluator,
                       thin_object_detector, transition_evaluator, ui_detector,
                       weapon_tracker)
 from .regions.ui_detector import UIDetector
-from .report import (export_badcase_clips, export_overlay_clips,
-                     render_timeline_md, render_timeline_png,
-                     save_error_heatmap, write_html_report, write_json_report)
+from .report import (
+    ArtifactContext,
+    build_report_artifacts,
+    render_timeline_md,
+    render_timeline_png,
+    save_error_heatmap,
+)
 from .sampling.cheap_scan import scan_candidate, scene_cuts_from_scan
 from .sampling.window_selector import select_windows, window_times
 from .schema import Report, WindowFeatures, WorstWindow
@@ -376,18 +380,8 @@ def evaluate_endpoint_reference(
     worst = kept
 
     # USERPLAN §7: structured multi-evidence diagnosis (endpoint scalars).
-    ep_diag_ws = [
-        (window_times(wf.window, candidate.meta)[0],
-         window_times(wf.window, candidate.meta)[1],
-         int(wf.window.center), wf.scalars,
-         float(wf.labels.get("metric_confidence", conf)))
-        for wf in wfs
-    ]
-    ep_issues = diagnose_windows(ep_diag_ws, p.temporal_nms_seconds)
-
-    # USERPLAN P1: associate each endpoint issue with its preferred dense
-    # error map (by center_index), so the HTML report and overlay clips can
-    # render the real diagnostic evidence.
+    # USERPLAN P0-1: build per-window dense error maps so issues can carry
+    # spatial boxes extracted from the real diagnostic evidence.
     _EP_ISSUE_MAP = {
         "ghost_double_exposure": "composition_error_map",
         "tearing_flow_folding": "flow_fold_map",
@@ -396,6 +390,28 @@ def evaluate_endpoint_reference(
         "ui_text_instability": "composition_error_map",
     }
     by_center = {int(wf.window.center): wf for wf in wfs}
+    ep_error_maps: dict[int, np.ndarray] = {}
+    for wf in wfs:
+        center = int(wf.window.center)
+        if not wf.error_maps:
+            continue
+        # Pick the first available map for box extraction; the preferred
+        # map is chosen per-issue below.
+        ep_error_maps[center] = next(iter(wf.error_maps.values()))
+
+    ep_diag_ws = [
+        (window_times(wf.window, candidate.meta)[0],
+         window_times(wf.window, candidate.meta)[1],
+         int(wf.window.center), wf.scalars,
+         float(wf.labels.get("metric_confidence", conf)))
+        for wf in wfs
+    ]
+    ep_issues = diagnose_windows(ep_diag_ws, p.temporal_nms_seconds,
+                                 error_maps=ep_error_maps)
+
+    # USERPLAN P1: associate each endpoint issue with its preferred dense
+    # error map (by center_index), so the HTML report and overlay clips can
+    # render the real diagnostic evidence.
     for issue in ep_issues:
         wf = by_center.get(int(issue.center_index))
         if wf is None:
@@ -448,7 +464,7 @@ def evaluate_endpoint_reference(
 
     meta = {
         "mode": "endpoint-2x",
-        "score_schema": "endpoint-reduced-reference-v2",
+        "score_schema": "endpoint-reduced-reference-v3",
         "score_semantics": "endpoint-referenced interpolation quality",
         "limitations": [
             "Source frames constrain endpoints but are not ground-truth intermediate frames.",
@@ -504,8 +520,8 @@ def evaluate_endpoint_reference(
     }
     meta.update(report_provenance(
         mode="endpoint-2x",
-        score_schema="endpoint-reduced-reference-v2",
-        metric_contract="endpoint-metrics-v2",
+        score_schema="endpoint-reduced-reference-v3",
+        metric_contract="endpoint-metrics-v3",
         preset_contract=f"endpoint-{p.name}-v1",
         feature_contract_hash=endpoint_feature_contract,
         backend_contract={"flow": backend.cache_identity()},
@@ -522,30 +538,42 @@ def evaluate_endpoint_reference(
     if out_dir:
         say("writing reports")
         out = Path(out_dir)
-        write_json_report(report, out / "report.json")
-        write_html_report(report, out / "report.html")
-        (out / "timeline.md").write_text(
-            render_timeline_md(wfs, candidate.meta, report), encoding="utf-8")
-        render_timeline_png(wfs, candidate.meta, report, out / "timeline.png")
-        if export_clips and worst:
-            export_badcase_clips(candidate_video, worst, out / "badcases",
-                                 out_fps=candidate.meta.fps)
         ep_diag_issues = (meta.get("diagnostics") or {}).get("issues") or []
-        if export_clips and ep_diag_issues:
-            # USERPLAN P1: pass the real per-issue error map to the exporter.
-            ep_overlay_maps: dict[int, np.ndarray] = {}
-            by_c = {int(wf.window.center): wf for wf in wfs}
-            for ei, eiss in enumerate(ep_diag_issues):
-                wf_e = by_c.get(int(eiss.get("center_index", -1)))
-                if wf_e is not None:
-                    for nm in (eiss.get("maps") or []):
-                        arr = wf_e.error_maps.get(nm)
-                        if arr is not None:
-                            ep_overlay_maps[ei] = arr
-                            break
-            export_overlay_clips(candidate_video, ep_diag_issues,
-                                 out / "badcases", out_fps=candidate.meta.fps,
-                                 error_maps=ep_overlay_maps)
+
+        # Build per-issue error maps + dimensions for the unified pipeline.
+        ep_overlay_maps: dict[int, np.ndarray] = {}
+        ep_map_dims: dict[int, tuple[int, int]] = {}
+        for ei, eiss in enumerate(ep_diag_issues):
+            wf_e = by_center.get(int(eiss.get("center_index", -1)))
+            if wf_e is None:
+                continue
+            for nm in (eiss.get("map_keys") or eiss.get("maps") or []):
+                arr = wf_e.error_maps.get(nm)
+                if arr is not None:
+                    ep_overlay_maps[ei] = arr
+                    ep_map_dims[ei] = (int(arr.shape[0]), int(arr.shape[1]))
+                    eiss["_map_h"] = int(arr.shape[0])
+                    eiss["_map_w"] = int(arr.shape[1])
+                    break
+
+        ctx = ArtifactContext(
+            mode=EvaluationMode.ENDPOINT_2X,
+            candidate_video=candidate_video,
+            reference_video=reference_video,
+            windows=wfs,
+            issues=ep_diag_issues,
+            output_dir=out,
+            candidate_meta=candidate.meta,
+            worst_windows=worst,
+            export_clips=export_clips,
+            error_maps=ep_overlay_maps,
+            map_dimensions=ep_map_dims,
+        )
+        build_report_artifacts(
+            ctx, report,
+            render_timeline_md_fn=render_timeline_md,
+            render_timeline_png_fn=render_timeline_png,
+        )
         say(f"reports written to {out}")
 
     return report

@@ -34,7 +34,7 @@ def test_report_schema(reports):
 
 def test_bad_scores_below_good(reports):
     g, b = reports["good"].to_dict(), reports["bad"].to_dict()
-    assert g["meta"]["score_schema"] == "endpoint-reduced-reference-v2"
+    assert g["meta"]["score_schema"] == "endpoint-reduced-reference-v3"
     assert b["overall_score"] < g["overall_score"]
     assert b["scores"]["temporal_stability"] < g["scores"]["temporal_stability"]
 
