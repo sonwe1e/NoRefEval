@@ -13,3 +13,6 @@ runs/
 _b1080/
 _deteval*/
 _calrun*/
+_contract_masks/
+validation/
+validation_draft/

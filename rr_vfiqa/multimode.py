@@ -12,6 +12,12 @@ import numpy as np
 
 from .config import EvalConfig, EvaluationMode, parse_mode
 from .calibration.provenance import report_provenance
+from .diagnosis import (
+    affected_duration_fraction,
+    build_diagnostics_block,
+    cadence_integrity,
+    diagnose_windows,
+)
 from .fusion.feature_registry import feature_contract_hash, required_features
 from .fusion.mode_score_schemas import (
     SCHEMA_IDS,
@@ -28,8 +34,10 @@ from .motion.flow_estimator import get_flow_backend
 from .pipeline import evaluate_endpoint_reference
 from .report import (
     export_badcase_clips,
+    export_overlay_clips,
     render_timeline_md,
     render_timeline_png,
+    write_html_report,
     write_json_report,
 )
 from .sampling.cheap_scan import scan_candidate, scene_cuts_from_scan
@@ -224,6 +232,7 @@ def _write_outputs(
         return
     out = Path(out_dir)
     write_json_report(report, out / "report.json")
+    write_html_report(report, out / "report.html")
     (out / "timeline.md").write_text(
         render_timeline_md(windows, candidate.meta, report),
         encoding="utf-8",
@@ -236,6 +245,12 @@ def _write_outputs(
             out / "badcases",
             out_fps=candidate.meta.fps,
         )
+    # USERPLAN §10: overlay companion clips (severity bar + timecode + heat).
+    diag_issues = ((report.meta or {}).get("diagnostics") or {}).get("issues") or []
+    if export_clips and diag_issues:
+        export_overlay_clips(
+            candidate_video, diag_issues, out / "badcases",
+            out_fps=candidate.meta.fps)
 
 
 def evaluate_no_reference(
@@ -351,6 +366,31 @@ def evaluate_no_reference(
         confidence,
         cfg.preset.temporal_nms_seconds,
     )
+
+    # --- USERPLAN §5 cadence integrity + §7 diagnostic evidence ------------
+    # The shared 1/60 s score must not hide a collapsed native cadence, so we
+    # penalise the common-time overall multiplicatively and surface both the
+    # common-time and cadence-integrity numbers.  Diagnostics are built from
+    # every window (incl. ones that failed the required-feature gate) so a
+    # localized defect still produces a located issue.
+    cad_rep = cadence_integrity(
+        [wf.scalars for wf in valid], overall,
+        alternation_per_window=[
+            float(wf.scalars.get("nr_native_motion_alternation", float("nan")))
+            for wf in valid],
+    )
+    if np.isfinite(overall):
+        overall = cad_rep.overall
+    subscores["common_time_quality"] = cad_rep.common_time_quality
+    subscores["cadence_integrity"] = cad_rep.cadence_integrity
+    diag_ws = [
+        (window_times(wf.window, candidate.meta)[0],
+         window_times(wf.window, candidate.meta)[1],
+         int(wf.window.center), wf.scalars,
+         float(wf.labels.get("metric_confidence", 1.0)))
+        for wf in window_features
+    ]
+    nr_issues = diagnose_windows(diag_ws, cfg.preset.temporal_nms_seconds)
     score_schema = SCHEMA_IDS[EvaluationMode.NO_REFERENCE] + (
         "+niqe" if learned is not None else "")
     meta = {
@@ -399,6 +439,16 @@ def evaluate_no_reference(
             for key, value in category_errors.items()
         },
         "calibrator": "nr-common-time-formula-v3",
+        "cadence": {
+            "cadence_risk": round(cad_rep.cadence_risk, 4),
+            "cadence_integrity": round(cad_rep.cadence_integrity, 2),
+            "common_time_quality": round(cad_rep.common_time_quality, 2)
+            if np.isfinite(cad_rep.common_time_quality) else None,
+            "penalty_lambda": 2.2,
+            "evidence": cad_rep.evidence,
+        },
+        "diagnostics": build_diagnostics_block(
+            nr_issues, candidate.meta, confidence),
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
     meta.update(report_provenance(
@@ -572,6 +622,15 @@ def evaluate_full_reference(
         confidence,
         cfg.preset.temporal_nms_seconds,
     )
+    # USERPLAN §7: structured diagnostic evidence (no cadence term for FR).
+    fr_diag_ws = [
+        (window_times(wf.window, candidate.meta)[0],
+         window_times(wf.window, candidate.meta)[1],
+         int(wf.window.center), wf.scalars,
+         float(wf.labels.get("metric_confidence", 1.0)))
+        for wf in window_features
+    ]
+    fr_issues = diagnose_windows(fr_diag_ws, cfg.preset.temporal_nms_seconds)
     fr_score_schema = SCHEMA_IDS[EvaluationMode.FULL_REFERENCE] + (
         "" if geometry_policy == "strict" else f"+{geometry_policy}")
     meta = {
@@ -643,6 +702,8 @@ def evaluate_full_reference(
             for key, value in category_errors.items()
         },
         "calibrator": "fr-formula-v2",
+        "diagnostics": build_diagnostics_block(
+            fr_issues, candidate.meta, confidence),
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
     meta.update(report_provenance(

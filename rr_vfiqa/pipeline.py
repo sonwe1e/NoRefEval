@@ -19,6 +19,7 @@ from .calibration.provenance import (
     report_provenance,
 )
 from .config import EvalConfig
+from .diagnosis import build_diagnostics_block, diagnose_windows
 from .fusion import (build_category_errors, compute_confidence, compute_scores,
                      maybe_load)
 from .fusion.feature_registry import feature_contract_hash
@@ -35,8 +36,9 @@ from .regions import (card_tracker, character_segmenter, text_evaluator,
                       thin_object_detector, transition_evaluator, ui_detector,
                       weapon_tracker)
 from .regions.ui_detector import UIDetector
-from .report import (export_badcase_clips, render_timeline_md, render_timeline_png,
-                     save_error_heatmap, write_json_report)
+from .report import (export_badcase_clips, export_overlay_clips,
+                     render_timeline_md, render_timeline_png,
+                     save_error_heatmap, write_html_report, write_json_report)
 from .sampling.cheap_scan import scan_candidate, scene_cuts_from_scan
 from .sampling.window_selector import select_windows, window_times
 from .schema import Report, WindowFeatures, WorstWindow
@@ -244,12 +246,18 @@ def evaluate_endpoint_reference(
     # --- tier 3: audit escalation (§10) -------------------------------------
     # The highest-risk windows get the core metrics recomputed at native
     # resolution (sharper flows/edges), capped so runtime stays bounded.
+    # USERPLAN §3: ``auto_audit`` lets the *balanced* path escalate high-risk
+    # windows automatically without the caller opting into an "audit" preset.
     n_audit = 0
-    if p.audit_top_fraction > 0 and wfs:
+    eff_frac = (p.audit_top_fraction if p.audit_top_fraction > 0
+                else (p.auto_audit_fraction if p.auto_audit else 0.0))
+    eff_max = (p.audit_max_windows if p.audit_max_windows > 0
+               else (p.auto_audit_max if p.auto_audit else 0))
+    if eff_frac > 0 and wfs:
         ranked = sorted(wfs, key=lambda wf: -max(
             _window_category_errors(wf).values(), default=0.0))
-        n_audit = min(p.audit_max_windows,
-                      max(1, int(round(len(ranked) * p.audit_top_fraction))))
+        n_audit = min(eff_max,
+                      max(1, int(round(len(ranked) * eff_frac))))
         audit_wfs = ranked[:n_audit]
         audit_cache = SourceCache(
             source, cfg, flow_width=source.meta.width, backend=backend)
@@ -357,6 +365,16 @@ def evaluate_endpoint_reference(
             break
     worst = kept
 
+    # USERPLAN §7: structured multi-evidence diagnosis (endpoint scalars).
+    ep_diag_ws = [
+        (window_times(wf.window, candidate.meta)[0],
+         window_times(wf.window, candidate.meta)[1],
+         int(wf.window.center), wf.scalars,
+         float(wf.labels.get("metric_confidence", conf)))
+        for wf in wfs
+    ]
+    ep_issues = diagnose_windows(ep_diag_ws, p.temporal_nms_seconds)
+
     # Feature export: robust per-key median across windows + globals.
     feat_out: dict[str, float] = {}
     if wfs:
@@ -450,6 +468,7 @@ def evaluate_endpoint_reference(
         },
         "calibrator": "lightgbm" if calibrator else "formula",
         "calibrator_contract": calibrator_contract,
+        "diagnostics": build_diagnostics_block(ep_issues, candidate.meta, conf),
         "elapsed_seconds": round(time.perf_counter() - t_start, 2),
     }
     meta.update(report_provenance(
@@ -473,12 +492,17 @@ def evaluate_endpoint_reference(
         say("writing reports")
         out = Path(out_dir)
         write_json_report(report, out / "report.json")
+        write_html_report(report, out / "report.html")
         (out / "timeline.md").write_text(
             render_timeline_md(wfs, candidate.meta, report), encoding="utf-8")
         render_timeline_png(wfs, candidate.meta, report, out / "timeline.png")
         if export_clips and worst:
             export_badcase_clips(candidate_video, worst, out / "badcases",
                                  out_fps=candidate.meta.fps)
+        ep_diag_issues = (meta.get("diagnostics") or {}).get("issues") or []
+        if export_clips and ep_diag_issues:
+            export_overlay_clips(candidate_video, ep_diag_issues,
+                                 out / "badcases", out_fps=candidate.meta.fps)
         say(f"reports written to {out}")
 
     return report

@@ -65,6 +65,14 @@ class Preset:
     full_res_edges: bool = False
     run_tracker: bool = False             # KLT/CoTracker weapon tracking
     run_depth: bool = False
+    # USERPLAN §3: when True the *pipeline* auto-escalates the highest-risk
+    # windows to native resolution even if the preset sets no explicit audit
+    # budget, so callers do not have to pick an "audit" tier by hand.  Off by
+    # default to keep explicit ``evaluate --preset standard`` byte-stable; the
+    # ``inspect`` auto path turns it on.
+    auto_audit: bool = False
+    auto_audit_fraction: float = 0.05
+    auto_audit_max: int = 8
 
     # --- fusion ---
     score_weights: dict[str, float] = field(default_factory=lambda: {
@@ -111,7 +119,23 @@ AUDIT = Preset(
     run_tracker=True,
 )
 
-PRESETS: dict[str, Preset] = {"fast": FAST, "standard": STANDARD, "audit": AUDIT}
+# USERPLAN §3: the auto path's "balanced" tier = standard resources but with
+# automatic tier-3 escalation of high-risk windows, so the user never has to
+# request an audit by hand.  Kept out of ``--preset`` choices on ``evaluate``
+# (only ``inspect`` resolves to it) to keep explicit presets byte-stable.
+BALANCED = Preset(
+    name="balanced",
+    scan_width=384,
+    uniform_windows=16,
+    risk_windows=32,
+    flow_width=960,
+    run_region_branches=True,
+    auto_audit=True,
+)
+
+PRESETS: dict[str, Preset] = {
+    "fast": FAST, "standard": STANDARD, "audit": AUDIT, "balanced": BALANCED,
+}
 
 
 @dataclass

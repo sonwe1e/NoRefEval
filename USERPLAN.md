@@ -1,796 +1,1117 @@
-# 总体结论
+# 核心结论
 
-我审查的是 `codex/norefeval-p0-reliability` 当前最新提交：
+你的目标已经非常明确：这个项目不应该继续被当作“等待训练和标定的指标研究仓库”，而应该收敛成一个：
 
-```text
-03c3c3b8a5f25b1bad50900b1369da9a5acbf896
-feat: implement USERPLAN reliability contracts
-```
+> **输入视频后自动选择评测流程、自动扫描、自动定位问题、输出单一主分数，并生成可直接查看的坏例视频、热力图和诊断报告的工程工具。**
 
-该分支目前比 `main` 多 3 个提交。最新版本已经落实了上一轮路线中的大部分工程可靠性要求，尤其是 NR 时间尺度、FR 全片参考扫描、Feature Registry、显式运行契约和 Endpoint 类别有效窗口等关键工作。
+这条路线不要求再训练一个评分模型，也不要求你为每批视频人工设置阈值。代价是必须把最终分数定义为：
 
-当前项目可以定位为：
+> **确定性的工程质量分数与风险诊断分数，而不是声称等价于人类主观 MOS。**
 
-> **一个架构较完整、数学约束明显改善、可以正式进入真实数据验证阶段的多模式 VFI 评测研究平台。**
+当前三模式架构已经适合作为这个产品的基础，而且三种模式本来就具有独立的输入条件和分数语义，不能跨模式直接比较。
 
-但还不能定位为：
+接下来最重要的事情不再是增加大量新指标，而是完成四个产品闭环：
 
-> **已经验证准确、可以直接作为模型上线门禁的质量评测产品。**
-
-综合完成度判断：
-
-| 维度                  |    上一版本 |        当前版本 |
-| ------------------- | ------: | ----------: |
-| 多模式架构               |     90% |     **95%** |
-| 可复现契约               |     55% |     **80%** |
-| No-Reference 算法实现   | 55%～60% | **70%～75%** |
-| Endpoint-2x 算法实现    |     80% |     **85%** |
-| Full-Reference 算法实现 | 65%～70% | **78%～82%** |
-| 自动测试覆盖              |     55% |     **70%** |
-| 独立模式验证体系            |     15% |     **35%** |
-| 性能与资源验证             |     40% |     **45%** |
-| 真实数据标定              | 15%～20% |  **仍约 20%** |
-| 生产门禁能力              | 35%～40% |   **约 45%** |
+1. **一个命令完成自动评测；**
+2. **一个稳定的主分数和明确的子分数；**
+3. **把分数变成可解释的问题诊断；**
+4. **把问题通过热力图、轨迹图和坏例视频直接展示出来。**
 
 ---
 
-# 一、上一轮计划的实际完成情况
+# 一、最终使用体验应该是什么
 
-## 已完成
+建议最终只保留一个主要入口：
 
-当前版本已经完成了以下关键任务。
+```bash
+rr-vfiqa inspect \
+  --candidate output.mp4 \
+  --reference reference.mp4 \
+  --out result
+```
 
-| 上一轮任务                         | 当前状态    |
-| ----------------------------- | ------- |
-| 强制显式指定评测模式                    | 已完成     |
-| NR 默认关闭环境相关的 `auto` VQA       | 已完成     |
-| 可选 NIQE 使用独立 Schema 后缀        | 已完成     |
-| unique-frame coverage         | 已完成     |
-| Feature Registry              | 已完成基础版本 |
-| MetricResult 契约               | 已建立基础结构 |
-| NR TemporalLagPlan            | 已完成     |
-| NR FlowPairPlan 批量光流规划        | 已完成     |
-| NR 使用 native、1/60、1/30 三档 lag | 已完成     |
-| NR 统一物理时间 self-reference      | 已完成     |
-| NR acceleration/jerk 使用真实时间   | 已完成     |
-| NR composition/cycle 遮挡加权     | 已完成     |
-| NR 原生 120 FPS 重复帧检测           | 已完成     |
-| NR compare 内容一致性检查            | 已完成     |
-| FR 显式 geometry policy         | 已完成     |
-| FR 全片低分辨率参考扫描                 | 已完成     |
-| FR 标准局部 SSIM                  | 已完成     |
-| 伪 perceptual 指标重命名            | 已完成     |
-| Endpoint 按类别排除失败阶段窗口          | 已完成     |
-| NR/FR 独立方向性验证入口               | 已完成基础版本 |
-| 三模式方向性 CI 测试                  | 已加入     |
+无参考时：
 
-最新提交还为报告增加了：
+```bash
+rr-vfiqa inspect \
+  --candidate output.mp4 \
+  --out result
+```
 
-* `metric_contract`；
-* `preset_contract`；
-* `feature_contract_hash`；
-* `backend_contract`；
-* `code_commit`；
-* `working_tree_dirty`；
-* `production_gate=false`。
+用户不需要选择：
 
-这些信息显著提高了实验可复现性。
+* 窗口数量；
+* 光流宽度；
+* 阈值；
+* 具体劣化类型；
+* 是否运行哪一个指标；
+* 是否需要 Audit；
+* 哪些区域需要检查。
 
-## 部分完成
+系统自动完成以下过程：
 
-以下任务已有实现，但还没有完整闭环：
-
-* MetricResult 目前主要用于检查 required scalars，maps、instances、coverage 和 confidence 尚未真正参与执行。
-* Feature Registry 已建立，但单位和分辨率属性仍有启发式推断。
-* NR 区域诊断增加了光流几何和 KLT，但还不是完整的人物、细物体和武器评测。
-* FR 全片扫描已经进入采样和融合，但实现方式存在明显内存与重复解码问题。
-* NR/FR 验证 harness 已存在，但没有提交真实方向性结果。
-* CI 增加了方向性测试，但 GitHub 当前没有返回该提交的 workflow run。
+```text
+输入检查
+    ↓
+安全模式判断
+    ↓
+低成本全片扫描
+    ↓
+风险窗口选择
+    ↓
+精细指标计算
+    ↓
+高风险窗口原分辨率复核
+    ↓
+证据融合与问题分类
+    ↓
+HTML 报告、热力图和坏例视频
+```
 
 ---
 
-# 二、No-Reference 模式评估
+# 二、模式可以自动判断，但必须是“安全自动判断”
 
-## 本轮取得的实质进步
+你不希望每次手工选择模式是合理的，但项目不能无条件猜测模式。
 
-### 1. 60/120 FPS 的公共时间尺度已经修正
-
-新建的 `TemporalLagPlan` 会按 PTS 构造：
+建议新增：
 
 ```text
-native cadence
-1/60 秒
-1/30 秒
+mode = auto-safe
 ```
 
-对于 120 FPS：
+## 自动判断规则
+
+### 只有 candidate
+
+直接选择：
 
 ```text
-1/60 秒：跨 2 帧
-1/30 秒：跨 4 帧
+no-reference
 ```
 
-对于 60 FPS：
+### reference 与 candidate 的 FPS 约为 1:2
+
+例如：
 
 ```text
-1/60 秒：跨 1 帧
-1/30 秒：跨 2 帧
+reference 60 FPS
+candidate 120 FPS
 ```
 
-公共 self-reference triplet 也固定为中心前后各 1/60 秒，总跨度 1/30 秒。这解决了上一版 60 FPS 与 120 FPS 使用不同物理跨度，却共用同一个特征名的问题。
-
-### 2. Flow 推理规划得到改善
-
-`FlowPairPlan` 会收集：
-
-* native triplet；
-* common triplet；
-* native MCT；
-* 1/60 MCT；
-* 1/30 MCT；
-
-所需的全部 frame pair，再交给 `WindowFlows.precompute()` 批量计算双向 flow。这样避免了指标执行过程中反复触发零散 RAFT 调用。
-
-### 3. Self-composition 和 self-cycle 已加入遮挡处理
-
-当前会根据外侧帧双向 flow 计算：
-
-* forward/backward confidence；
-* occlusion；
-* endpoint-grid visibility weight；
-* splat 后的可见性。
-
-这比上一版只依靠 splat coverage 更合理，快速运动和显露区域不再与正常可见区域完全混在一起。
-
-### 4. 运动异常诊断明显增强
-
-新增了：
-
-* tile-wise velocity；
-* acceleration；
-* jerk；
-* local reversal；
-* flow folding；
-* Jacobian determinant；
-* divergence；
-* curl；
-* KLT camera-relative track acceleration；
-* track jerk；
-* track direction change。
-
-这些信号使 NR 不再只依赖全图清晰度和运动补偿残差，对局部运动异常的感知能力有所提高。
-
-### 5. 120 FPS 单帧复制问题已有直接测试
-
-当前测试构造：
+自动选择：
 
 ```text
-Y1 = Y0
-Y3 = Y2
+endpoint-2x
+```
+
+### reference 与 candidate FPS 相同
+
+先运行低成本的 same-rate alignment。
+
+只有满足以下条件才自动进入：
+
+```text
+full-reference
+```
+
+* FPS 比约等于 1；
+* 时长相近；
+* PTS 可以单调匹配；
+* 内容描述符误差足够低；
+* 匹配覆盖率足够高；
+* 几何策略合法。
+
+当前 FR alignment 已经使用图像误差、匹配覆盖率和局部 gap 数量进行 fail-closed，具备实现安全自动判断的基础。
+
+如果两条 60 FPS 视频不是逐帧对应的同一次录制，程序应明确返回：
+
+```text
+无法安全确定为 Full Reference。
+两条视频时间相近，但逐帧内容不对应。
+未生成误导性分数。
+```
+
+这比静默选择错误模式更重要。
+
+---
+
+# 三、不要再让用户选择 Fast、Standard、Audit
+
+当前项目存在三个 preset，但最终用户不应该理解这些内部资源策略。
+
+建议对外只保留：
+
+```text
+--speed fast
+--speed balanced
+--speed thorough
+```
+
+默认不传时使用：
+
+```text
+balanced
+```
+
+更好的方式是直接使用自动三级级联。
+
+## Tier 1：全片低成本扫描
+
+所有帧或稀疏帧计算：
+
+* 清晰度；
+* 帧差；
+* duplicate/freeze；
+* 场景切换；
+* 编码质量；
+* 简化边缘；
+* 简化参考误差；
+* 轻量内容指纹。
+
+## Tier 2：高风险和均匀窗口精评
+
+自动选择：
+
+* 一部分全片均匀窗口；
+* 一部分高风险窗口；
+* 场景切换附近窗口；
+* 运动高峰窗口；
+* UI 高密度窗口。
+
+## Tier 3：原分辨率自动复核
+
+不要求用户指定 Audit。
+
+当窗口满足以下任意条件时自动升级：
+
+* 风险分数进入全片前 5%；
+* 多个指标同时触发；
+* 指标之间发生矛盾；
+* confidence 较低；
+* 小目标或 UI 区域占比过小；
+* 低分辨率结果接近阈值。
+
+这样，正常视频的运行成本接近 Standard，而真正可疑的位置自动获得 Audit 质量。
+
+---
+
+# 四、主分数设计
+
+用户最终应该看到一个主分数，但内部必须保留子分数和置信度。
+
+报告顶部建议固定显示：
+
+```text
+Overall Quality       72.8 / 100
+Confidence            0.83
+Mode                  Full Reference
+Quality Level         Noticeable Issues
+Affected Duration     7.4%
+Worst Interval        00:12.34–00:12.62
+```
+
+## 分数必须同时包含三层信息
+
+### 第一层：Overall Score
+
+提供快速判断。
+
+```text
+90–100  很好
+80–90   基本良好
+65–80   有可见问题
+45–65   明显问题
+0–45    严重问题
+```
+
+这些只能称为工程风险等级，不能称为人类 MOS。
+
+### 第二层：Subscores
+
+例如 NR：
+
+```text
+Temporal Stability
+Motion Smoothness
+Phase Consistency
+UI / Text Stability
+Technical Quality
+Cadence Integrity
+```
+
+Endpoint：
+
+```text
+Motion Consistency
+Temporal Stability
+Structural Integrity
+Character Integrity
+Thin Object / Weapon
+UI / Text
+Transition Quality
+Technical Quality
+```
+
+FR：
+
+```text
+Spatial Fidelity
+Structural Fidelity
+Temporal Fidelity
+Motion Fidelity
+Color Fidelity
+```
+
+### 第三层：Confidence
+
+置信度不能被隐藏。
+
+以下情况必须降低 confidence：
+
+* 覆盖窗口太少；
+* 对齐接近失败阈值；
+* 大量特征为 NaN；
+* 指标之间互相矛盾；
+* 场景切换过多；
+* 全视频几乎没有运动；
+* NR 无法判断内容真实性；
+* 后端降级为 Farneback。
+
+当前报告已经记录 MetricResult 的失败、warnings、coverage 和 confidence，可以继续沿用。
+
+---
+
+# 五、No-Reference 需要增加 Cadence Integrity
+
+这是当前最需要补全的评分问题。
+
+当前公共 NR 总分只融合 1/60 和 1/30 秒共同时间尺度，native cadence 只作为诊断项。这保证了 60 FPS 和 120 FPS 的公共分数不会混用不同物理跨度。
+
+但也导致一种严重缺陷：
+
+```text
+120 FPS 视频：
+Y0 = X0
+Y1 = X0
+Y2 = X1
+Y3 = X1
 ...
 ```
 
-并要求：
+它的实际有效帧率只有 60 FPS，但共同 1/60 秒尺度可能仍然正常。
 
-* `nr_native_duplicate_fraction` 明显升高；
-* duplicated 视频的 `temporal_stability` 低于 clean。
-
-这是 NR 模式第一次拥有明确的坏例方向性测试，而不只是验证“可以运行”。
-
----
-
-## NR 仍存在的核心问题
-
-### 1. 60 与 120 FPS 仍不真正共享同一总分尺度
-
-虽然公共时间尺度已经加入，但评分 Schema 仍同时使用：
-
-* `nr_common_*`；
-* `nr_native_*`。
-
-native 特征在：
-
-| FPS     | native 时间跨度 |
-| ------- | ----------: |
-| 60 FPS  |    16.67 ms |
-| 120 FPS |     8.33 ms |
-
-因此 `nr_native_self_cycle`、`nr_mct_native_mean`、native duplicate 等特征在两种 FPS 下仍不属于同一统计分布，但目前二者使用相同的：
+因此建议增加：
 
 ```text
-nr-stability-risk-v2
+cadence_integrity
 ```
 
-这是当前最重要的 NR 分数语义问题。
-
-推荐二选一：
-
-1. **公共分数只使用 1/60 和 1/30 特征，native 特征仅作为诊断项；**
-2. 分成：
-
-   ```text
-   nr-stability-risk-v2-60
-   nr-stability-risk-v2-120
-   ```
-
-当前 NR compare 会禁止 60 和 120 混合排序，所以相对排序风险已经降低，但单份报告中的 60 分和 120 分仍不宜直接比较。
-
-### 2. “Camera-relative”目前只移除了平移
-
-KLT 跟踪当前每一帧只减去全部点的 median position，本质上只消除了全局平移。
-
-对于游戏中的：
-
-* 相机旋转；
-* 缩放；
-* 透视变化；
-* 大幅摇杆转向；
-
-正常轨迹仍会在相对坐标中产生加速度和方向变化，可能被误判为局部抖动。
-
-更合理的做法是先估计：
-
-```text
-translation → affine → homography
-```
-
-再把 track 变换到 camera-stabilized 坐标。
-
-### 3. NR UI 仍然不符合手游 UI 的主要布局
-
-当前 UI 区域只取：
-
-* 顶部 1/5；
-* 底部 1/5。
-
-但你的主要游戏场景中常见的是：
-
-* 左下移动轮盘；
-* 右下技能按钮；
-* 左右两侧 HUD；
-* 屏幕中部悬浮文字。
-
-因此现在的 NR UI/text 指标会漏掉大量关键 UI。
-
-应改为：
-
-* 四边 border band；
-* 全屏 screen-static mask；
-* persistent edges；
-* 排除大面积静态场景；
-* connected-component 级 UI 分析。
-
-### 4. NR compare 可能过度拒绝真正需要比较的候选
-
-当前 compare 会使用：
-
-* pHash；
-* 低分辨率灰度 L1；
-* FPS；
-* 时长；
-* PTS；
-* 分辨率；
-
-判断候选是否同内容。
-
-其中灰度缩略图 L1 阈值约为 12。严重模糊、亮度漂移或色彩错误的模型恰恰可能超过这个阈值，从而被认为“不是同一个内容”，无法排序。
-
-也就是说：
-
-> 候选质量越差，越可能被比较保护机制拒绝。
-
-建议内容一致性只使用对质量变化更鲁棒的证据：
-
-* histogram-normalized pHash；
-* DINO/ConvNeXt 低频语义特征；
-* camera trajectory fingerprint；
-* 用户显式提供 `comparison_group_id`。
-
-### 5. NR 仍没有真实有效性证据
-
-目前只有：
-
-* 60/120 能运行；
-* 120 FPS duplicate 方向正确；
-* 特征存在性；
-* 输入契约。
-
-尚未验证：
-
-* blur severity 单调性；
-* ghost；
-* rotation tear；
-* UI drift；
-* text instability；
-* weapon flicker；
-* camera rotation false positive；
-* 真实模型 A/B 排序。
-
-因此 NR 当前完成度应理解为：
-
-> **算法框架约 75%，指标可信度约 30%。**
-
----
-
-# 三、Endpoint-2x 模式评估
-
-Endpoint 仍然是项目最成熟的模式。
-
-## 本轮主要改进
-
-新增了 `CATEGORY_REQUIRED_STAGES`。例如：
-
-```text
-motion      依赖 composition
-temporal    依赖 cycle + temporal + parity
-structure   依赖 edges
-character   依赖 character
-ui          依赖 ui + text
-```
-
-如果某窗口的 temporal 阶段异常，该窗口的残余 temporal 特征不会再参与 temporal 类别聚合。
-
-同时报告增加了：
-
-```text
-category_valid_windows
-```
-
-便于识别每个类别到底有多少有效窗口。
-
-## 当前仍有三个主要问题
-
-### 1. Score Schema 应该升级到 V2
-
-Endpoint 的类别聚合逻辑已经发生改变：
-
-* 旧版会使用阶段失败窗口的残余特征；
-* 新版会按类别排除失败窗口。
-
-这意味着同一输入在旧版和新版可能得到不同总分。
-
-但报告仍然写：
-
-```text
-endpoint-reduced-reference-v1
-```
-
-而只把 metric contract 改成：
-
-```text
-endpoint-metrics-v2
-```
-
-为了保持严格可复现，应把 Score Schema 同步升级为：
-
-```text
-endpoint-reduced-reference-v2
-```
-
-### 2. 类别有效性只检查异常，不检查特征完整性
-
-当前逻辑主要检查：
-
-```text
-error_<stage>
-```
-
-但如果一个阶段正常返回，只是大量关键特征为 NaN，类别仍可能使用剩余少数特征。
-
-Endpoint 也应采用 MetricResult 或类别 required-feature contract，例如：
-
-```text
-motion 至少要求 comp_mean
-temporal 至少要求 mct + cycle 中各一个有效量
-structure 至少要求 edge_recall/precision
-```
-
-### 3. 误报问题没有根本变化
-
-最新提交主要是可靠性和架构改造，没有重新训练阈值或替换语义代理。
-
-当前仓库记录的严格 12 类合成定位结果仍为：
-
-* Recall：0.667；
-* Precision：0.229；
-* F1：0.340。
-
-所以 Endpoint 目前依然适合：
-
-* 同源模型探索性排序；
-* 找可疑片段；
-* 辅助人工分析。
-
-还不适合把具体标签直接当成确定语义结论。
-
----
-
-# 四、Full-Reference 模式评估
-
-FR 是本轮提升最明显的模式。
-
-## 已完成的重要改进
-
-### 1. 加入全时间线 Reference Scan
-
-当前会在低分辨率全片计算：
-
-* Y L1；
-* chroma L1；
-* gradient/Laplacian 差异；
-* edge mismatch；
-* SSIM proxy；
-* frame-difference mismatch。
-
-该风险会参与：
-
-* 风险窗口选择；
-* 全局融合。
-
-这解决了之前只根据 candidate 自身风险抽样、可能漏掉“稳定但始终错误”问题的缺陷。
-
-### 2. 空间指标更符合 Full-Reference 定义
-
-新增或修正了：
-
-* Y L1；
-* RGB L1；
-* RGB Charbonnier；
-* PSNR；
-* 11×11 Gaussian local SSIM；
-* edge recall；
-* edge precision；
-* edge F1；
-* edge Chamfer；
-* multiscale luma + gradient L1。
-
-原来的 `fr_multiscale_perceptual` 已移除，不再把普通多尺度 L1 描述成感知指标。
-
-### 3. 新增局部 ROI 参考误差
-
-现在会构造：
-
-* UI proxy ROI；
-* text proxy ROI；
-* salient structure ROI；
-* center motion ROI。
-
-并计算对应局部误差。尽管它们仍是 proxy，但比全图平均更不容易淹没小目标问题。
-
-### 4. Geometry policy 已显式化
-
-当前支持：
-
-```text
-strict
-resize-candidate
-common-resolution
-```
-
-不同策略会使用不同 score schema 后缀，并保存 resize transform。这个设计是正确的。
-
----
-
-## FR 当前仍存在的关键问题
-
-### 1. 全片扫描存在明显内存问题
-
-`scan_full_reference()` 当前直接执行：
-
-```python
-reference.decode_all(width=width)
-candidate.decode_all(width=width)
-```
-
-也就是把两条完整视频全部堆叠在内存中。
-
-即使缩放至 320 宽，60 秒、60 FPS 的两条视频也可能消耗超过 1 GB 内存；长视频会线性增长。
-
-而且 FR 目前会进行多次完整解码：
-
-1. candidate cheap scan；
-2. reference alignment descriptor；
-3. candidate alignment descriptor；
-4. reference full scan；
-5. candidate full scan；
-6. 后续窗口随机读取。
-
-这会成为 FR 的主要性能瓶颈。
-
-必须改为：
-
-> 单次流式顺序解码，同时生成 descriptor、cheap feature 和 FR scan。
-
-### 2. `common-resolution` 仍有尺寸不一致风险
-
-该策略目前只选择共同宽度，然后分别让 VideoReader 按原始宽高比缩放。
-
-如果两条视频的宽高比在允许误差内但并非完全相同，例如：
-
-```text
-1920×1080
-1280×718
-```
-
-二者缩放到相同宽度后高度可能不同，最终仍会在 `compute_window()` 中触发 shape mismatch。
-
-应显式计算共同目标：
-
-```text
-target_width
-target_height
-```
-
-然后两路都强制 resize 到完全相同的网格。
-
-### 3. `fr_scan_gradient_l1` 名称与实现不一致
-
-全片扫描里实际计算的是：
-
-```python
-cv2.Laplacian(...)
-```
-
-而特征名和文档使用 `gradient_l1`。
-
-应二选一：
-
-* 改为 Sobel gradient magnitude；
-* 或更名为 `fr_scan_laplacian_l1`。
-
-这关系到 Feature Contract 的准确性。
-
-### 4. FR 参考侧没有跨候选缓存
-
-当比较多个 candidate 时，每个候选都会重新计算：
-
-* reference descriptor；
-* reference full scan；
-* reference window flow；
-* reference ROI。
-
-尚未实现计划中的：
+## Cadence Integrity 的证据
+
+* native duplicate fraction；
+* native freeze fraction；
+* native MCT residual；
+* native flow magnitude distribution；
+* 相邻帧运动增量是否交替为零；
+* native sharpness alternation；
+* PTS cadence irregularity；
+* 周期性重复模式。
+
+## 主分数融合方式
+
+推荐使用保守的乘法惩罚：
 
 [
-T_\text{reference}+N\cdot T_\text{candidate}
+S_{\text{overall}}
+==================
+
+S_{\text{common}}
+\cdot
+\exp(-\lambda R_{\text{cadence}})
 ]
 
-FR 多模型比较的效率仍有较大优化空间。
+而不是把 native 特征和 common 特征简单平均。
 
-### 5. Motion fidelity 仍以全图 median flow 为主
+这意味着：
 
-`fr_trajectory_deviation` 仍主要累积全图 median flow，容易被 camera motion 主导。
+* 正常 cadence 不影响分数；
+* duplicate cadence 会明显降低总分；
+* common-time 质量仍可单独显示；
+* 60/120 公共尺度仍然保留。
 
-更合理的是：
+报告可以同时输出：
 
-* 4×4/8×8 tile flow；
-* camera residual flow；
-* foreground/salient ROI flow；
-* track trajectory；
-* P50/P90/P99 局部误差。
+```text
+Common-time Quality   92.4
+Cadence Integrity     38.7
+Overall Quality       61.3
+```
+
+这样既满足直接得到一个总分，也不会掩盖 120 FPS 复制帧。
 
 ---
 
-# 五、公共工程质量评估
+# 六、自动参数适应应该如何实现
 
-## Feature Registry
+你不希望针对不同视频调参数，核心不是删除参数，而是把参数变成自动归一化。
 
-这是正确的长期方向，目前已经记录：
+## 1. 时间尺度按 PTS 归一化
 
-* name；
-* mode；
-* category；
-* units；
-* direction；
-* resolution invariant；
-* required；
-* scale；
-* version。
+项目目前已经基本完成：
 
-并可生成 feature contract hash。
+* native；
+* 1/60 秒；
+* 1/30 秒；
+* 固定物理时间窗口。
 
-不过当前单位是根据名字推断的。例如 `fr_l1_rgb` 可能被推断成 luma 单位。长期应改为每个特征显式注册，而不是字符串猜测。
+这部分方向正确。
 
-## MetricResult
+## 2. 空间尺度按图像尺寸归一化
 
-目前已经有统一结构：
+以下特征不能直接使用像素：
+
+* Chamfer 距离；
+* 轨迹误差；
+* 边缘偏移；
+* UI 漂移；
+  -物体长度；
+  -局部位移。
+
+应统一转为：
+
+[
+d_{\text{normalized}}
+=====================
+
+\frac{d_{\text{pixels}}}
+{\sqrt{H^2+W^2}}
+]
+
+或者除以工作分辨率宽度。
+
+否则 480p、1080p 和 4K 会使用不同量纲。
+
+## 3. 运动误差按真实运动强度归一化
+
+例如：
+
+[
+E_{\text{flow}}
+===============
+
+\frac{\lVert F_{\text{candidate}}-F_{\text{reference}}\rVert}
+{\lVert F_{\text{reference}}\rVert+\epsilon}
+]
+
+当前 FR 已经在 flow error 中使用了类似归一化。
+
+## 4. 同时使用绝对阈值和视频内自适应阈值
+
+只使用视频内 percentile 会漏掉“全片一直很差”的情况。
+
+只使用绝对阈值又会对不同游戏和画面风格过敏。
+
+建议风险值取两者最大值：
+
+[
+R(x)
+====
+
+\max
+\left(
+R_{\text{absolute}}(x),
+R_{\text{relative}}(x)
+\right)
+]
+
+其中相对风险使用 robust statistics：
+
+[
+z =
+\frac{x-\operatorname{median}(x)}
+{1.4826\cdot\operatorname{MAD}(x)+\epsilon}
+]
+
+这样既可以发现：
+
+* 全片稳定模糊；
+* 局部突然变坏；
+* 某几个窗口的异常；
+* 不同游戏整体纹理差异。
+
+---
+
+# 七、项目下一步最大的产品功能：诊断证据引擎
+
+用户真正需要的不是只看到：
+
+```text
+overall = 63.4
+```
+
+而是看到：
+
+```text
+00:12.34–00:12.62
+严重程度：高
+可能问题：生成帧复制前一帧
+证据：
+- 相邻帧差接近 0
+- native flow 接近 0
+- 1/60 秒运动仍然存在
+- 奇偶帧运动增量明显不对称
+```
+
+建议新增统一诊断结构：
 
 ```python
-MetricResult(
-    scalars,
-    maps,
-    instances,
-    coverage,
-    confidence,
-    warnings,
-    status,
-)
+@dataclass
+class DiagnosticIssue:
+    issue_type: str
+    title: str
+    severity: float
+    confidence: float
+    start_time: float
+    end_time: float
+    evidence: list[Evidence]
+    probable_causes: list[str]
+    maps: list[str]
+    clips: list[str]
 ```
 
-但当前实际只使用：
+## 诊断必须基于多个证据组合
 
-* scalars；
-* warnings；
-* status。
+不要根据单个特征直接下结论。
 
-以下字段尚未形成真实闭环：
+### Duplicate / Freeze
 
-* maps；
-* instances；
-* metric coverage；
-* metric confidence。
+组合证据：
 
-而且 metric warnings 只存放在窗口 labels 中，没有汇总到最终报告，发生 required feature 缺失时使用者不容易看到具体原因。
+* native frame L1 极低；
+* native flow 极低；
+* 前后较长时间尺度有运动；
+* 重复模式持续；
+* 非静态场景。
 
-## Provenance
+可能原因：
 
-当前记录已经明显改善，但仍有两个问题：
+* 模型复制端点；
+* 视频编码或导出丢帧；
+* 推理循环重复写帧；
+  -时间戳错误。
 
-1. 从 wheel 或非 Git checkout 部署时，运行目录可能没有 `.git`，此时 `code_commit` 会变成 `unknown`。
-2. Endpoint 外部 LightGBM 校准器只记录 `lightgbm-external`，没有记录文件 SHA256。
+### Generated-frame Blur
 
-建议在构建包时嵌入 commit，并记录：
+组合证据：
+
+* 奇偶清晰度差；
+* 奇偶边缘密度差；
+* common MCT 升高；
+* Endpoint/FR 中生成帧空间误差升高。
+
+可能原因：
+
+* 插帧结果过度平滑；
+* blend mask 过软；
+* motion compensation 不准确；
+  -编码质量不足。
+
+### Ghosting / Double Exposure
+
+组合证据：
+
+* edge precision 下降；
+  -额外双边缘；
+* composition error；
+* cycle residual；
+* MCR residual；
+  -局部高频能量增加。
+
+可能原因：
+
+* 双向 warp 错位；
+* blend mask 错误；
+  -遮挡处理失败；
+  -前后运动层混合。
+
+### Tearing / Flow Folding
+
+组合证据：
+
+* Jacobian determinant 过低；
+* folding ratio；
+* divergence/curl 异常；
+  -局部 edge discontinuity；
+* composition error 集中。
+
+可能原因：
+
+-光流局部错误；
+-运动边界归属错误；
+-形变过强；
+-遮挡区域错误传播。
+
+### UI / Text Instability
+
+组合证据：
+
+* screen-static ROI；
+* edge XOR；
+  -组件数量交替；
+  -笔画断裂；
+  -位置来回漂移；
+  -背景区域相对稳定。
+
+可能原因：
+
+* UI 被当成场景运动；
+* UI 未单独处理；
+  -文字区域融合或缩放错误；
+  -奇偶帧处理不一致。
+
+### FR Color Pipeline Mismatch
+
+组合证据：
+
+* chroma L1 高；
+* Y L1 较低；
+  -结构和 flow 基本正常。
+
+可能原因：
+
+-色彩空间转换；
+-RGB/BGR 错误；
+-limited/full range；
+-编码器色彩矩阵；
+-gamma 差异。
+
+“可能原因”必须明确标记为推断，不应声称知道模型内部真实根因。
+
+---
+
+# 八、把 MetricResult 的 maps 和 instances 真正使用起来
+
+当前 `MetricResult` 已经定义：
+
+* `scalars`；
+* `maps`；
+* `instances`；
+* `coverage`；
+* `confidence`；
+* `warnings`。
+
+但执行器目前主要使用 scalars。
+
+下一步所有核心指标都应该返回 error map。
+
+## NR 应输出的图
+
+* `mct_residual_map`；
+* `composition_error_map`；
+* `self_cycle_residual_map`；
+* `flow_fold_map`；
+* `jacobian_determinant_map`；
+* `phase_sharpness_map`；
+* `ui_edge_instability_map`；
+* `track_trajectory_overlay`；
+* `duplicate_frame_indicator`。
+
+## Endpoint 应输出的图
+
+* `endpoint_composition_map`；
+* `reverse_cycle_map`；
+* `edge_support_loss_map`；
+* `ghost_edge_map`；
+* `anchor_integrity_map`；
+* `character_proxy_map`；
+* `thin_object_map`；
+* `ui_static_mask`；
+* `text_stroke_map`。
+
+## FR 应输出的图
+
+* `absolute_rgb_error_map`；
+* `luma_error_map`；
+* `ssim_error_map`；
+* `gradient_error_map`；
+* `edge_false_negative_map`；
+* `edge_false_positive_map`；
+* `flow_difference_map`；
+* `camera_residual_flow_map`；
+* `temporal_difference_map`；
+* `flicker_map`。
+
+这些 map 不应该全部保存整片，只保存：
+
+* top risk 窗口；
+  -每种 issue 最严重的若干窗口；
+  -用户指定时间段。
+
+---
+
+# 九、可视化输出应该升级为 HTML 诊断报告
+
+当前输出主要是：
+
+* `report.json`；
+* `timeline.md`；
+* `timeline.png`；
+* `badcases/*.mp4`。
+
+这对开发者有用，但不够直观。
+
+建议新增：
 
 ```text
-calibrator_path
-calibrator_sha256
-calibrator_feature_contract_hash
-training_manifest_hash
+report.html
 ```
 
----
-
-# 六、测试与验证评估
-
-## 已有进步
-
-CI 现在额外强调三模式方向性：
-
-* Endpoint bad < good；
-* NR duplicate < clean；
-* FR bad < good。
-
-测试还覆盖：
-
-* TemporalLagPlan 物理时间；
-* FlowPairPlan；
-* unique coverage；
-* Endpoint 类别失败窗口过滤；
-* local SSIM identity；
-* NR compare 拒绝不同内容；
-* FR 三种 geometry policy；
-* Feature Contract；
-* MetricResult required fields。
-
-## 尚不充分
-
-当前 mode validation harness 只计算：
+## HTML 顶部
 
 ```text
-better_score > worse_score
+总分
+置信度
+模式
+视频信息
+主要问题数量
+受影响时间比例
+最严重问题
 ```
 
-它没有检查：
+## 时间线
 
-* confidence；
-* `meta.status`；
-* 最差窗口位置；
-* 缺陷标签；
-* 分数差距；
-* 统计显著性；
-* 每特征方向性；
-* 跨游戏泛化。
-
-同时，目前没有提交实际 NR/FR manifest 运行结果。新增的 `tests/test_mode_validation.py` 使用的是 mock report，只证明 harness 代码能够工作，不证明指标能够工作。
-
-此外，本次我尝试在隔离环境执行全新 clone，但环境无法解析 `github.com`，因此无法独立运行 pytest。GitHub 也没有返回最新提交的 workflow run。测试结论目前来自代码定义，而不是本次独立复现。
-
----
-
-# 七、性能评估
-
-目前已有性能数据仍主要是旧的 Endpoint Fast/RAFT：
-
-* 60 秒 1080p；
-* 约 65 秒；
-* 峰值显存约 907 MB。
-
-新版本新增的 NR/FR 路径尚无实测。
-
-预计主要风险：
-
-| 模式         | 主要开销                             |
-| ---------- | -------------------------------- |
-| NR-120     | 每窗口约 40 个有向 flow、KLT、geometry    |
-| FR         | 多次全片解码、双路 flow、全片内存堆叠            |
-| FR compare | reference 侧重复计算                  |
-| Audit      | native-resolution RAFT 与 tracker |
-
-因此目前不能认为 Standard/Audit、NR-120 或 FR 已满足长视频生产效率要求。
-
----
-
-# 八、当前最终验收矩阵
-
-| 目标               | 当前判断          |
-| ---------------- | ------------- |
-| 三种模式显式分离         | **完成**        |
-| NR 60/120 固定时间尺度 | **基本完成**      |
-| NR 120 单帧复制检测    | **完成基础能力**    |
-| NR 遮挡感知          | **完成**        |
-| NR 局部运动几何        | **完成基础能力**    |
-| NR 游戏人物/武器/侧边 UI | **未充分完成**     |
-| NR 真实模型排序        | **未验证**       |
-| Endpoint 工程可靠性   | **基本完成**      |
-| Endpoint 类别级失败隔离 | **完成基础能力**    |
-| Endpoint 语义标签精度  | **仍不足**       |
-| FR 全片参考风险扫描      | **完成，但实现需优化** |
-| FR 标准空间指标        | **基本完成**      |
-| FR 局部 ROI 评测     | **完成代理版本**    |
-| FR 多候选高效共享       | **未完成**       |
-| 三模式可复现契约         | **基本完成**      |
-| 三模式真实校准          | **未完成**       |
-| 自动生产上线门禁         | **不满足**       |
-
----
-
-# 九、下一步优先级
-
-下一版本应停止继续大规模新增指标，优先解决以下事项。
-
-## P0：必须先修
-
-1. NR 公共总分排除 native 特征，或者拆分 60/120 Schema。
-2. Endpoint Score Schema 升级到 V2。
-3. 修复 FR `common-resolution` 的显式目标宽高。
-4. 将 FR full scan 改成流式处理，禁止 `decode_all()` 堆叠全视频。
-5. 将 `fr_scan_gradient_l1` 实现或名称修正一致。
-6. 汇总 MetricResult 失败原因到报告。
-7. 给校准器和构建版本增加 SHA256。
-
-## P1：决定指标有效性
-
-1. 建立 NR blur/freeze/ghost/tear/UI/weapon 方向性数据。
-2. 建立 FR blur/color/shift/delete/freeze/codec 方向性数据。
-3. 测试正常 camera rotation 对 NR 的误报。
-4. 将 NR UI mask 扩展到左右两侧和全屏静态组件。
-5. 改善 NR compare 的内容指纹，避免拒绝严重坏模型。
-6. 建立 FR reference cache。
-
-## P2：真实验收
-
-分别提交：
+一条可交互时间线：
 
 ```text
-validation/nr_real.json
-validation/endpoint_real.json
-validation/fr_real.json
+红色：严重
+橙色：中等
+黄色：轻微
+灰色：场景切换或不确定区域
 ```
 
-至少报告：
+不同 issue 使用不同轨道：
 
-* SRCC；
-* PLCC；
-* pairwise accuracy；
-* per-defect precision/recall/F1；
-* worst-10% recall；
-* 60/120 分布；
-* runtime；
-* peak VRAM；
-* peak RAM。
+```text
+Temporal
+Motion
+Structure
+UI/Text
+Technical
+Cadence
+```
+
+点击时间线直接跳转坏例视频。
+
+## 问题卡片
+
+每个问题包含：
+
+```text
+问题名称
+时间段
+严重程度
+置信度
+证据
+可能原因
+原始视频
+热力图叠加视频
+关键帧
+```
+
+## Reference 模式展示
+
+Endpoint：
+
+```text
+Previous endpoint | Candidate middle | Next endpoint
+```
+
+FR：
+
+```text
+Reference | Candidate | Error map | Overlay
+```
+
+NR：
+
+```text
+Candidate | Motion-compensated prediction | Residual | Flow/track overlay
+```
+
+## 报告目录
+
+建议最终输出：
+
+```text
+result/
+├── report.html
+├── report.json
+├── summary.json
+├── timeline.csv
+├── timeline.png
+├── badcases/
+│   ├── issue_001_original.mp4
+│   ├── issue_001_overlay.mp4
+│   └── issue_001_compare.mp4
+├── heatmaps/
+│   ├── issue_001_mct.png
+│   ├── issue_001_flow.png
+│   └── issue_001_edge.png
+├── thumbnails/
+└── debug/
+```
 
 ---
 
-# 最终判断
+# 十、坏例视频应该如何生成
 
-**这一版本已经实质性完成了上一轮提出的可靠性路线，项目无需再次推翻架构。**
+坏例视频不能只是截取原视频。
 
-当前最准确的阶段定位是：
+每个坏例建议生成三类文件。
 
-> **多模式算法开发基本完成，正式进入“证明这些指标是否有效”的阶段。**
+## 1. Original Clip
 
-从代码成熟度看，项目已经可以开始接入真实游戏数据进行系统实验；但在以下三件事完成前，仍不能启用生产门禁：
+仅截取问题时间段，前后增加约 0.5 秒上下文。
 
-1. NR 60/120 分数尺度问题得到解决；
-2. NR/FR 真实模型方向性结果达到稳定门槛；
-3. FR 流式性能和 Endpoint 误报率得到明显改善。
+## 2. Overlay Clip
+
+在原视频上叠加：
+
+* 热力图；
+  -轨迹；
+  -异常区域框；
+  -问题名称；
+  -分数；
+  -时间戳。
+
+## 3. Diagnostic Compare Clip
+
+根据模式不同生成。
+
+### NR
+
+```text
+原视频 | 运动补偿预测 | 残差热力图
+```
+
+### Endpoint
+
+```text
+前端点 | 中间候选 | 后端点 | composition/cycle map
+```
+
+### FR
+
+```text
+Reference | Candidate | Error heatmap
+```
+
+这比只输出静态 PNG 更容易判断问题是否真实可见。
+
+---
+
+# 十一、需要一个批量评测入口
+
+你描述的真实工作流不是只评测一个视频，而是“来了一些视频”。
+
+建议新增：
+
+```bash
+rr-vfiqa inspect-batch \
+  --manifest jobs.json \
+  --out runs/2026-07-30
+```
+
+Manifest 只保存输入关系：
+
+```json
+{
+  "items": [
+    {
+      "id": "model_a_case_001",
+      "candidate": "a.mp4",
+      "reference": "ref.mp4"
+    },
+    {
+      "id": "single_video_002",
+      "candidate": "b.mp4"
+    }
+  ]
+}
+```
+
+模式由 auto-safe 判断。
+
+输出一个批量首页：
+
+```text
+ID
+Mode
+Overall
+Confidence
+Worst issue
+Affected duration
+Open report
+```
+
+多个模型只有在满足：
+
+* 相同模式；
+  -相同 reference；
+  -相同 FPS；
+  -同源内容；
+
+时才自动排名。
+
+---
+
+# 十二、不做人为评分时，如何验证项目不是“自己骗自己”
+
+你不希望做人工打分和训练，这是可以接受的，但仍然需要验证指标的基本正确性。
+
+最适合你的方法不是人工 MOS，而是：
+
+> **Metamorphic Testing，变形测试。**
+
+利用你已有的真实视频，程序自动注入已知劣化。
+
+## 自动注入类型
+
+* 某个时间段 freeze；
+* 单帧 duplicate；
+* 交替帧 blur；
+  -局部高斯模糊；
+* ghost 双重曝光；
+  -局部 spatial shift；
+* tearing；
+* UI 区域抖动；
+  -文字断裂；
+  -色彩偏移；
+  -噪声；
+  -块效应；
+  -帧率或 PTS 异常。
+
+然后自动检查：
+
+1. 劣化后总分是否下降；
+2. 对应子分是否下降；
+3. 最差窗口是否覆盖注入时间段；
+4. error map 是否覆盖注入区域；
+5. 问题类型是否合理；
+6. 劣化越强，分数是否单调下降。
+
+这不需要人工打标签，也不需要训练模型。
+
+真实视频只作为干净基底，缺陷位置和类型由程序自动知道。
+
+这是后续最重要的测试体系。
+
+---
+
+# 十三、剩余路线重新排序
+
+## P0：完成开箱即用体验
+
+### 目标
+
+一个命令输入视频，直接得到完整报告。
+
+### 实现内容
+
+1. `auto-safe` 模式路由；
+2. 自动 Tier 1/2/3 预算；
+3. `cadence_integrity`；
+   4.统一问题对象 `DiagnosticIssue`；
+4. HTML 报告；
+   6.坏例原视频、Overlay 和 Compare Clip；
+   7.批量评测入口；
+   8.所有异常 fail-closed，并输出易懂原因。
+
+这是下一阶段的最高优先级。
+
+---
+
+## P1：完成 error map 与诊断规则
+
+### 实现内容
+
+1. 让 NR/Endpoint/FR metric 返回 `MetricResult.maps`；
+2. 建立统一 map normalization；
+   3.建立问题证据规则；
+   4.生成区域 box、track 和 mask；
+   5.把证据与可能原因写入报告；
+   6.建立 issue-level confidence；
+   7.同一时间段多证据合并。
+
+完成后，项目才真正从“打分器”变成“诊断器”。
+
+---
+
+## P2：修正剩余算法问题
+
+1. NR cadence failure 进入最终判定；
+2. NR flow geometry 使用 affine/homography camera residual；
+   3.动态 UI 单调变化不直接扣分；
+3. FR gap 处重置 temporal previous；
+4. FR UI ROI 扩展到四边和中心；
+5. Endpoint semantic category 增加 feature、instance 和 coverage gate；
+   7.所有空间距离统一归一化。
+
+---
+
+## P3：性能和缓存
+
+1. FR reference descriptor cache；
+2. FR reference flow cache；
+3. FR reference ROI cache；
+4. NR 跨窗口 flow pair cache；
+   5.顺序解码复用；
+   6.批量 RAFT；
+   7.分阶段时间和 RAM/VRAM 报告；
+   8.长视频断点续跑；
+   9.失败窗口可重试；
+   10.结果缓存按视频 hash 和算法 contract 隔离。
+
+---
+
+## P4：无需人工打分的真实视频回归体系
+
+建立：
+
+```text
+tests/real_corpus/
+```
+
+不需要人工评分，只需要保存：
+
+-真实视频路径或 manifest；
+-自动注入缺陷配置；
+-预期时间段；
+-预期区域；
+-预期子分方向；
+-最低分数下降幅度。
+
+每次提交自动跑：
+
+```text
+clean > degraded
+轻度 > 中度 > 重度
+定位窗口覆盖注入区域
+热力图覆盖注入区域
+```
+
+---
+
+# 十四、不建议继续投入的方向
+
+## 1. 暂时不要训练总分模型
+
+既然你的目标是不维护训练数据，那么现在继续开发 LightGBM 或新的评分网络不是主路径。
+
+Endpoint 的校准器可以保留为可选功能，但默认仍使用确定性公式。
+
+## 2. 不要接入大量通用 NR-VQA
+
+FAST-VQA、DOVER、NIQE 等可以作为弱先验，但不能成为游戏插帧诊断的核心。
+
+原因是它们往往更关注：
+
+-自然视频观感；
+-编码；
+-构图；
+-整体质量；
+
+而不一定准确识别：
+
+-奇偶帧模糊；
+
+* UI 抖动；
+  -剑尖闪烁；
+  -运动层错误；
+  -生成帧复制。
+
+当前默认关闭 VQA 后端是正确的。
+
+## 3. 不要继续无限增加标量特征
+
+新增一个特征只有在满足以下至少一项时才有价值：
+
+-可以定位新的问题类型；
+-可以生成有意义的 error map；
+-可以显著降低误报；
+-可以改善某种已知缺陷方向性；
+-可以提高置信度判断。
+
+否则只会让总分更难解释。
+
+---
+
+# 十五、建议的最终模块结构
+
+```text
+rr_vfiqa/
+├── inspect.py
+├── mode_router.py
+├── execution/
+│   ├── auto_budget.py
+│   ├── cascade.py
+│   └── batch_runner.py
+├── diagnosis/
+│   ├── schema.py
+│   ├── evidence.py
+│   ├── rules.py
+│   ├── issue_merger.py
+│   └── cause_inference.py
+├── visualization/
+│   ├── heatmaps.py
+│   ├── flow_overlay.py
+│   ├── track_overlay.py
+│   ├── compare_video.py
+│   └── contact_sheet.py
+├── report/
+│   ├── html_report.py
+│   ├── assets/
+│   └── summary.py
+├── cache/
+│   ├── source_cache.py
+│   ├── reference_cache.py
+│   └── flow_pair_cache.py
+└── validation/
+    ├── metamorphic.py
+    └── defect_injection.py
+```
+
+---
+
+# 最终路线判断
+
+按照你的真实目标，剩余工作不应该再围绕“是否要训练一个更准的总分模型”展开。
+
+接下来最合理的主线是：
+
+```text
+自动模式与自动预算
+    ↓
+Cadence Integrity
+    ↓
+统一诊断证据
+    ↓
+Error Map 与 Overlay 视频
+    ↓
+HTML 可交互报告
+    ↓
+批量评测
+    ↓
+真实视频自动缺陷注入回归
+    ↓
+性能与缓存
+```
+
+完成这条路线后，项目将从当前的：
+
+> **多模式研究型评测框架**
+
+变成你真正需要的：
+
+> **开箱即用、无需训练、无需为每条视频调参、能够直接给出分数并展示具体坏例的视频插帧质量诊断工具。**

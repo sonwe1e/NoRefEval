@@ -269,6 +269,40 @@ NR/FR 报告还会在 `meta.metric_diagnostics` 汇总 MetricResult 的失败窗
 
 ---
 
+## 开箱即用诊断（`inspect` / `inspect-batch`）
+
+按 USERPLAN，项目现在提供“一条命令完成评测 + 诊断 + 可视化”的产品入口，用户无需选模式、选 preset、调阈值：
+
+```bash
+# 单视频：自动判定模式 → 打分 → 诊断 → 写 HTML 报告与坏例
+rr-vfiqa inspect --candidate output.mp4 --out result
+rr-vfiqa inspect --candidate output.mp4 --reference ref.mp4 --out result
+
+# 批量：manifest 列出多个作业，模式逐个 auto-safe 判定，输出可跳转首页
+rr-vfiqa inspect-batch --manifest jobs.json --out runs/2026-07-30
+```
+
+```json
+{ "items": [
+  { "id": "model_a_001", "candidate": "a.mp4", "reference": "ref.mp4" },
+  { "id": "single_002",  "candidate": "b.mp4" }
+] }
+```
+
+实现要点：
+
+- **auto-safe 路由**（`rr_vfiqa/mode_router.py`）：仅候选→`no-reference`；参考/候选 FPS≈2 且端点对齐可靠→`endpoint-2x`；FPS 相同且逐帧对齐通过全部 fail-closed 校验→`full-reference`；否则**拒绝打分**并给出可读原因（`status=failed`，overall=null），绝不静默选错模式。
+- **自动三级预算**：对外只暴露 `--speed fast|balanced|thorough`（默认 `balanced`）。`balanced` 自动启用 tier-3：高风险窗口在原分辨率复核，无需用户手动选 audit。显式 `evaluate --preset standard` 行为不变。
+- **Cadence Integrity**（NR，USERPLAN §5）：native 复制/冻结 cadence 以保守乘法惩罚 `S_common·exp(-λR_cad)` 进入总分；报告同时给出 `common_time_quality` 与 `cadence_integrity`，120 FPS 复制帧不再被共同时间尺度掩盖。
+- **统一诊断证据引擎**（`rr_vfiqa/diagnosis/`）：把每窗口标量按“多证据组合”规则（freeze / blur / ghost / tear / UI / FR 色彩 / FR 空间 / FR 时序）转成 `DiagnosticIssue`，含严重度、置信度、时间段、证据强度与**推断**的可能原因；写入 `meta.diagnostics`。
+- **HTML 诊断报告** `report.html`：自包含（无外链/外脚本），顶部 KPI（总分/置信度/质量等级/问题数/受影响时长/最严重问题）+ cadence 条 + 子分数 + 多轨道可点击时间线 + 问题卡片。
+- **坏例视频**：`badcases/` 内除原始截取外，另生成 `issue_NNN_overlay.mp4`（严重度色条 + 标题 + 时间码 + 运动代理/误差热力叠加）。
+- 批量首页 `index.html` **只列示与跳转，不跨模型排名**（不同模式/参考/内容的分数不可比）。
+
+分数始终标注为**确定性工程风险等级**，不声称等价于人类 MOS；所有“可能原因”均标记为推断。
+
+---
+
 ## Preset
 
 | Preset | 扫描宽度 | 窗口数量 | 光流宽度 | Endpoint 区域分支 | Endpoint Audit |
@@ -352,9 +386,12 @@ rr_vfiqa/
 ├── motion/                      RAFT/Farneback、warp、遮挡、camera
 ├── regions/                     Endpoint UI/文字/人物/细物体代理
 ├── models/                      flow/tracker/depth/VQA 后端
-├── report/                      JSON、timeline、badcase
+├── report/                      JSON、timeline、badcase、HTML、overlay
+├── diagnosis/                   统一诊断证据引擎 + cadence integrity
+├── execution/                   inspect-batch 批量入口与首页
+├── mode_router.py               auto-safe 模式路由（fail-closed）
 ├── testing/                     合成场景与缺陷语料
 └── calibration/                 各模式独立验证与 Endpoint 标定工具
 ```
 
-最重要的使用原则只有一个：先确认手中的 reference 到底是“端点参考”还是“逐帧 Ground Truth”，再选择模式；不要让程序自动猜测 60+60 两条视频的语义。
+最重要的使用原则只有一个：先确认手中的 reference 到底是“端点参考”还是“逐帧 Ground Truth”，再选择模式。`inspect` 的 auto-safe 路由会在证据不足时**拒绝猜测并拒绝打分**，因此可以放心地让程序自动判定；只有显式 `evaluate --mode` 才绕过路由。
