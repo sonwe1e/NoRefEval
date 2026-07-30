@@ -119,7 +119,7 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
 
     if static:
         # §8.4 E_UI-static: M_i should equal the (identical) endpoint content.
-        out["ui_static_l1"] = float(np.abs(xm - xi)[m].mean()) / norm
+        out["ui_static_l1"] = float(np.abs(xm - xi)[m].mean())
         gm = cv2.Sobel(luma(xm.astype(np.uint8)), cv2.CV_32F, 1, 0)
         gi = cv2.Sobel(luma(xi.astype(np.uint8)), cv2.CV_32F, 1, 0)
         out["ui_static_grad"] = float(np.abs(gm - gi)[m].mean())
@@ -131,7 +131,7 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
         # level, not whole-HUD average).
         n_lab, labels, stats_cc, _ = cv2.connectedComponentsWithStats(
             mask.astype(np.uint8), 8)
-        drifts = [float(np.abs(xm - xi)[labels == lab].mean()) / norm
+        drifts = [float(np.abs(xm - xi)[labels == lab].mean())
                   for lab in range(1, n_lab)
                   if stats_cc[lab, cv2.CC_STAT_AREA] >= 40]
         if drifts:
@@ -139,7 +139,7 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
         # Cross-generated drift: M_{i-1} vs M_i inside UI (persistent drift).
         if bundle.rgb.shape[0] >= 5:
             out["ui_gen_drift"] = float(
-                np.abs(bundle.rgb[0].astype(np.float32) - xm)[m].mean()) / norm
+                np.abs(bundle.rgb[0].astype(np.float32) - xm)[m].mean())
     else:
         # §8.4 dynamic UI / §8.6 discrete events: only penalize mixing defects.
         # NOTE: all quantities here are in RGB intensity units (0-255), NOT

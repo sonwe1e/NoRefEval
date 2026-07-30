@@ -75,11 +75,11 @@ FEATURE_SCALES: dict[str, tuple] = {
     "weapon_dev_p90": (0.60, False),
     "weapon_dir_change_p90": (1.0, False),
     # UI / text
-    "ui_static_l1": (6.0 / REFERENCE_DIAGONAL, False),   # normalized
+    "ui_static_l1": (6.0, False),    # RGB intensity units (0-255)
     "ui_static_grad": (20.0, False),
     "ui_static_edge_f": (0.85, 0.35, True),
-    "ui_comp_drift_p90": (8.0 / REFERENCE_DIAGONAL, False),  # normalized
-    "ui_gen_drift": (6.0 / REFERENCE_DIAGONAL, False),   # normalized
+    "ui_comp_drift_p90": (8.0, False),  # RGB intensity units (0-255)
+    "ui_gen_drift": (6.0, False),    # RGB intensity units (0-255)
     "ui_dyn_blend_frac": (0.15, False),
     "ui_dyn_out_of_range_frac": (0.15, False),
     "ui_dyn_regression": (0.20, False),

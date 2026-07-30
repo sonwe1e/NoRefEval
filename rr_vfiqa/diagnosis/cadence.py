@@ -113,7 +113,8 @@ def _window_cadence_risk(
                    "value": round(common_time_motion, 4)})
         if common_time_motion < 2.0 and not has_alternation:
             # No longer-scale motion and no alternation: treat as legit static.
-            risk = float(np.clip(risk * 0.10, 0.0, 1.0))
+            # USERPLAN P0-R2: static scenes get zero cadence risk, not 0.1 * risk.
+            risk = 0.0
             ev.append({"signal": "motion_gate", "value": "static_scene_suppress"})
 
     return float(np.clip(risk, 0.0, 1.0)), ev
@@ -129,10 +130,11 @@ def cadence_integrity(
 ) -> CadenceReport:
     """Aggregate native-cadence risk across windows and penalise the total.
 
-    ``common_time_motion_per_window`` is the shared-scale (1/60 s) motion per
-    window; near-zero values with no odd/even alternation mark a genuinely
-    static scene, whose native duplicate/freeze signals are suppressed by the
-    motion gate (USERPLAN P0-R1).
+    ``common_time_motion_per_window`` is the shared-scale (1/60 s) raw frame
+    diff per window (``nr_raw_diff_1_60``, NOT motion-compensated); near-zero
+    values with no odd/even alternation mark a genuinely static scene, whose
+    native duplicate/freeze signals are suppressed to zero risk by the motion
+    gate (USERPLAN P0-R1, P0-R2).
     """
     per_window: list[float] = []
     global_ev: list[dict] = []

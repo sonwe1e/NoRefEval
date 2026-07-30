@@ -83,46 +83,129 @@ def export_compare_clips(
     out_dir: str | Path,
     *,
     out_fps: float = 30.0,
-    panels: Sequence[tuple[np.ndarray, str]] | None = None,
+    panels: Sequence[Sequence[tuple[np.ndarray, str]]] | None = None,
+    candidate_video: str | None = None,
+    reference_video: str | None = None,
 ) -> list[Path]:
     """Write ``issue_NNN_compare.mp4`` per issue.
 
     ``panels`` is a per-issue list of (frame_bgr, label) pairs captured at
-    the issue's centre time; when ``None`` the exporter falls back to a simple
-    side-by-side of whatever panels were supplied via ``set_panels``.
+    the issue's centre time; used as a fallback when ``candidate_video`` is not
+    given or when decoding the issue window fails.
+
+    When ``candidate_video`` is supplied, the exporter decodes the actual
+    frames in the issue's time window (with ``_PAD_SECONDS`` of padding) and
+    writes a *real* video sequence: each output frame is a multi-panel
+    composition of the candidate frame alongside a temporal-heat proxy, so
+    flicker / freeze / UI drift / temporal ghosting become visible.  If the
+    decode fails or the window is too short, we fall back to holding the
+    supplied ``panels`` for ~2 seconds (the old static behaviour).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for n, issue in enumerate(issues[:_MAX_CLIPS]):
         issue_panels = panels[n] if panels and n < len(panels) else None
-        if not issue_panels:
-            continue
         out_path = out_dir / f"issue_{n:03d}_compare.mp4"
-        _write_compare_clip(issue, issue_panels, out_path, out_fps)
+        _write_compare_clip(issue, issue_panels, out_path, out_fps,
+                            candidate_video, reference_video)
         paths.append(out_path)
     return paths
 
 
-def _write_compare_clip(issue: dict, panels: Sequence[tuple[np.ndarray, str]],
-                        dst: Path, fps: float) -> None:
-    frames = [p.astype(np.uint8) if p.dtype == np.uint8 else
-              np.clip(p, 0, 255).astype(np.uint8) for p, _ in panels]
-    labels = [lab for _, lab in panels]
-    composed = _panels_to_frame(frames, labels)
-    h, w = composed.shape[:2]
+def _decode_window_frames(video_path: str, t0: float, t1: float,
+                          target_h: int, target_w: int,
+                          ) -> list[np.ndarray]:
+    """Decode BGR frames from ``video_path`` in ``[t0, t1]`` resized to target.
+
+    Best-effort: returns an empty list on any failure.  Frames are resized to
+    exactly ``(target_h, target_w)`` so they can be composed into panels.
+    """
+    try:
+        frames: list[np.ndarray] = []
+        with av.open(video_path) as inp:
+            vs = inp.streams.video[0]
+            inp.seek(int(t0 * av.time_base), any_frame=False, backward=True)
+            for frame in inp.decode(vs):
+                t = float(frame.pts * vs.time_base) if frame.pts is not None else 0.0
+                if t > t1 + 1e-3:
+                    break
+                if t < t0 - 1e-3:
+                    continue
+                bgr = frame.to_ndarray(format="bgr24")
+                if bgr.shape[:2] != (target_h, target_w):
+                    bgr = cv2.resize(bgr, (target_w, target_h),
+                                     interpolation=cv2.INTER_LINEAR)
+                frames.append(bgr)
+        return frames
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _temporal_heat(cur: np.ndarray, prev: np.ndarray | None) -> np.ndarray:
+    """|cur - prev| luma normalised to 0..1 (0 where no previous frame)."""
+    if prev is None:
+        return np.zeros(cur.shape[:2], dtype=np.float32)
+    diff = np.abs(cur.astype(np.int16) - prev.astype(np.int16)).mean(axis=2)
+    d = diff.astype(np.float32) / 255.0
+    return np.clip(d / max(float(np.percentile(d, 95)), 1e-3), 0.0, 1.0)
+
+
+def _write_compare_clip(issue: dict,
+                        panels: Sequence[tuple[np.ndarray, str]] | None,
+                        dst: Path, fps: float,
+                        candidate_video: str | None = None,
+                        reference_video: str | None = None) -> None:
     band = issue.get("severity_band", "low")
     bgr = _BAND_BGR.get(band, (120, 120, 120))
     title = issue.get("title", issue.get("issue_type", "issue"))
+    mode = "FR" if reference_video is not None else "NR"
 
+    # Try to build a real sequence from the candidate video first.
+    t0 = max(0.0, float(issue.get("start_time") or 0) - _PAD_SECONDS)
+    t1 = float(issue.get("end_time") or 0) + _PAD_SECONDS
+    sequence: list[np.ndarray] = []
+    if candidate_video and t1 > t0 + 0.05:
+        # Pick a target size: prefer the first supplied panel's size, then
+        # the candidate video's native size, then a sane default.
+        if panels:
+            ph, pw = panels[0][0].shape[:2]
+        else:
+            try:
+                with av.open(candidate_video) as inp:
+                    vs = inp.streams.video[0]
+                    pw, ph = vs.codec_context.width, vs.codec_context.height
+            except Exception:  # noqa: BLE001
+                ph, pw = 360, 640
+        decoded = _decode_window_frames(candidate_video, t0, t1, ph, pw)
+        if len(decoded) >= 2:
+            prev: np.ndarray | None = None
+            for i, cur in enumerate(decoded):
+                heat = _temporal_heat(cur, prev)
+                heat_u8 = (_heat_bgr(heat) * 255).astype(np.uint8)
+                t_cur = t0 + i / float(fps)
+                left = _label(cur.copy(), f"{mode}/candidate  t={t_cur:.3f}")
+                right = _label(heat_u8.copy(), "temporal heat")
+                composed = np.concatenate([left, right], axis=1)
+                sequence.append(composed)
+                prev = cur
+
+    # Fall back to the static held-frame behaviour if we have no sequence.
+    if not sequence:
+        if not panels:
+            return
+        frames = [p.astype(np.uint8) if p.dtype == np.uint8 else
+                  np.clip(p, 0, 255).astype(np.uint8) for p, _ in panels]
+        labels = [lab for _, lab in panels]
+        sequence = [_panels_to_frame(frames, labels)] * max(1, int(round(fps * 2.0)))
+
+    h, w = sequence[0].shape[:2]
     with av.open(str(dst), "w") as out:
         os_ = out.add_stream("h264", rate=int(round(fps)))
         os_.width, os_.height = w, h
         os_.pix_fmt = "yuv420p"
         os_.options = {"crf": "18", "preset": "veryfast"}
-        # Hold the composed comparison for ~2 seconds so the viewer can study it.
-        n_frames = max(1, int(round(fps * 2.0)))
-        for idx in range(n_frames):
+        for idx, composed in enumerate(sequence):
             frame = composed.copy()
             # Severity border + title bar
             cv2.rectangle(frame, (0, 0), (w - 1, h - 1), bgr, 2)

@@ -389,6 +389,8 @@ def _write_outputs(
     if not out_dir:
         return
     out = Path(out_dir)
+    diag_issues = ((report.meta or {}).get("diagnostics") or {}).get("issues") or []
+
     # --- USERPLAN §8: render heatmap PNGs for issues that have a map -----
     # Done before the JSON/HTML writers so both embed the final relative
     # paths.  Failures here must never abort the report, so the whole step is
@@ -398,13 +400,12 @@ def _write_outputs(
     except Exception as exc:  # noqa: BLE001
         if report.meta is not None:
             report.meta["heatmap_render_error"] = repr(exc)
-    write_json_report(report, out / "report.json")
-    write_html_report(report, out / "report.html")
-    (out / "timeline.md").write_text(
-        render_timeline_md(windows, candidate.meta, report),
-        encoding="utf-8",
-    )
-    render_timeline_png(windows, candidate.meta, report, out / "timeline.png")
+
+    # --- USERPLAN P2-R2: generate ALL media before writing JSON/HTML -----
+    # The report files must embed the final clip_paths / thumbnail / map
+    # links, so every companion asset has to be produced first.  The old
+    # order wrote JSON/HTML before the overlay/compare clips existed, so the
+    # HTML showed no video links even when the MP4s were on disk.
     if export_clips and report.worst_windows:
         export_badcase_clips(
             candidate_video,
@@ -416,7 +417,6 @@ def _write_outputs(
     # USERPLAN P1-R1: pass the real per-issue error map to the exporter so the
     # heat overlay shows the actual diagnostic evidence, not the motion-proxy
     # fallback (the proxy is only used when an issue has no map).
-    diag_issues = ((report.meta or {}).get("diagnostics") or {}).get("issues") or []
     if export_clips and diag_issues:
         overlay_maps = _issue_error_maps(diag_issues, windows)
         overlay_paths = export_overlay_clips(
@@ -441,6 +441,15 @@ def _write_outputs(
             if idx < len(thumb_paths) and thumb_paths[idx].exists():
                 issue["thumbnail"] = f"badcases/{thumb_paths[idx].name}"
 
+    # --- NOW write the JSON/HTML reports with all media links in place ---
+    write_json_report(report, out / "report.json")
+    write_html_report(report, out / "report.html")
+    (out / "timeline.md").write_text(
+        render_timeline_md(windows, candidate.meta, report),
+        encoding="utf-8",
+    )
+    render_timeline_png(windows, candidate.meta, report, out / "timeline.png")
+
 
 def _issue_error_maps(diag_issues: list[dict],
                       windows: list[WindowFeatures]) -> dict[int, np.ndarray]:
@@ -449,16 +458,24 @@ def _issue_error_maps(diag_issues: list[dict],
     Returns ``{issue_index: error_map}`` for the overlay exporter.  Issues
     without a map or without a matching window are simply omitted — the
     exporter falls back to its motion-proxy for those.
+
+    USERPLAN P2-R2: uses ``map_keys`` (the original ndarray names) for the
+    lookup, not ``maps`` (which ``_render_issue_heatmaps`` rewrites to PNG
+    relative paths).  Falling back to ``maps`` when ``map_keys`` is absent
+    keeps backward compatibility with callers that don't run the heatmap
+    renderer first.
     """
     by_center = {int(wf.window.center): wf for wf in windows}
     out: dict[int, np.ndarray] = {}
     for i, issue in enumerate(diag_issues):
-        if not issue.get("maps"):
+        # Prefer the preserved ndarray-name list; fall back to ``maps``.
+        map_names = issue.get("map_keys") or issue.get("maps") or []
+        if not map_names:
             continue
         wf = by_center.get(int(issue.get("center_index", -1)))
         if wf is None:
             continue
-        for name in issue["maps"]:
+        for name in map_names:
             arr = wf.error_maps.get(name)
             if arr is not None:
                 out[i] = arr
@@ -517,8 +534,13 @@ def _export_keyframes(candidate_video: str, issues: list[dict],
 def _export_compare(candidate_video: str, issues: list[dict],
                     windows: list[WindowFeatures],
                     overlay_maps: dict[int, np.ndarray],
-                    out_dir: Path, reference_video: str | None = None) -> None:
-    """Build the multi-panel compare clip per issue (USERPLAN §10)."""
+                    out_dir: Path, reference_video: str | None = None) -> list[Path]:
+    """Build the multi-panel compare clip per issue (USERPLAN §10).
+
+    Returns the list of generated compare-clip paths (one per issue that
+    yielded panels).  Issues without panels are skipped, so the returned
+    list may be shorter than ``issues``.
+    """
     all_panels: list[list[tuple[np.ndarray, str]]] = []
     for n, issue in enumerate(issues[:12]):
         emap = overlay_maps.get(n)
@@ -526,7 +548,9 @@ def _export_compare(candidate_video: str, issues: list[dict],
             candidate_video, issue, error_map=emap,
             reference_video=reference_video)
         all_panels.append(panels)
-    export_compare_clips(issues, out_dir, panels=all_panels)
+    return export_compare_clips(issues, out_dir, panels=all_panels,
+                                candidate_video=candidate_video,
+                                reference_video=reference_video)
 
 
 def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],
@@ -549,11 +573,16 @@ def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],
     for i, issue in enumerate(issues):
         if not issue.get("maps"):
             continue
+        # USERPLAN P2-R2: preserve the original ndarray-name list before
+        # rewriting ``maps`` to PNG relative paths.  ``_issue_error_maps``
+        # uses ``map_keys`` to look up the real overlay ndarray; ``maps``
+        # stays the PNG-path list the HTML report links to.
+        original_keys = list(issue["maps"])
         wf = by_center.get(int(issue.get("center_index", -1)))
         if wf is None:
             continue
         rel_maps: list[str] = []
-        for name in issue["maps"]:
+        for name in original_keys:
             arr = wf.error_maps.get(name) if wf else None
             if arr is None:
                 continue
@@ -561,6 +590,7 @@ def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],
             png = save_heatmap(arr, heat_dir / f"issue_{i:03d}_{name}.png",
                                label=label)
             rel_maps.append(f"heatmaps/{png.name}")
+        issue["map_keys"] = original_keys
         issue["maps"] = rel_maps
 
 
@@ -684,6 +714,35 @@ def evaluate_no_reference(
     # endpoint audit escalation (pipeline.py) for NR/FR.
     _nr_fr_tier3(candidate, cfg, backend, learned, window_features, worst)
 
+    # USERPLAN P2-R2: Tier-3 updated wf.scalars in place for the audited
+    # windows; recompute valid windows, scores, confidence, status and worst
+    # windows so the final result reflects the native-resolution audit.
+    required = required_features(EvaluationMode.NO_REFERENCE)
+    valid = [wf for wf in window_features
+             if all(np.isfinite(wf.scalars.get(key, float("nan"))) for key in required)]
+    overall, subscores, category_errors = compute_mode_scores(
+        EvaluationMode.NO_REFERENCE, valid)
+    coverage = _unique_coverage(valid, candidate.meta.n_frames)
+    confidence = compute_mode_confidence(
+        valid_windows=len(valid),
+        total_windows=len(window_features),
+        coverage_fraction=coverage,
+        warning_count=len(warnings),
+        ceiling=0.75,
+    )
+    if not fps_supported:
+        overall = float("nan")
+        confidence = min(confidence, 0.01)
+    status = (
+        "failed" if not np.isfinite(overall)
+        else "degraded" if stage_errors or len(valid) < len(window_features)
+        else "ok"
+    )
+    worst = _worst_windows(
+        EvaluationMode.NO_REFERENCE, valid, candidate.meta,
+        confidence, cfg.preset.temporal_nms_seconds,
+    )
+
     # --- USERPLAN §5 cadence integrity + §7 diagnostic evidence ------------
     # The shared 1/60 s score must not hide a collapsed native cadence, so we
     # penalise the common-time overall multiplicatively and surface both the
@@ -698,8 +757,11 @@ def evaluate_no_reference(
         alternation_per_window=[
             float(wf.scalars.get("nr_native_motion_alternation", float("nan")))
             for wf in valid],
+        # USERPLAN P0-R2: use the raw (non-motion-compensated) frame diff, not
+        # nr_mct_1_60_mean, for the cadence motion gate — MCT residual is low
+        # for smooth motion and would misclassify moving duplicate frames.
         common_time_motion_per_window=[
-            float(wf.scalars.get("nr_mct_1_60_mean", float("nan")))
+            float(wf.scalars.get("nr_raw_diff_1_60", float("nan")))
             for wf in valid],
     )
     if np.isfinite(overall):
@@ -1004,6 +1066,36 @@ def evaluate_full_reference(
     # --- USERPLAN P3 / §3: Tier-3 native-resolution re-evaluation ----------
     _fr_tier3(candidate, reference, cfg, backend, window_features, worst,
               alignment)
+
+    # USERPLAN P2-R2: Tier-3 updated wf.scalars in place for the audited
+    # windows; recompute valid windows, scores, confidence, status and worst
+    # windows so the final result reflects the native-resolution audit.
+    required = required_features(EvaluationMode.FULL_REFERENCE)
+    valid = [wf for wf in window_features
+             if all(np.isfinite(wf.scalars.get(key, float("nan"))) for key in required)]
+    overall, subscores, category_errors = compute_mode_scores(
+        EvaluationMode.FULL_REFERENCE, valid, reference_globals)
+    coverage = _unique_coverage(valid, candidate.meta.n_frames)
+    confidence = compute_mode_confidence(
+        valid_windows=len(valid),
+        total_windows=len(window_features),
+        coverage_fraction=coverage,
+        warning_count=len(alignment.warnings),
+        alignment_fraction=alignment.matched_fraction,
+        ceiling=0.98,
+    )
+    if not alignment.reliable:
+        overall = float("nan")
+        confidence = min(confidence, 0.01)
+    status = (
+        "failed" if not np.isfinite(overall)
+        else "degraded" if stage_errors or len(valid) < len(window_features)
+        else "ok"
+    )
+    worst = _worst_windows(
+        EvaluationMode.FULL_REFERENCE, valid, candidate.meta,
+        confidence, cfg.preset.temporal_nms_seconds,
+    )
 
     # --- USERPLAN P1: dense error maps for the top-risk FR windows -------
     # Computed before diagnosis so issues can carry spatial boxes (USERPLAN

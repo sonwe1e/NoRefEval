@@ -500,6 +500,15 @@ def compute_window(
         out["nr_duplicate_fraction"] = float("nan")
         out["nr_freeze_fraction"] = float("nan")
 
+    # USERPLAN P0-R2: raw (non-motion-compensated) frame diff at 1/60s lag,
+    # used by the cadence motion gate to distinguish real static scenes from
+    # collapsed cadence. MCT residual is motion-compensated and can be low for
+    # smooth motion even when real motion is large.
+    if frame_diffs:
+        out["nr_raw_diff_1_60"] = float(np.mean(diffs))
+    else:
+        out["nr_raw_diff_1_60"] = float("nan")
+
     native_diffs = np.asarray([
         float(np.mean(np.abs(y[i + 1] - y[i]))) for i in range(n - 1)
     ], np.float64)

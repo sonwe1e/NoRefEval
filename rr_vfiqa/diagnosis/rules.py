@@ -375,6 +375,10 @@ def merge_issues(issues: list[DiagnosticIssue], nms_seconds: float) -> list[Diag
             prev.confidence = max(prev.confidence, issue.confidence)
             if len(issue.evidence) > len(prev.evidence):
                 prev.evidence = issue.evidence
+            prev.boxes = prev.boxes or issue.boxes
+            prev.maps = prev.maps or issue.maps
+            prev.clip_paths.update(issue.clip_paths)
+            prev.thumbnail = prev.thumbnail or issue.thumbnail
         else:
             merged.append(DiagnosticIssue(
                 issue_type=issue.issue_type, title=issue.title,
@@ -382,7 +386,10 @@ def merge_issues(issues: list[DiagnosticIssue], nms_seconds: float) -> list[Diag
                 start_time=issue.start_time, end_time=issue.end_time,
                 track=issue.track, evidence=list(issue.evidence),
                 probable_causes=list(issue.probable_causes),
-                center_index=issue.center_index))
+                center_index=issue.center_index,
+                boxes=list(issue.boxes), maps=list(issue.maps),
+                clip_paths=dict(issue.clip_paths),
+                thumbnail=issue.thumbnail))
     merged.sort(key=lambda i: -i.severity)
     return merged
 
