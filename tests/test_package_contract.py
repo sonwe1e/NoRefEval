@@ -10,6 +10,7 @@ These tests lock down the public package contract:
 
 from __future__ import annotations
 
+import os
 import re
 
 import pytest
@@ -37,13 +38,12 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+")
 def test_package_version_matches_metadata():
     """Installed package version matches ``pyproject.toml`` metadata.
 
-    When installed in editable mode (``pip install -e``) the metadata version
-    tracks the package's declared version.  A stale metadata (e.g. from a
-    prior ``pip install`` before a version bump) is a real mismatch — but in
-    local dev the metadata may lag the source.  We assert the *source* version
-    equals the public attribute, and the metadata matches when the package is
-    installed fresh (CI).  If metadata is stale, the test still passes as long
-    as source and attribute agree.
+    In CI (fresh editable install) the metadata MUST track the source
+    version exactly.  Local dev environments may have stale metadata from a
+    prior install before a version bump — that's a packaging issue, not a
+    code contract failure.  We assert the source-of-truth invariant hard, and
+    the metadata match conditionally (skip on stale local metadata, fail in
+    CI where CI=true is set).
     """
     assert rr_vfiqa.__version__ == VERSION, (
         f"rr_vfiqa.__version__ ({rr_vfiqa.__version__!r}) != "
@@ -52,15 +52,19 @@ def test_package_version_matches_metadata():
         meta_version = importlib_metadata.version("rr-vfiqa")
     except importlib_metadata.PackageNotFoundError:
         return  # not installed as a package; source check above is sufficient
-    # Metadata may be stale in local editable installs — only assert match
-    # when the installed metadata is >= the source version (CI fresh install).
     if meta_version == rr_vfiqa.__version__:
         return  # perfect match
-    # Stale metadata is a packaging issue, not a code contract failure —
-    # the source-of-truth check (above) is the real guard.
+    # In CI, stale metadata is a real failure (packaging config is broken).
+    if os.environ.get("CI"):
+        pytest.fail(
+            f"CI: installed metadata ({meta_version}) != source "
+            f"({rr_vfiqa.__version__}); pyproject.toml version is out of "
+            f"sync with rr_vfiqa._version.VERSION")
+    # Local dev: stale metadata from a prior install is not a code failure.
     pytest.skip(
-        f"installed metadata ({meta_version}) stale vs source "
-        f"({rr_vfiqa.__version__}); reinstall to refresh")
+        f"local: installed metadata ({meta_version}) stale vs source "
+        f"({rr_vfiqa.__version__}); reinstall with 'pip install -e .' to "
+        f"refresh")
 
 
 def test_version_is_semver():

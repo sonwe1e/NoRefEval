@@ -49,6 +49,18 @@ def rpg_root(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
+def inspection_cache() -> dict:
+    """Session-scoped cache for ``_inspect()`` results (USERPLAN §11).
+
+    Keyed by ``(video_path, reference_path, mode, clips)`` so that
+    localization, score-direction and metric-direction tests share the same
+    no-clips evaluation result instead of each re-running the full CLI.
+    Reduces ~75 no-clips inspections across the metamorphic suite to ~30.
+    """
+    return {}
+
+
+@pytest.fixture(scope="session")
 def rpg_cases(rpg_root: Path) -> list[dict]:
     """Load every per-case manifest that has a candidate video.
 

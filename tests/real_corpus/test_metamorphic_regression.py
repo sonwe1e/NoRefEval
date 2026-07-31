@@ -53,7 +53,8 @@ _MODE_ALIAS_TO_META = {
 
 def _inspect(video: str, reference: str | None, tmp: Path,
              speed: str = "fast", mode: str = "nr",
-             expected_mode: str | None = None) -> dict:
+             expected_mode: str | None = None,
+             cache: dict | None = None) -> dict:
     """Run ``rr-vfiqa inspect`` via the CLI and return the parsed report.json.
 
     ``reference`` is the clean baseline for *comparison* (the oracle/source).
@@ -65,8 +66,20 @@ def _inspect(video: str, reference: str | None, tmp: Path,
     ``report.json`` existence is asserted — a missing report means the command
     crashed before writing, and the test must fail rather than return ``{}``
     (USERPLAN §4, §7).
+
+    When ``cache`` is provided (the session-scoped ``inspection_cache``
+    fixture), results are keyed by ``(video, reference, mode)`` so that
+    localization, score-direction and metric-direction tests share the same
+    no-clips evaluation result (USERPLAN §11).  ``expected_mode`` is NOT part
+    of the key because the cached result is the same regardless of which mode
+    the caller expects to be routed.
     """
     from rr_vfiqa.cli import main
+
+    cache_key = (video, reference, mode) if cache is not None else None
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
     out = tmp / "result"
     out.mkdir(parents=True, exist_ok=True)
     cmd = ["inspect", "--candidate", str(video), "--out", str(out),
@@ -92,6 +105,9 @@ def _inspect(video: str, reference: str | None, tmp: Path,
         accepted = {expected_mode, _MODE_ALIAS_TO_META.get(expected_mode, expected_mode)}
         assert actual_mode in accepted, (
             f"expected mode in {accepted}, got {actual_mode}")
+
+    if cache is not None:
+        cache[cache_key] = rep
     return rep
 
 
@@ -118,14 +134,15 @@ class TestDefectLocalization:
     """
 
     @pytest.mark.parametrize("mode", ["nr", "endpoint", "fr"])
-    def test_defect_produces_overlapping_issue(self, rpg_cases, tmp_path, mode):
+    def test_defect_produces_overlapping_issue(self, rpg_cases, tmp_path, mode,
+                                               inspection_cache):
         cases = [c for c in rpg_cases if c["mode"] == mode]
         assert cases, f"no {mode} cases"
         detected = 0
         for case in cases:
             rep = _inspect(case["candidate"], _reference_for_case(case),
                            tmp_path / f"loc_{case['case_id']}", mode=mode,
-                           expected_mode=mode)
+                           expected_mode=mode, cache=inspection_cache)
             diag = (rep.get("meta") or {}).get("diagnostics") or {}
             issues = diag.get("issues") or []
             windows = _defect_windows(case)
@@ -168,7 +185,8 @@ class TestDefectLocalization:
             f"(rate {rate:.0%}, floor {floor:.0%})")
 
     @pytest.mark.parametrize("mode", ["nr", "endpoint", "fr"])
-    def test_defect_lowers_overall_score(self, rpg_cases, tmp_path, mode):
+    def test_defect_lowers_overall_score(self, rpg_cases, tmp_path, mode,
+                                         inspection_cache):
         """Defective candidate should score lower than its clean oracle.
 
         Only counts cases where BOTH candidate and oracle produce a finite
@@ -188,10 +206,10 @@ class TestDefectLocalization:
             ref = _reference_for_case(case)
             rep_cand = _inspect(case["candidate"], ref,
                                 tmp_path / f"score_cand_{case['case_id']}", mode=mode,
-                                expected_mode=mode)
+                                expected_mode=mode, cache=inspection_cache)
             rep_clean = _inspect(case["oracle"], ref,
                                  tmp_path / f"score_clean_{case['case_id']}", mode=mode,
-                                 expected_mode=mode)
+                                 expected_mode=mode, cache=inspection_cache)
             vc = rep_cand.get("overall_score")
             vk = rep_clean.get("overall_score")
             if vc is None or vk is None:
@@ -220,7 +238,13 @@ class TestMetricDirection:
 
     # Map defect type -> (feature_key, higher_is_worse).  higher_is_worse=True
     # means the defective candidate should show a HIGHER value.
+    #
+    # Every defect type injected by the RPG fixture (case_specs.py) MUST have
+    # an entry here — test_every_case_has_direction_contract enforces this.
+    # Feature keys are mode-specific and must be emitted by the active mode's
+    # fast path (see metrics/full_reference.py compute_window).
     _FEATURE_CHECKS: dict[str, tuple[str, bool]] = {
+        # ---- No-Reference (NR) ------------------------------------------
         "freeze": ("nr_native_duplicate_fraction", True),
         # NOTE: the actual nr feature is "nr_phase_sharp_energy" (computed in
         # metrics/no_reference.py), not "nr_phase_sharpness_energy".
@@ -231,21 +255,29 @@ class TestMetricDirection:
         "cadence_collapse": ("nr_native_duplicate_fraction", True),
         "ui_drift": ("nr_ui_edge_instability", True),
         "projectile_ghost_flicker": ("nr_phase_sharp_energy", True),
+        # ---- Endpoint-2x -----------------------------------------------
         "generated_motion_blur": ("gtq_sharpness", False),
         "disocclusion_ghost": ("comp_mean", True),
         "thin_weapon_wrong_motion": ("comp_mean", True),
         "ui_text_drift": ("ui_static_l1", True),
         "generated_freeze_copy": ("comp_mean", True),
+        # ---- Full-Reference --------------------------------------------
+        # Spatial/blur defects raise L1 error; edge defects lower edge F1;
+        # temporal defects raise flicker/temporal-diff error.
         "global_blur": ("fr_l1_y", True),
         "local_spatial_shift": ("fr_edge_chamfer", True),
-        "color_imbalance": ("fr_l1_rgb", True),
-        "frame_drop": ("fr_temporal_diff_error", True),
-        "noise_banding": ("fr_l1_y", True),
+        # thin_object_delete removes thin edges → candidate has LOWER edge F1.
+        "thin_object_delete": ("fr_edge_f1", False),
+        # ui_text_corruption degrades text edges → candidate has LOWER text F1.
+        "ui_text_corruption": ("fr_text_roi_edge_f1", False),
+        # temporal_freeze_flicker increases flicker → candidate has HIGHER
+        # flicker_excess.
+        "temporal_freeze_flicker": ("fr_flicker_excess", True),
     }
 
     @pytest.mark.parametrize("mode", ["nr", "endpoint", "fr"])
     def test_defect_moves_metric_in_expected_direction(
-            self, rpg_cases, tmp_path, mode):
+            self, rpg_cases, tmp_path, mode, inspection_cache):
         cases = [c for c in rpg_cases
                  if c["mode"] == mode and c["oracle"] is not None]
         assert cases, f"no {mode} cases with an oracle"
@@ -269,10 +301,10 @@ class TestMetricDirection:
             ref = _reference_for_case(case)
             rep_cand = _inspect(case["candidate"], ref,
                                 tmp_path / f"mcand_{case['case_id']}", mode=mode,
-                                expected_mode=mode)
+                                expected_mode=mode, cache=inspection_cache)
             rep_clean = _inspect(case["oracle"], ref,
                                  tmp_path / f"mclean_{case['case_id']}", mode=mode,
-                                 expected_mode=mode)
+                                 expected_mode=mode, cache=inspection_cache)
             fc = _features(rep_cand)
             fk = _features(rep_clean)
             # Feature names are mode-specific (NR emits nr_native_*, endpoint
@@ -317,6 +349,41 @@ class TestMetricDirection:
         assert inconclusive_rate <= max_inconclusive, (
             f"{mode}: inconclusive rate {inconclusive_rate:.0%} exceeds "
             f"{max_inconclusive:.0%} ({inconclusive}/{len(cases)} cases)")
+
+
+class TestDirectionContractCompleteness:
+    """Verify that every injected defect type has a direction contract.
+
+    Without this guard, adding a new case to case_specs.py silently excludes
+    it from the metric-direction test (the ``continue`` in the loop above),
+    and the ``conclusive >= 3`` assertion can still pass on the remaining
+    cases while the new defect goes untested.
+    """
+
+    def test_every_case_has_direction_contract(self):
+        """Every defect type in CASES must be mapped in _FEATURE_CHECKS."""
+        from tools.rpg_validation_generator.case_specs import CASES
+
+        injected = {case.defect_type for case in CASES}
+        mapped = set(TestMetricDirection._FEATURE_CHECKS)
+        missing = sorted(injected - mapped)
+        assert not missing, (
+            f"defect types injected by the RPG fixture but missing from "
+            f"_FEATURE_CHECKS: {missing}.  Add a (feature_key, higher_is_worse) "
+            f"entry for each, or the metric-direction test will silently skip "
+            f"them.")
+
+    def test_no_stale_direction_contracts(self):
+        """Every entry in _FEATURE_CHECKS should correspond to a real case
+        (catches leftover entries after a case is removed)."""
+        from tools.rpg_validation_generator.case_specs import CASES
+
+        injected = {case.defect_type for case in CASES}
+        mapped = set(TestMetricDirection._FEATURE_CHECKS)
+        stale = sorted(mapped - injected)
+        assert not stale, (
+            f"_FEATURE_CHECKS has entries for defect types not present in "
+            f"CASES: {stale}.  Remove the stale entries.")
 
 
 class TestStaticVideo:
@@ -396,8 +463,9 @@ class TestMediaE2E:
     _STRONG_CASES = {
         # NR case_01 is a long freeze window — fires duplicate_freeze.
         "nr": "nr_case_01",
-        # endpoint case_05 is a generated_freeze_copy — fires freeze_copy.
-        "endpoint": "endpoint_case_05",
+        # endpoint case_01 is a generated_motion_blur — fires generated_blur
+        # via edge_recall (available in endpoint fast path).
+        "endpoint": "endpoint_case_01",
         # fr case_01 is a global_blur — fires fr_spatial_reference_error.
         "fr": "fr_case_01",
     }
