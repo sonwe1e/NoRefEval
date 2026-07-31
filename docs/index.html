@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rr_vfiqa — 多模式视频插帧质量评测</title>
+<style>
+:root{--bg:#0f1320;--panel:#171c2e;--ink:#e8ecf5;--mut:#9aa4bd;--line:#2a3147;--accent:#3498db;--accent2:#27ae60;--warn:#e67e22;--err:#c0392b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:14px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}
+h1{font-size:22px;margin:0 0 8px}
+h2{font-size:18px;margin:28px 0 12px;color:var(--ink)}
+h3{font-size:15px;margin:16px 0 8px;color:var(--mut)}
+a{color:#7fd1ff;text-decoration:none}a:hover{text-decoration:underline}
+code{background:#222a40;color:#7fd1ff;padding:1px 5px;border-radius:3px;font-size:13px}
+pre{background:var(--panel);border-radius:8px;padding:14px;overflow-x:auto;font-size:13px;line-height:1.5}
+pre code{background:none;padding:0;color:var(--ink)}
+section{max-width:1080px;margin:0 auto;padding:0 16px 40px}
+.hero{background:linear-gradient(135deg,#1a2030 0%,#0f1320 100%);padding:48px 16px 32px;border-bottom:1px solid var(--line)}
+.hero-inner{max-width:1080px;margin:0 auto}
+.hero h1{font-size:28px;margin-bottom:12px}
+.hero p{color:var(--mut);font-size:15px;max-width:720px;margin:0 0 20px}
+.cta{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+.cta a{background:var(--accent);color:#fff;padding:10px 20px;border-radius:6px;font-weight:600;display:inline-block}
+.cta a.secondary{background:var(--panel);color:var(--ink);border:1px solid var(--line)}
+.badges{display:flex;gap:10px;flex-wrap:wrap}
+.badge{display:inline-block;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:4px 12px;font-size:12px;color:var(--mut)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin:20px 0}
+.card{background:var(--panel);border-radius:10px;padding:16px;border:1px solid var(--line)}
+.card h3{margin-top:0;color:var(--accent)}
+.card p{color:var(--mut);font-size:13px;margin:0}
+.tabs{display:flex;gap:4px;margin:16px 0;border-bottom:1px solid var(--line)}
+.tab{padding:10px 18px;cursor:pointer;border-radius:6px 6px 0 0;background:var(--panel);border:1px solid var(--line);border-bottom:none;color:var(--mut)}
+.tab.active{background:var(--bg);color:var(--ink);font-weight:600}
+.tab-panel{display:none;padding:16px;background:var(--panel);border:1px solid var(--line);border-top:none;border-radius:0 0 8px 8px}
+.tab-panel.active{display:block}
+.flow{display:flex;flex-direction:column;gap:6px;margin:16px 0}
+.flow-step{display:flex;align-items:center;gap:12px;background:var(--panel);border-radius:8px;padding:10px 14px;border:1px solid var(--line)}
+.flow-step .num{background:var(--accent);color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0}
+.flow-step .label{flex:1}
+.flow-step .detail{color:var(--mut);font-size:12px}
+.flow-arrow{text-align:center;color:var(--mut);font-size:18px}
+.sel{display:flex;flex-direction:column;gap:8px;margin:16px 0}
+.sel-q{background:var(--panel);border-radius:8px;padding:14px;border:1px solid var(--line);font-weight:600}
+.sel-opt{display:flex;gap:8px;flex-wrap:wrap;margin-left:18px}
+.opt{padding:8px 16px;border-radius:6px;border:1px solid var(--line);background:var(--panel);cursor:pointer;transition:all .15s}
+.opt:hover{border-color:var(--accent)}
+.opt.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.result-box{background:#0c1020;border-radius:8px;padding:14px;margin:12px 0;border:1px solid var(--line);display:none}
+.result-box.active{display:block}
+.result-box h4{margin:0 0 8px;color:var(--accent)}
+.result-box p{color:var(--mut);font-size:13px;margin:4px 0}
+.cmd-gen{background:var(--panel);border-radius:10px;padding:16px;border:1px solid var(--line)}
+.cmd-row{display:grid;grid-template-columns:120px 1fr;align-items:center;gap:10px;margin:8px 0}
+.cmd-row label{color:var(--mut);font-size:13px;text-align:right}
+.cmd-row input,.cmd-row select{background:#0c1020;border:1px solid var(--line);color:var(--ink);border-radius:4px;padding:6px 10px;font-size:13px;width:100%}
+.cmd-output{background:#0c1020;border-radius:6px;padding:12px;margin-top:12px;font-family:monospace;font-size:13px;white-space:pre-wrap;word-break:break-all;border:1px solid var(--line)}
+.copy-btn{background:var(--accent);color:#fff;border:none;border-radius:4px;padding:6px 14px;cursor:pointer;font-size:13px;float:right}
+.copy-btn:hover{opacity:.9}
+table{width:100%;border-collapse:collapse;margin:12px 0}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);font-size:13px}
+th{color:var(--mut);font-weight:600}
+.arch-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin:16px 0}
+.arch-item{background:var(--panel);border-radius:8px;padding:14px;border:1px solid var(--line)}
+.arch-item h4{margin:0 0 6px;color:var(--accent);font-size:14px}
+.arch-item p{color:var(--mut);font-size:12px;margin:2px 0}
+.arch-item .io{font-size:11px;color:var(--accent2);margin-top:6px}
+.check{display:flex;align-items:center;gap:8px;margin:6px 0}
+.check::before{content:"✓";color:var(--accent2);font-weight:700}
+.cross::before{content:"✗";color:var(--warn);font-weight:700}
+.note{background:#1a2030;border-left:4px solid var(--accent);border-radius:4px;padding:10px 14px;margin:12px 0;font-size:13px;color:var(--mut)}
+@media (prefers-color-scheme: light){
+:root{--bg:#f4f6fb;--panel:#fff;--ink:#1a1f2e;--mut:#5a6478;--line:#dde3ee}
+.cmd-output,.cmd-row input,.cmd-row select,.result-box{background:#f0f3f8}
+.hero{background:linear-gradient(135deg,#e8edf8 0%,#f4f6fb 100%)}
+.note{background:#e8edf8}
+}
+@media (max-width:640px){
+.cmd-row{grid-template-columns:1fr}.cmd-row label{text-align:left}
+.flow-step{flex-direction:column;align-items:flex-start}
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- HERO                                                          -->
+<!-- ============================================================ -->
+<div class="hero">
+<div class="hero-inner">
+<h1>rr_vfiqa</h1>
+<p>面向游戏视频插帧的多模式质量评测与问题诊断系统。自动选择安全模式、输出确定性分数与置信度、定位问题时间与空间位置、生成可直接查看的坏例证据。</p>
+<div class="cta">
+<a href="#quick-start">开始评测</a>
+<a href="#modes" class="secondary">了解三种模式</a>
+<a href="#report-guide" class="secondary">报告阅读指南</a>
+</div>
+<div class="badges">
+<span class="badge">Engineering quality / risk assessment</span>
+<span class="badge">Not human MOS</span>
+<span class="badge">Production gate: false</span>
+</div>
+</div>
+</div>
+
+<section>
+
+<!-- ============================================================ -->
+<!-- WHAT IT SOLVES                                                -->
+<!-- ============================================================ -->
+<h2 id="what">它解决什么问题</h2>
+<p>视频插帧模型生成的中间帧可能存在冻结、重影、撕裂、模糊、UI 不稳定等问题。<code>rr_vfiqa</code> 提供：</p>
+<div class="cards">
+<div class="card">
+<h3>自动选择安全模式</h3>
+<p>根据输入视频的数量和帧率关系，自动判断能够安全使用的评测条件，无需用户手动选择。</p>
+</div>
+<div class="card">
+<h3>确定性分数与置信度</h3>
+<p>输出 0-100 的质量分数和 0-1 的置信度，明确区分"视频表现如何"和"评测条件有多可靠"。</p>
+</div>
+<div class="card">
+<h3>问题时间和空间定位</h3>
+<p>不只给出总分，还定位到具体的问题时间段和空间区域。</p>
+</div>
+<div class="card">
+<h3>可直接查看的坏例证据</h3>
+<p>生成热力图、关键帧、Overlay/Compare 视频，让问题一目了然。</p>
+</div>
+</div>
+
+<div class="note">
+<strong>重要：</strong>三种模式的数学条件和评分标尺不同，<code>overall_score</code> 禁止跨模式比较。分数是工程风险等级，不是人类主观 MOS。
+</div>
+
+<!-- ============================================================ -->
+<!-- QUICK START                                                   -->
+<!-- ============================================================ -->
+<h2 id="quick-start">60 秒快速开始</h2>
+<pre><code>pip install -e ".[torch]"
+
+# 只有候选视频
+rr-vfiqa inspect --candidate output.mp4 --out runs/nr
+
+# 候选 + 参考（自动判断模式）
+rr-vfiqa inspect --candidate output.mp4 --reference source.mp4 --out runs/example</code></pre>
+
+<h3>输入决策</h3>
+<div class="sel">
+<div class="sel-q">你是否有参考视频？</div>
+<div class="sel-opt">
+<div class="opt" onclick="document.getElementById('mode-result').innerHTML='<strong>No-Reference</strong><br>单条 60/120 FPS 视频，评估时序稳定性与伪影风险'">没有 → No-Reference</div>
+</div>
+<div class="sel-q">有参考视频，帧率关系是？</div>
+<div class="sel-opt">
+<div class="opt" onclick="document.getElementById('mode-result').innerHTML='<strong>Endpoint-Referenced</strong><br>参考约为候选帧率的一半（如 60 FPS → 120 FPS），评估端点约束下的插帧质量'">参考约为候选帧率的一半 → Endpoint-Referenced</div>
+<div class="opt" onclick="document.getElementById('mode-result').innerHTML='<strong>Full-Reference</strong><br>两者帧率相同且逐帧对应，评估空间、时序和运动保真度'">两者帧率相同且逐帧对应 → Full-Reference</div>
+</div>
+</div>
+<div id="mode-result" class="result-box"></div>
+
+<!-- ============================================================ -->
+<!-- OUTPUT                                                        -->
+<!-- ============================================================ -->
+<h2 id="output">输出结果是什么</h2>
+<pre><code>runs/example/
+├── report.json          # 完整结构化结果
+├── report.html          # 交互式诊断报告
+├── timeline.md          # 时间线文本
+├── timeline.png         # 时间线图
+├── heatmaps/            # 问题空间热力图
+│   └── issue_000_*.png
+└── badcases/            # 坏例视频与关键帧
+    ├── issue_000_original.mp4
+    ├── issue_000_overlay.mp4
+    ├── issue_000_compare.mp4
+    └── issue_000_keyframe.png</code></pre>
+
+<!-- ============================================================ -->
+<!-- INSTALL                                                       -->
+<!-- ============================================================ -->
+<h2 id="install">安装</h2>
+<pre><code>pip install -e .            # NumPy、OpenCV、SciPy、PyAV
+pip install -e ".[torch]"   # RAFT 光流（推荐 GPU）
+pip install -e ".[fusion]"  # Endpoint LightGBM 校准器
+pip install -e ".[vqa]"     # NR 可选 pyIQA/NIQE 弱先验
+pip install -e ".[dev]"     # pytest</code></pre>
+
+<!-- ============================================================ -->
+<!-- PROCESSING FLOW                                               -->
+<!-- ============================================================ -->
+<h2 id="flow">整体处理流程</h2>
+<div class="flow">
+<div class="flow-step"><div class="num">1</div><div class="label">输入视频</div><div class="detail">候选视频 + 可选参考视频</div></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><div class="num">2</div><div class="label">媒体与时间戳检查</div><div class="detail">解码能力、PTS 单调性、帧率检测</div></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><div class="num">3</div><div class="label">Auto-Safe Mode Router</div><div class="detail">根据输入条件自动选择 NR / Endpoint / FR</div></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><div class="num">4</div><div class="label">Tier-1 全片轻量扫描</div><div class="detail">低分辨率快速评估整条视频</div></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><div class="num">5</div><div class="label">均匀窗口 + 风险窗口选择</div><div class="detail">均匀采样 + 高风险区域加密</div></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><div class="num">6</div><div class="label">Tier-2 核心指标</div><div class="detail">模式特定的核心证据计算</div></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><div class="num">7</div><div class="label">Tier-3 高风险原分辨率审计</div><div class="detail">balanced/thorough 模式下原分辨率复核</div></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><div class="num">8</div><div class="label">模式独立融合</div><div class="detail">归一化、加权、置信度计算</div></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><div class="num">9</div><div class="label">结构化诊断</div><div class="detail">多证据规则 → DiagnosticIssue</div></div>
+<div class="flow-arrow">↓</div>
+<div class="flow-step"><div class="num">10</div><div class="label">HTML / JSON / Heatmap / Clips</div><div class="detail">生成完整报告与媒体证据</div></div>
+</div>
+
+<div class="note">
+<strong>Fail-closed：</strong>输入不满足任何契约时，生成 <code>status=failed</code> 报告，<code>overall_score = null</code>，绝不猜测模式或发布伪分数。
+</div>
+
+<!-- ============================================================ -->
+<!-- THREE MODES                                                   -->
+<!-- ============================================================ -->
+<h2 id="modes">三种评测模式</h2>
+<div class="tabs">
+<div class="tab active" onclick="switchTab(this,'nr')">No-Reference</div>
+<div class="tab" onclick="switchTab(this,'endpoint')">Endpoint-Referenced</div>
+<div class="tab" onclick="switchTab(this,'fr')">Full-Reference</div>
+</div>
+
+<div id="tab-nr" class="tab-panel active">
+<h3>No-Reference</h3>
+<table>
+<tr><th>输入</th><td>单条 60 或 120 FPS 视频</td></tr>
+<tr><th>输出语义</th><td>时序稳定性和伪影风险</td></tr>
+<tr><th>Schema</th><td><code>nr-stability-risk-v4</code></td></tr>
+<tr><th>置信度</th><td>三种模式中最低（上限 0.75）</td></tr>
+</table>
+<p><strong>核心方法：</strong>双相位自参考 + 公共物理时间尺度</p>
+<pre><code>Y0 ─ Y1 ─ Y2 ─ Y3 ─ Y4
+└── phase A ──┘
+     └── phase B ──┘</code></pre>
+<p>两个相位只作为对称假设使用，框架不会声称某一相位是真实帧。同时看 native、1/60 秒和 1/30 秒三档运动补偿残差。</p>
+<p><strong>能发现：</strong>冻结、交替模糊、抖动、UI 漂移、屏幕不稳定、cadence collapse</p>
+<p><strong>不能证明：</strong>真实运动轨迹、显露背景、hallucination 是否正确</p>
+</div>
+
+<div id="tab-endpoint" class="tab-panel">
+<h3>Endpoint-Referenced</h3>
+<table>
+<tr><th>输入</th><td>60 FPS 端点参考 + 120 FPS 候选</td></tr>
+<tr><th>输出语义</th><td>端点约束下的插帧质量</td></tr>
+<tr><th>Schema</th><td><code>endpoint-reduced-reference-v3</code></td></tr>
+<tr><th>置信度</th><td>中等</td></tr>
+</table>
+<p><strong>核心模型：</strong></p>
+<pre><code>X_i ── M_i ── X_{i+1}
+真实端点  生成中间帧  真实端点</code></pre>
+<p>参考视频只提供端点，不提供真实中间帧。核心能力：</p>
+<ul>
+<li>双向 flow composition — 撕裂、错误运动层</li>
+<li>Reverse anchor cycle — 时序不一致、系统性模糊</li>
+<li>运动补偿时序残差 — 拖影、闪烁</li>
+<li>Edge support — 结构缺失、重影轮廓</li>
+<li>UI/文字/人物代理 — HUD 漂移、笔画粘连</li>
+</ul>
+<p><strong>比 NR 可信，但仍不等于完整 GT。</strong>人物、细物体和 UI 仍属于代理分支。</p>
+</div>
+
+<div id="tab-fr" class="tab-panel">
+<h3>Full-Reference</h3>
+<table>
+<tr><th>输入</th><td>逐帧对应的 60 FPS GT + 60 FPS 候选</td></tr>
+<tr><th>输出语义</th><td>同帧空间、时序和运动保真度</td></tr>
+<tr><th>Schema</th><td><code>fr-same-rate-fidelity-v3</code></td></tr>
+<tr><th>置信度</th><td>最高</td></tr>
+</table>
+<p><strong>核心模型：</strong></p>
+<pre><code>Reference_t  ↔  Candidate_t</code></pre>
+<p>要求逐帧对应。直接衡量空间、结构、时序和运动保真度。</p>
+<p><strong>几何策略：</strong></p>
+<ul>
+<li><code>strict</code>（默认）— 要求原始宽高完全一致</li>
+<li><code>resize-candidate</code> — 显式把候选变换到参考工作网格</li>
+<li><code>common-resolution</code> — 把两路降到共同工作分辨率</li>
+</ul>
+<div class="note">
+<strong>注意：</strong>简单的"同一场景"不足以作为 FR。必须逐帧对应，否则会 fail-closed。
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- COMMAND GENERATOR                                             -->
+<!-- ============================================================ -->
+<h2 id="cmd-gen">命令生成器</h2>
+<div class="cmd-gen">
+<div class="cmd-row"><label>Candidate</label><input id="cg-cand" value="output.mp4" oninput="genCmd()"></div>
+<div class="cmd-row"><label>Reference</label><input id="cg-ref" placeholder="可选，留空则 No-Reference" oninput="genCmd()"></div>
+<div class="cmd-row"><label>Mode</label>
+<select id="cg-mode" onchange="genCmd()">
+<option value="auto">auto（推荐）</option>
+<option value="no-reference">no-reference</option>
+<option value="endpoint-2x">endpoint-2x</option>
+<option value="full-reference">full-reference</option>
+</select></div>
+<div class="cmd-row"><label>Speed</label>
+<select id="cg-speed" onchange="genCmd()">
+<option value="fast">fast</option>
+<option value="balanced" selected>balanced</option>
+<option value="thorough">thorough</option>
+</select></div>
+<div class="cmd-row"><label>Device</label>
+<select id="cg-device" onchange="genCmd()">
+<option value="cpu">cpu</option>
+<option value="cuda">cuda</option>
+</select></div>
+<div class="cmd-row"><label>Flow</label>
+<select id="cg-flow" onchange="genCmd()">
+<option value="farneback">farneback</option>
+<option value="raft">raft</option>
+</select></div>
+<div class="cmd-row"><label>Output</label><input id="cg-out" value="runs/example" oninput="genCmd()"></div>
+<div style="position:relative">
+<button class="copy-btn" onclick="copyCmd()">复制</button>
+</div>
+<div id="cg-output" class="cmd-output"></div>
+</div>
+
+<!-- ============================================================ -->
+<!-- REPORT GUIDE                                                  -->
+<!-- ============================================================ -->
+<h2 id="report-guide">报告阅读指南</h2>
+
+<h3>Overall Score</h3>
+<p>表示模式对应的工程质量或风险（0-100），<strong>不是 MOS</strong>。</p>
+
+<h3>Confidence</h3>
+<p>明确区分：</p>
+<ul>
+<li><strong>Score：</strong>视频表现如何</li>
+<li><strong>Confidence：</strong>本次评测条件和证据有多可靠</li>
+</ul>
+
+<h3>Status</h3>
+<table>
+<tr><th>ok</th><td>核心流程完整</td></tr>
+<tr><th>degraded</th><td>部分阶段或媒体导出退化，但仍有有效结果</td></tr>
+<tr><th>failed</th><td>输入契约或核心指标不成立，不发布有效分数</td></tr>
+</table>
+
+<h3>Subscores</h3>
+<p>按模式动态展示。NR 包含 temporal_stability、motion_smoothness、phase_consistency 等；FR 包含 spatial_fidelity、structural_fidelity、temporal_fidelity、motion_fidelity。</p>
+
+<h3>Cadence（仅 NR）</h3>
+<ul>
+<li><strong>Common-Time Quality：</strong>公共时间尺度质量</li>
+<li><strong>Cadence Integrity：</strong>相邻帧复制/冻结完整性</li>
+<li><strong>Cadence Risk：</strong>cadence 风险系数</li>
+</ul>
+
+<h3>Timeline 和 Issue Card</h3>
+<ul>
+<li>颜色代表严重等级（severe / high / medium / low）</li>
+<li>轨道代表 Temporal、Motion、Structure、UI/Text 等问题域</li>
+<li>点击时间线跳转到问题卡片</li>
+<li>证据字段解释观测值与阈值</li>
+<li>可能原因标记为"推断"</li>
+</ul>
+
+<h3>Evidence Assets</h3>
+<table>
+<tr><th>媒体</th><th>用途</th></tr>
+<tr><td>Original</td><td>查看问题时间段原始候选</td></tr>
+<tr><td>Overlay</td><td>在候选视频上叠加空间风险</td></tr>
+<tr><td>Compare</td><td>查看模式相关的参考/候选/误差</td></tr>
+<tr><td>Heatmap</td><td>查看选定指标的空间分布</td></tr>
+<tr><td>Keyframe</td><td>查看高风险区域框</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<!-- SYSTEM ARCHITECTURE                                           -->
+<!-- ============================================================ -->
+<h2 id="arch">系统架构</h2>
+<div class="arch-grid">
+<div class="arch-item">
+<h4>io/</h4>
+<p>视频读取与对齐</p>
+<div class="io">输入：视频路径 → 输出：帧 + PTS + 对齐</div>
+</div>
+<div class="arch-item">
+<h4>sampling/</h4>
+<p>全片扫描与窗口选择</p>
+<div class="io">输入：帧序列 → 输出：均匀 + 风险窗口</div>
+</div>
+<div class="arch-item">
+<h4>motion/</h4>
+<p>独立光流后端</p>
+<div class="io">RAFT / Farneback / warp / 遮挡 / camera</div>
+</div>
+<div class="arch-item">
+<h4>metrics/</h4>
+<p>模式核心指标</p>
+<div class="io">NR / Endpoint / FR 独立执行器</div>
+</div>
+<div class="arch-item">
+<h4>regions/</h4>
+<p>UI、文字、人物、细物体代理</p>
+<div class="io">启发式代理，不解释成语义真值</div>
+</div>
+<div class="arch-item">
+<h4>fusion/</h4>
+<p>模式独立归一化与融合</p>
+<div class="io">特征归一化 → 加权 → 子分数 → 总分</div>
+</div>
+<div class="arch-item">
+<h4>diagnosis/</h4>
+<p>多证据规则与空间定位</p>
+<div class="io">标量 → DiagnosticIssue（多证据）</div>
+</div>
+<div class="arch-item">
+<h4>report/</h4>
+<p>JSON、HTML、Heatmap、Clips</p>
+<div class="io">结构化报告 + 媒体证据导出</div>
+</div>
+<div class="arch-item">
+<h4>calibration/</h4>
+<p>标定和相关性验证</p>
+<div class="io">各模式独立验证工具</div>
+</div>
+<div class="arch-item">
+<h4>testing/</h4>
+<p>合成视频和参考插值器</p>
+<div class="io">确定性缺陷注入 + 评测</div>
+</div>
+<div class="arch-item">
+<h4>execution/</h4>
+<p>Batch 等执行入口</p>
+<div class="io">inspect-batch + 首页生成</div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- VALIDATION & LIMITATIONS                                      -->
+<!-- ============================================================ -->
+<h2 id="limits">验证与可信边界</h2>
+
+<h3>已验证</h3>
+<div class="check">数学方向单元测试</div>
+<div class="check">三模式路由测试</div>
+<div class="check">合成缺陷变形测试</div>
+<div class="check">媒体 E2E</div>
+<div class="check">Artifact 失败隔离</div>
+<div class="check">Farneback 与 RAFT 路径</div>
+<div class="check">Feature Contract 与 Package Version</div>
+
+<h3>未完成</h3>
+<div class="cross">真实人工主观标定</div>
+<div class="cross">跨游戏、跨内容阈值稳定性</div>
+<div class="cross">4K 和长视频完整性能矩阵</div>
+<div class="cross">NR 对视觉上合理 hallucination 的判断</div>
+<div class="cross">部分语义代理分支的真实语义能力</div>
+
+<!-- ============================================================ -->
+<!-- TROUBLESHOOTING                                               -->
+<!-- ============================================================ -->
+<h2 id="trouble">常见问题</h2>
+
+<h3>overall_score 是 null？</h3>
+<p>表示评测失败（<code>status=failed</code>）。查看 <code>report.html</code> 中的失败原因。常见原因：</p>
+<ul>
+<li>输入契约不成立（如 NR 模式下提供了 reference）</li>
+<li>对齐不可靠（FR 模式下帧率不匹配）</li>
+<li>核心特征缺失（视频太短或太简单）</li>
+</ul>
+
+<h3>两个模型的分数可以直接比较吗？</h3>
+<p>只有同一模式、同一参考、同一内容才可以比较。跨模式分数使用不同数学标尺，禁止直接排序。</p>
+
+<h3>可以只评分不导出视频吗？</h3>
+<p>可以，使用 <code>--no-clips</code> 跳过坏例视频导出，速度更快。</p>
+
+<h3>为什么 NR 的 confidence 比较低？</h3>
+<p>NR 无法证明真实轨迹或显露区域内容，因此 confidence 上限为 0.75。这是诚实的限制，不是缺陷。</p>
+
+<!-- ============================================================ -->
+<!-- FOOTER                                                        -->
+<!-- ============================================================ -->
+<h2>完整教程</h2>
+<p>需要更详细的技术原理、指标类别、阈值说明？请查阅项目源码中的 <code>rr_vfiqa/</code> 目录，或运行 <code>python -m pytest</code> 查看测试用例。</p>
+
+</section>
+
+<script>
+function switchTab(el, id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-' + id).classList.add('active');
+}
+function genCmd() {
+  const cand = document.getElementById('cg-cand').value || 'output.mp4';
+  const ref = document.getElementById('cg-ref').value;
+  const mode = document.getElementById('cg-mode').value;
+  const speed = document.getElementById('cg-speed').value;
+  const device = document.getElementById('cg-device').value;
+  const flow = document.getElementById('cg-flow').value;
+  const out = document.getElementById('cg-out').value || 'runs/example';
+  let cmd = 'rr-vfiqa inspect --candidate ' + cand;
+  if (ref && mode === 'auto') cmd += ' --reference ' + ref;
+  else if (ref) cmd += ' --reference ' + ref;
+  if (mode !== 'auto') cmd += ' --mode ' + mode;
+  cmd += ' --speed ' + speed;
+  if (device === 'cuda') cmd += ' --device cuda';
+  if (flow === 'raft') cmd += ' --flow-backend raft';
+  cmd += ' --out ' + out;
+  document.getElementById('cg-output').textContent = cmd;
+}
+function copyCmd() {
+  const text = document.getElementById('cg-output').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = '已复制!';
+    setTimeout(() => btn.textContent = '复制', 1500);
+  });
+}
+genCmd();
+</script>
+</body>
+</html>

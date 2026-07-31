@@ -1,16 +1,85 @@
-# rr_vfiqa — 多模式视频插帧质量评测
+# rr_vfiqa
 
-`rr_vfiqa` 是面向游戏视频插帧的研究型评测框架。项目现在明确区分三种数学条件不同的评测模式，不会再把任意输入都套入 60→120 FPS 的奇偶帧假设。
+> 接收一条候选视频以及可选参考视频，自动判断能够安全使用的评测条件，输出质量分数、置信度、问题时间段、热力图、关键帧和坏例视频。
 
-| 模式 | 输入 | 输出含义 | 可信度定位 |
+```
+不要求用户手动选择 NR / Endpoint / FR
+不能安全判断时 fail-closed，不发布伪分数
+分数是工程风险或保真度，不是人类主观 MOS
+```
+
+| 模式 | 输入 | 输出含义 | 可信度 |
 |---|---|---|---|
-| `no-reference` | 单条 60 或 120 FPS 视频 | 时序稳定性与伪影风险 | 最低，不代表真实插帧误差 |
-| `endpoint-2x` | 60 FPS 端点参考 + 120 FPS 候选 | 端点约束下的插帧质量 | 中等，是原有成熟内核 |
+| `no-reference` | 单条 60 或 120 FPS 视频 | 时序稳定性与伪影风险 | 最低 |
+| `endpoint-2x` | 60 FPS 端点参考 + 120 FPS 候选 | 端点约束下的插帧质量 | 中等 |
 | `full-reference` | 逐帧对应的 60 FPS GT + 60 FPS 候选 | 同帧空间与时序保真度 | 最高 |
 
-三种模式具有独立的输入契约、特征集合、融合权重、子分数和 `score_schema`。不同模式的 `overall_score` 不在同一标尺上，禁止跨模式直接排序。
+三种模式的 `overall_score` 不在同一标尺上，**禁止跨模式直接比较**。
 
-> 当前状态仍是 research prototype / metric development framework。三种模式都使用未完成真实数据标定的公式融合，不能仅凭 `overall_score` 作为生产上线门禁。
+> **项目状态：** research prototype / metric development framework。公式融合未完成真实数据标定，`production_gate=false`，不能仅凭 `overall_score` 作为生产上线门禁。
+
+---
+
+## 60 秒快速开始
+
+```bash
+pip install -e ".[torch]"
+```
+
+只有候选视频：
+
+```bash
+rr-vfiqa inspect --candidate output.mp4 --out runs/nr
+```
+
+候选 + 参考（自动判断模式）：
+
+```bash
+rr-vfiqa inspect \
+  --candidate output.mp4 \
+  --reference source.mp4 \
+  --out runs/example
+```
+
+`inspect` 自动完成：**模式路由 → 评分 → 诊断 → HTML 报告与坏例视频**。
+
+---
+
+## 我该提供哪些输入
+
+| 你拥有的文件 | 自动模式 | 可以回答的问题 |
+|---|---|---|
+| 只有候选视频 | No-Reference | 是否存在冻结、交替、抖动、模糊、UI 不稳定等风险 |
+| 原始低帧率端点 + 2× 插帧结果 | Endpoint-Referenced | 中间帧是否符合端点运动和结构约束 |
+| 同帧率逐帧 GT + 候选 | Full-Reference | 候选与真实目标的空间、时序和运动保真度 |
+
+```text
+只有 candidate           → No-Reference
+candidate + reference     → FPS≈2×  → Endpoint-Referenced
+                          → FPS相同 → Full-Reference
+无法安全满足任何契约      → fail-closed，生成 failed 报告，不猜测模式
+```
+
+---
+
+## 输出结果是什么
+
+```text
+runs/example/
+├── report.json          # 完整结构化结果
+├── report.html          # 交互式诊断报告
+├── timeline.md          # 时间线文本
+├── timeline.png         # 时间线图
+├── heatmaps/            # 问题空间热力图
+│   └── issue_000_*.png
+└── badcases/            # 坏例视频与关键帧
+    ├── issue_000_original.mp4
+    ├── issue_000_overlay.mp4
+    ├── issue_000_compare.mp4
+    └── issue_000_keyframe.png
+```
+
+[打开完整交互教程](docs/index.html)
 
 ---
 
@@ -18,380 +87,178 @@
 
 ```bash
 pip install -e .            # NumPy、OpenCV、SciPy、PyAV
-pip install -e ".[torch]"   # RAFT 光流，推荐 GPU 环境使用
-pip install -e ".[fusion]"  # Endpoint 模式的 LightGBM 校准器
-pip install -e ".[vqa]"     # NR 模式的可选 pyIQA/NIQE 弱先验
+pip install -e ".[torch]"   # RAFT 光流（推荐 GPU）
+pip install -e ".[fusion]"  # Endpoint LightGBM 校准器
+pip install -e ".[vqa]"     # NR 可选 pyIQA/NIQE 弱先验
 pip install -e ".[dev]"     # pytest
 ```
 
-NR 默认使用 `--vqa-backend none`，因此基础 schema 不受本机可选依赖影响。若明确启用 `--vqa-backend pyiqa-niqe`，报告 schema 会增加 `+niqe` 后缀，并记录该后端契约；不再提供会随环境变化的 `auto` 行为。
-
 ---
 
-## 快速使用
+## 常用工作流
 
-推荐使用统一的显式入口：
-
-```python
-from rr_vfiqa import evaluate
-
-# 单视频无参考：60/120 FPS
-nr_report = evaluate(
-    candidate_video="video_120.mp4",
-    mode="no-reference",
-    preset="standard",
-)
-
-# 60→120 端点参考
-endpoint_report = evaluate(
-    reference_video="source_60.mp4",
-    candidate_video="output_120.mp4",
-    mode="endpoint-2x",
-    preset="standard",
-)
-
-# 60→60 同帧完整参考
-fr_report = evaluate(
-    reference_video="ground_truth_60.mp4",
-    candidate_video="output_60.mp4",
-    mode="full-reference",
-    preset="standard",
-)
-```
-
-三个独立执行器也可直接调用：
-
-```python
-from rr_vfiqa import (
-    evaluate_no_reference,
-    evaluate_endpoint_reference,
-    evaluate_full_reference,
-)
-```
-
-旧的 `evaluate_vfi(source_video, candidate_video, ...)` 仍保留，语义固定为 `endpoint-2x`，用于兼容已有调用方。新代码应使用 `evaluate()` 或独立执行器，让评测假设在调用点可见。
-
-CLI 必须显式指定模式：
+### 单视频自动评测
 
 ```bash
-# 单视频无参考
-rr-vfiqa evaluate \
-  --mode no-reference \
-  --candidate video_120.mp4 \
-  --out runs/nr
-
-# 60 FPS 端点参考 + 120 FPS 插帧
-rr-vfiqa evaluate \
-  --mode endpoint-2x \
-  --reference source_60.mp4 \
-  --candidate output_120.mp4 \
-  --out runs/endpoint
-
-# 逐帧对应的 60 FPS GT + 60 FPS 输出
-rr-vfiqa evaluate \
-  --mode full-reference \
-  --reference ground_truth_60.mp4 \
-  --candidate output_60.mp4 \
-  --out runs/fr
+rr-vfiqa inspect --candidate output.mp4 --out runs/nr
 ```
 
-输入契约会主动拒绝歧义：
-
-- `no-reference` 不接受 `--reference`；
-- `endpoint-2x` 和 `full-reference` 必须提供 `--reference`；
-- `full-reference` 遇到非 1× 帧率、几何不一致或低覆盖对齐时 fail-closed；
-- `endpoint-2x` 遇到不可靠的 2× 锚点对齐时 fail-closed。
-
-`full-reference` 默认使用 `--geometry-policy strict`，要求原始宽高完全一致。`resize-candidate` 会显式把候选变换到参考工作网格，`common-resolution` 则把两路降到共同工作分辨率；两者都要求宽高比一致，并分别使用 `+resize-candidate`、`+common-resolution` schema 后缀，报告也会保存 resize transform。
-
-同一模式内可以比较多个候选：
+### 批量评测
 
 ```bash
-rr-vfiqa compare \
-  --mode endpoint-2x \
-  --reference source_60.mp4 \
-  --candidates model_a.mp4 model_b.mp4 \
-  --out runs/compare
-```
-
----
-
-## 模式一：No-Reference 60/120 FPS
-
-### 评测内容
-
-NR 执行器按 PTS 构造原生跨度与固定物理跨度的虚拟端点参考：
-
-```text
-相位 0：Y0 / Y2 / Y4 ... 为虚拟端点，Y1 / Y3 ... 为中间帧
-相位 1：Y1 / Y3 / Y5 ... 为虚拟端点，Y2 / Y4 ... 为中间帧
-```
-
-两个相位只作为对称假设使用，框架不会声称某一相位是真实帧。核心证据包括：
-
-- 原生相邻三元组与固定 ±1/60 秒三元组的 flow composition；
-- 使用前后向一致性遮挡与置信度加权的 self-cycle 残差；
-- native、1/60 秒与 1/30 秒三档运动补偿残差；
-- flow velocity、acceleration 和 jerk 风险；
-- 去除全局平移后的 flow Jacobian、folding、divergence 和 curl；
-- 相机相对 KLT 点轨迹 acceleration、jerk 与方向突变；
-- 与相位标签无关的清晰度、边缘交替；
-- 统一时间尺度及 120 FPS 原生相邻帧的重复、冻结检测；
-- HUD 边缘与文字密集笔画的屏幕坐标不稳定；
-- 全局模糊、噪声、块效应；
-- 可选 pyIQA/NIQE 弱先验，融合权重不超过 5%。
-
-窗口按 PTS 和真实时间跨度选择。±33.3 ms 的窗口在 60 FPS 下通常包含 5 帧，在 120 FPS 下通常包含 9 帧，因此 120 FPS 的额外高频信息不会被固定“五帧窗口”丢掉。velocity、acceleration 和 jerk 全部使用真实时间间隔计算，而不是把不同 FPS 的帧索引差当成相同时间。
-
-公共总分只融合 1/60、1/30 秒及其他跨帧率同义特征。native cadence 特征仍会写入 `features` 用于诊断 120 FPS 单帧复制等问题，但不会进入公共总分，避免 60 FPS 的 16.67 ms 与 120 FPS 的 8.33 ms 被同一阈值混合。
-
-### 报告语义
-
-NR 报告使用：
-
-```text
-meta.mode = "no-reference"
-meta.score_schema = "nr-stability-risk-v3-common-time"
-meta.score_semantics = "temporal stability and artifact risk; not interpolation truth"
-```
-
-子分数为：
-
-- `temporal_stability`
-- `motion_smoothness`
-- `phase_consistency`
-- `ui_text_stability`
-- `technical_quality_prior`
-
-NR 无法证明真实轨迹、显露背景或清晰 hallucination 是否正确，所以 confidence 上限为 0.75。非 60/120 FPS 输入目前会 fail-closed，而不是套用未经标定的尺度。多个 NR 候选只有在 FPS 桶、时长、画幅和抽样内容指纹一致时才能排序；内容指纹使用直方图归一化 pHash，避免严重模糊或亮度变化被简单灰度 L1 误拒绝。可信调用方也可提供 `--comparison-group-id` 明确声明同源内容。`--allow-cross-content` 只会生成互相独立的报告，不发布相对排名。
-
----
-
-## 模式二：Endpoint-Referenced 60→120
-
-这是项目原有且最成熟的模式。参考视频提供每个生成中间帧前后的真实端点，但不提供真实中间帧。
-
-核心能力包括：
-
-| 指标 | 主要用途 |
-|---|---|
-| 双向 Endpoint flow composition | 撕裂、错误运动层、错误运动路径 |
-| Reverse anchor cycle | 时序不一致、系统性生成帧模糊 |
-| 运动补偿时序残差 | 拖影、闪烁、边缘摆动 |
-| 已知奇偶相位检测 | 生成帧清晰度或结构交替 |
-| Endpoint edge support | 结构缺失、重影轮廓 |
-| UI、文字、转场、卡牌代理 | HUD 漂移、笔画粘连、双重曝光 |
-| 人物、细物体、武器代理 | 局部缺失、错误归属、轨迹抖动 |
-
-该模式保留内容哈希缓存、局部 drop/duplicate 恢复、原分辨率 Audit 升级和错误阶段 fail-closed。类别融合只使用该类别所依赖阶段均成功的窗口；某个窗口的 temporal 阶段失败，不会被其他残留特征当作有效 temporal 证据。报告使用：
-
-```text
-meta.mode = "endpoint-2x"
-meta.score_schema = "endpoint-reduced-reference-v2"
-```
-
-人物、细物体、UI 等经典启发式仍会在 `meta.proxy_branches` 中声明，不能解释成语义真值。
-
----
-
-## 模式三：Full-Reference Same-Rate
-
-该模式要求 reference 与 candidate 来自同一次录制并逐帧对应。执行器先进行 1× PTS + 低分辨率内容单调对齐，再以 O(单帧图像) 内存流式扫描完整时间线；全片 Y/chroma、Sobel gradient magnitude、边缘、局部 SSIM proxy 与帧差不一致风险会参与窗口采样和融合。随后在匹配窗口中计算：
-
-- Y/RGB L1、RGB Charbonnier、PSNR、11×11 Gaussian local SSIM；
-- 明确命名的多尺度亮度与梯度 L1（不是 perceptual metric）；
-- 边缘 precision、recall、F1 与 Chamfer；
-- UI、文字、显著结构和中心运动区域的局部参考误差；
-- reference/candidate 帧间变化误差；
-- 光流差异与轨迹偏差；
-- 运动补偿残差差异；
-- flicker excess；
-- 结构持续性误差。
-
-它不会复用 Endpoint 模式的 anchor/generated 奇偶定义、半程 freeze-copy 公式或 `pair_of_candidate`。报告使用：
-
-```text
-meta.mode = "full-reference"
-meta.score_schema = "fr-same-rate-fidelity-v2"
-```
-
-子分数为 `spatial_fidelity`、`structural_fidelity`、`temporal_fidelity` 和 `motion_fidelity`。
-
-如果两条 60 FPS 视频只是同场景但不是逐帧对应，当前模式会拒绝发布有效分数。局部 DTW、时间伸缩、crop 和颜色归一化不属于当前 same-rate 契约；跨分辨率仅由显式的 `resize-candidate` 或 `common-resolution` policy 支持。
-
----
-
-## 报告与失败语义
-
-三种模式统一输出 `Report`：
-
-```json
-{
-  "overall_score": 82.4,
-  "confidence": 0.71,
-  "scores": {},
-  "event_ambiguity": 0.0,
-  "worst_windows": [],
-  "features": {},
-  "meta": {
-    "mode": "no-reference",
-    "score_schema": "nr-stability-risk-v3-common-time",
-    "status": "ok",
-    "metric_contract": "nr-metrics-v2",
-    "preset_contract": "nr-standard-v1",
-    "feature_contract_hash": "...",
-    "backend_contract": {},
-    "code_commit": "...",
-    "working_tree_dirty": false,
-    "production_gate": false
-  }
-}
-```
-
-启用 `--out` 后生成：
-
-- `report.json`
-- `timeline.md`
-- 可用 Matplotlib 时生成 `timeline.png`
-- 启用坏例导出时生成 `badcases/*.mp4`
-
-核心特征缺失、输入契约不成立或对齐不可靠时：
-
-- `overall_score` 序列化为 `null`；
-- `meta.status` 为 `failed`；
-- confidence 降到接近零；
-- CLI 返回非零退出码；
-- 阶段错误保存在 `meta.stage_errors`。
-
-coverage 统一按所有有效窗口覆盖到的唯一帧集合计算，重叠窗口不会重复计数。所有模式的报告均记录 metric、preset、feature、backend、代码提交与工作区状态契约，并固定声明 `production_gate=false`，直到各模式的真实数据标定独立完成。
-
-NR/FR 报告还会在 `meta.metric_diagnostics` 汇总 MetricResult 的失败窗口、warnings、coverage、confidence 和样例原因。Endpoint 外部校准器会记录绝对路径、模型 SHA256、feature contract hash 与 training manifest hash；所有报告也包含源码版本和 package source SHA256，非 Git 部署仍可定位构建内容。
-
----
-
-## 开箱即用诊断（`inspect` / `inspect-batch`）
-
-按 USERPLAN，项目现在提供“一条命令完成评测 + 诊断 + 可视化”的产品入口，用户无需选模式、选 preset、调阈值：
-
-```bash
-# 单视频：自动判定模式 → 打分 → 诊断 → 写 HTML 报告与坏例
-rr-vfiqa inspect --candidate output.mp4 --out result
-rr-vfiqa inspect --candidate output.mp4 --reference ref.mp4 --out result
-
-# 批量：manifest 列出多个作业，模式逐个 auto-safe 判定，输出可跳转首页
-rr-vfiqa inspect-batch --manifest jobs.json --out runs/2026-07-30
+rr-vfiqa inspect-batch --manifest jobs.json --out runs/batch
 ```
 
 ```json
 { "items": [
-  { "id": "model_a_001", "candidate": "a.mp4", "reference": "ref.mp4" },
-  { "id": "single_002",  "candidate": "b.mp4" }
+  { "id": "model_a", "candidate": "a.mp4", "reference": "ref.mp4" },
+  { "id": "single_b", "candidate": "b.mp4" }
 ] }
 ```
 
-实现要点：
+### 显式模式（高级用户）
 
-- **auto-safe 路由**（`rr_vfiqa/mode_router.py`）：仅候选→`no-reference`；参考/候选 FPS≈2 且端点对齐可靠→`endpoint-2x`；FPS 相同且逐帧对齐通过全部 fail-closed 校验→`full-reference`；否则**拒绝打分**并给出可读原因（`status=failed`，overall=null），绝不静默选错模式。
-- **自动三级预算**：对外只暴露 `--speed fast|balanced|thorough`（默认 `balanced`）。`balanced` 自动启用 tier-3：高风险窗口在原分辨率复核，无需用户手动选 audit。显式 `evaluate --preset standard` 行为不变。
-- **Cadence Integrity**（NR，USERPLAN §5）：native 复制/冻结 cadence 以保守乘法惩罚 `S_common·exp(-λR_cad)` 进入总分；报告同时给出 `common_time_quality` 与 `cadence_integrity`，120 FPS 复制帧不再被共同时间尺度掩盖。
-- **统一诊断证据引擎**（`rr_vfiqa/diagnosis/`）：把每窗口标量按“多证据组合”规则（freeze / blur / ghost / tear / UI / FR 色彩 / FR 空间 / FR 时序）转成 `DiagnosticIssue`，含严重度、置信度、时间段、证据强度与**推断**的可能原因；写入 `meta.diagnostics`。
-- **HTML 诊断报告** `report.html`：自包含（无外链/外脚本），顶部 KPI（总分/置信度/质量等级/问题数/受影响时长/最严重问题）+ cadence 条 + 子分数 + 多轨道可点击时间线 + 问题卡片。
-- **坏例视频**：`badcases/` 内除原始截取外，另生成 `issue_NNN_overlay.mp4`（严重度色条 + 标题 + 时间码 + 运动代理/误差热力叠加）。
-- 批量首页 `index.html` **只列示与跳转，不跨模型排名**（不同模式/参考/内容的分数不可比）。
+```bash
+rr-vfiqa evaluate --mode no-reference     --candidate video.mp4 --out runs/nr
+rr-vfiqa evaluate --mode endpoint-2x      --reference src.mp4 --candidate out.mp4 --out runs/ep
+rr-vfiqa evaluate --mode full-reference   --reference gt.mp4  --candidate out.mp4 --out runs/fr
+```
 
-分数始终标注为**确定性工程风险等级**，不声称等价于人类 MOS；所有“可能原因”均标记为推断。
+### 同源模型比较
+
+```bash
+rr-vfiqa compare --mode endpoint-2x --reference src.mp4 \
+  --candidates model_a.mp4 model_b.mp4 --out runs/compare
+```
 
 ---
 
-## Preset
+## 如何理解分数
 
-| Preset | 扫描宽度 | 窗口数量 | 光流宽度 | Endpoint 区域分支 | Endpoint Audit |
-|---|---:|---:|---:|---|---|
-| `fast` | 320 | 8+8 | 480 | 关闭 | 无 |
-| `standard` | 384 | 16+32 | 960 | 轻量 | 无 |
-| `audit` | 480 | 24+48 | 960 | 完整 | 最高风险 10%，最多 64 个 |
+| 字段 | 含义 |
+|---|---|
+| `overall_score` | 模式对应的工程质量或风险（0-100），**不是 MOS** |
+| `confidence` | 本次评测条件和证据的可靠程度（0-1） |
+| `status` | `ok` / `degraded` / `failed` |
+| `scores` | 各维度子分数 |
 
-NR/FR 使用相同的资源预算，但使用 PTS 时间窗口和各自的指标执行器。Endpoint 的 Audit 会在原分辨率重新构建 candidate/source flow、遮挡、camera、edge 和人物 ROI。
+```text
+ok        → 核心流程完整
+degraded  → 部分阶段或媒体导出退化，但仍有有效结果
+failed    → 输入契约或核心指标不成立，overall_score = null
+```
+
+NR 的 `confidence` 上限为 0.75，因为它无法证明真实轨迹或显露区域内容。
 
 ---
 
-## 校准、测试与基准
+## 三种评测模式
 
-Endpoint 原有的合成标定与基准入口继续保留：
+详细技术讲解见 [docs/index.html](docs/index.html)。
 
-```bash
-python -m rr_vfiqa.calibration.validate --synthetic --workdir cal_run
-python -m rr_vfiqa.calibration.model_validation --workdir mv_run
-python -m rr_vfiqa.calibration.detection_eval --workdir det_run
-python -m rr_vfiqa.benchmark --source src.mp4 --candidates a.mp4 b.mp4
-```
+### No-Reference
 
-现有 Endpoint 合成证据不能迁移成 NR 或 FR 的校准证据。三种模式需要分别收集真实样本、人工排序与阈值：
+- **输入：** 单条 60/120 FPS 视频
+- **输出语义：** 时序稳定性和伪影风险
+- **Schema：** `nr-stability-risk-v4`
+- **能发现：** 冻结、交替模糊、抖动、UI 漂移、屏幕不稳定
+- **不能证明：** 真实运动轨迹、显露背景、hallucination 是否正确
 
-1. NR 60/120 的真实伪影与稳定性标注；
-2. Endpoint 的真实 120/240 FPS 伪 GT 和人工 A/B；
-3. FR 60→60 的逐帧 GT、真实模型输出与场景外验证。
+### Endpoint-Referenced
 
-NR 与 FR 的方向性验证使用独立 manifest，不共享 score schema 或阈值：
+- **输入：** 60 FPS 端点参考 + 120 FPS 候选
+- **输出语义：** 端点约束下的插帧质量
+- **Schema：** `endpoint-reduced-reference-v3`
+- **核心能力：** 双向 flow composition、reverse anchor cycle、MCT 残差、edge support、UI/文字/人物代理
 
-```bash
-python -m rr_vfiqa.calibration.mode_validation \
-  --manifest validation/nr_manifest.json \
-  --output validation/nr_metrics.json
+### Full-Reference
 
-python -m rr_vfiqa.calibration.mode_validation \
-  --manifest validation/fr_manifest.json \
-  --output validation/fr_metrics.json
-```
-
-manifest 顶层指定 `mode`，每个 case 提供 `better`、`worse`；FR case 额外提供 `reference`。该 harness 会报告模式内方向性准确率、分数 margin、报告状态与置信度、期望时间段/伪影类型的定位命中，以及按特征注册表方向计算的逐特征准确率。真实数据与独立模型证据未达到门槛前，输出始终保持 `production_gate=false`。
-
-运行测试：
-
-```bash
-python -m pytest
-RR_VFIQA_TEST_FLOW=raft python -m pytest
-```
-
-测试覆盖旧 Endpoint 回归、模式输入契约、NR 60/120 时间窗口、FR 同帧完美匹配与冻结劣化、对齐 fail-closed、缓存隔离、warp 方向、校准器和合成坏例。
+- **输入：** 逐帧对应的 60 FPS GT + 60 FPS 候选
+- **输出语义：** 同帧空间、时序和运动保真度
+- **Schema：** `fr-same-rate-fidelity-v3`
+- **核心能力：** Y/RGB L1、SSIM、边缘 F1/Chamfer、UI/文字 ROI 误差、光流差异、flicker excess
+- **几何策略：** `strict`（默认，要求同分辨率）/ `resize-candidate` / `common-resolution`
 
 ---
 
-## 目录结构
+## 速度、设备与可选后端
+
+```bash
+rr-vfiqa inspect --candidate out.mp4 --out runs/fast      --speed fast
+rr-vfiqa inspect --candidate out.mp4 --out runs/balanced  -- speed balanced     # 默认，含 tier-3 审计
+rr-vfiqa inspect --candidate out.mp4 --out runs/thorough  --speed thorough
+
+rr-vfiqa inspect --candidate out.mp4 --device cuda --flow-backend raft    # GPU 精确光流
+rr-vfiqa inspect --candidate out.mp4 --device cpu  --flow-backend farneback # CPU 默认
+```
+
+---
+
+## 验证、性能与测试
+
+```bash
+python -m pytest                                          # CPU Farneback 路径
+RR_VFIQA_TEST_FLOW=raft python -m pytest                   # GPU RAFT 路径
+```
+
+测试覆盖：数学方向单元测试、三模式路由、合成缺陷变形测试、媒体 E2E、Artifact 失败隔离、Farneback/RAFT 路径。
+
+---
+
+## 完整教程
+
+需要完整的技术路线、三种模式原理、报告阅读指南、命令生成器和架构说明？
+
+**[打开 docs/index.html](docs/index.html)**
+
+---
+
+## 项目状态和限制
+
+- 公式融合未完成真实数据标定，`production_gate=false`
+- NR 非 60/120 FPS 输入会 fail-closed
+- FR 要求逐帧对应，同场景但非逐帧对应会拒绝打分
+- NR/FR 不能判断视觉上合理的 hallucination
+- 跨模式比较 `overall_score` 无意义
+- 4K 和长视频完整性能矩阵尚未建立
+
+---
+
+## 常见问题
+
+**Q: 我有参考视频，但帧率不是精确的 2× 怎么办？**
+A: `inspect` 的 auto-safe 路由会检测 FPS 比例和对齐可靠性。不满足 2× 锚点对齐时会 fail-closed，不会猜测模式。
+
+**Q: 两个模型的分数可以直接比较吗？**
+A: 只有同一模式、同一参考、同一内容才可以比较。跨模式分数使用不同数学标尺，禁止直接排序。
+
+**Q: 为什么 `overall_score` 是 null？**
+A: 表示评测失败（`status=failed`）。查看 `report.html` 中的失败原因。常见原因：输入契约不成立、对齐不可靠、核心特征缺失。
+
+**Q: 可以只评分不导出视频吗？**
+A: 可以，使用 `--no-clips` 跳过坏例视频导出，速度更快。
+
+---
+
+## 开发与贡献
 
 ```text
 rr_vfiqa/
-├── multimode.py                 统一分发、NR/FR 执行器、同模式比较
-├── pipeline.py                  Endpoint-2x 执行器与旧 API 兼容层
-├── config.py                    EvaluationMode 与模式输入契约
-├── schema.py                    对齐、窗口、报告和 warp 数据结构
-├── io/
-│   ├── video_reader.py          PyAV + PTS 解码
-│   ├── timestamp_alignment.py   Endpoint 2× 对齐
-│   └── full_reference_alignment.py  Full-Reference 1× 对齐
-├── sampling/
-│   ├── window_selector.py       Endpoint 生成帧窗口
-│   ├── time_window_selector.py  NR/FR 时间跨度窗口
-│   ├── temporal_plan.py         NR 的 PTS lag/triplet/flow 规划
-│   └── full_reference_scan.py   FR 全时间线低分辨率参考扫描
-├── metrics/
-│   ├── no_reference.py          双相位自参考与通用时序指标
-│   ├── full_reference.py        空间/时序同帧参考指标
-│   └── ...                      Endpoint 原有指标
-├── fusion/
-│   ├── score_schema.py          Endpoint 融合
-│   ├── mode_score_schemas.py    NR/FR 独立融合
-│   └── feature_registry.py      版本化特征、方向、单位与必需项
-├── cache/                       Endpoint source 特征缓存
-├── motion/                      RAFT/Farneback、warp、遮挡、camera
-├── regions/                     Endpoint UI/文字/人物/细物体代理
-├── models/                      flow/tracker/depth/VQA 后端
-├── report/                      JSON、timeline、badcase、HTML、overlay
-├── diagnosis/                   统一诊断证据引擎 + cadence integrity
-├── execution/                   inspect-batch 批量入口与首页
-├── mode_router.py               auto-safe 模式路由（fail-closed）
-├── testing/                     合成场景与缺陷语料
-└── calibration/                 各模式独立验证与 Endpoint 标定工具
+├── io/                 视频读取与对齐
+├── sampling/           全片扫描与窗口选择
+├── motion/             独立光流后端
+├── metrics/            模式核心指标
+├── regions/            UI、文字、人物、细物体代理
+├── fusion/             模式独立归一化与融合
+├── diagnosis/          多证据规则与空间定位
+├── report/             JSON、HTML、Heatmap、Clips
+├── calibration/        标定和相关性验证
+├── testing/            合成视频和参考插值器
+└── execution/          Batch 等执行入口
 ```
 
-最重要的使用原则只有一个：先确认手中的 reference 到底是“端点参考”还是“逐帧 Ground Truth”，再选择模式。`inspect` 的 auto-safe 路由会在证据不足时**拒绝猜测并拒绝打分**，因此可以放心地让程序自动判定；只有显式 `evaluate --mode` 才绕过路由。
+最重要的使用原则：先确认手中的 reference 到底是"端点参考"还是"逐帧 Ground Truth"。`inspect` 的 auto-safe 路由会在证据不足时**拒绝猜测并拒绝打分**，因此可以放心地让程序自动判定。
+
+---
+
+当前版本：`0.4.0`
