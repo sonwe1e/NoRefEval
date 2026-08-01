@@ -140,10 +140,12 @@ def _compute_fr_error_maps(candidate, reference, cfg, backend, window_features,
 
 def _fr_tier3(candidate, reference, cfg, backend, window_features, worst,
               alignment, *, top_k: int = 6):
-    """Tier-3 native-resolution re-evaluation for FR windows (USERPLAN P3).
+    """Tier-3 re-evaluation for FR windows (USERPLAN P3).
 
-    Re-runs ``full_reference.compute_window`` for the top-risk windows at
-    native resolution.  Updates scalars in place and labels ``audited``.
+    Re-runs ``full_reference.compute_window`` for the top-risk windows at a
+    *capped* resolution (USERPLAN §6 P0.2: not native by default, to keep
+    RAFT within a safe working grid on 16 GB GPUs).  Updates scalars in place
+    and labels ``audited``.
     """
     p = cfg.preset
     eff_frac = (p.audit_top_fraction if p.audit_top_fraction > 0
@@ -152,6 +154,9 @@ def _fr_tier3(candidate, reference, cfg, backend, window_features, worst,
                else (p.auto_audit_max if p.auto_audit else 0))
     if eff_frac <= 0 or not worst:
         return
+    # USERPLAN §6 P0.2: cap the Tier-3 working resolution.
+    tier3_width = min(reference.meta.width, p.tier3_max_width) \
+        if p.tier3_max_width > 0 else reference.meta.width
     ranked = sorted(window_features,
                     key=lambda wf: -float(wf.scalars.get("fr_l1_y",
                                                          float("nan"))))
@@ -162,8 +167,8 @@ def _fr_tier3(candidate, reference, cfg, backend, window_features, worst,
             ref_indices = alignment.reference_of_candidate[wf.window.indices]
             if np.any(ref_indices < 0) or np.any(np.diff(ref_indices) <= 0):
                 continue
-            rb = reference.read_frames(ref_indices)   # native resolution
-            cb = candidate.read_frames(wf.window.indices)
+            rb = reference.read_frames(ref_indices, width=tier3_width)
+            cb = candidate.read_frames(wf.window.indices, width=tier3_width)
             h, w = rb.height, rb.width
             cb = _resize_bundle(cb, width=w, height=h)
             rf = WindowFlows(rb, backend)
@@ -181,12 +186,13 @@ def _fr_tier3(candidate, reference, cfg, backend, window_features, worst,
 
 
 def _nr_fr_tier3(candidate, cfg, backend, learned, window_features, worst):
-    """Tier-3 native-resolution re-evaluation for NR windows (USERPLAN P3).
+    """Tier-3 re-evaluation for NR windows (USERPLAN P3).
 
-    Re-runs ``no_reference.compute_window`` for the top-risk windows at native
-    resolution (sharper flows/edges).  Updates the window scalars in place and
-    labels the window ``audited``.  Capped so runtime stays bounded; failures
-    never abort the report.
+    Re-runs ``no_reference.compute_window`` for the top-risk windows at a
+    *capped* resolution (USERPLAN §6 P0.2: not native by default, to keep
+    RAFT within a safe working grid on 16 GB GPUs).  Updates the window
+    scalars in place and labels the window ``audited``.  Capped so runtime
+    stays bounded; failures never abort the report.
     """
     p = cfg.preset
     eff_frac = (p.audit_top_fraction if p.audit_top_fraction > 0
@@ -195,6 +201,9 @@ def _nr_fr_tier3(candidate, cfg, backend, learned, window_features, worst):
                else (p.auto_audit_max if p.auto_audit else 0))
     if eff_frac <= 0 or not worst:
         return
+    # USERPLAN §6 P0.2: cap the Tier-3 working resolution.
+    tier3_width = min(candidate.meta.width, p.tier3_max_width) \
+        if p.tier3_max_width > 0 else candidate.meta.width
     ranked = sorted(window_features,
                     key=lambda wf: -float(wf.scalars.get("nr_common_self_cycle",
                                                          float("nan"))))
@@ -202,7 +211,7 @@ def _nr_fr_tier3(candidate, cfg, backend, learned, window_features, worst):
     audit_wfs = ranked[:n_audit]
     for wf in audit_wfs:
         try:
-            bundle = candidate.read_frames(wf.window.indices, width=None)
+            bundle = candidate.read_frames(wf.window.indices, width=tier3_width)
             if bundle.rgb.shape[0] < 5:
                 continue
             flows = WindowFlows(bundle, backend)
@@ -906,6 +915,16 @@ def evaluate_no_reference(
             "vqa": getattr(learned, "name", "none"),
         },
     ))
+    # USERPLAN §6 P0.5: collect backend performance telemetry for the report.
+    from .motion.flow_estimator import collect_backend_telemetry
+    p = cfg.preset
+    tier3_width_nr = min(candidate.meta.width, p.tier3_max_width) \
+        if p.tier3_max_width > 0 else candidate.meta.width
+    performance = collect_backend_telemetry(
+        backend,
+        tier2_flow_width=p.flow_width,
+        tier3_flow_width=tier3_width_nr,
+    )
     report = Report(
         overall_score=overall,
         confidence=confidence,
@@ -914,6 +933,7 @@ def evaluate_no_reference(
         worst_windows=worst,
         features=_feature_summary(valid),
         meta=meta,
+        performance=performance,
     )
     _write_outputs(
         report, valid, candidate, candidate_video, out_dir, export_clips)
@@ -1219,6 +1239,16 @@ def evaluate_full_reference(
             EvaluationMode.FULL_REFERENCE),
         backend_contract={"flow": backend.cache_identity()},
     ))
+    # USERPLAN §6 P0.5: collect backend performance telemetry for the report.
+    from .motion.flow_estimator import collect_backend_telemetry
+    p = cfg.preset
+    tier3_width_fr = min(reference.meta.width, p.tier3_max_width) \
+        if p.tier3_max_width > 0 else reference.meta.width
+    performance = collect_backend_telemetry(
+        backend,
+        tier2_flow_width=p.flow_width,
+        tier3_flow_width=tier3_width_fr,
+    )
     report = Report(
         overall_score=overall,
         confidence=confidence,
@@ -1227,6 +1257,7 @@ def evaluate_full_reference(
         worst_windows=worst,
         features={**_feature_summary(valid), **reference_globals},
         meta=meta,
+        performance=performance,
     )
     _write_outputs(
         report, valid, candidate, candidate_video, out_dir, export_clips,

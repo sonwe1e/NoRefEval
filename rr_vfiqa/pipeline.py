@@ -262,15 +262,23 @@ def evaluate_endpoint_reference(
         wfs.append(wf)
 
     # --- tier 3: audit escalation (§10) -------------------------------------
-    # The highest-risk windows get the core metrics recomputed at native
-    # resolution (sharper flows/edges), capped so runtime stays bounded.
-    # USERPLAN §3: ``auto_audit`` lets the *balanced* path escalate high-risk
-    # windows automatically without the caller opting into an "audit" preset.
+    # The highest-risk windows get the core metrics recomputed at a higher
+    # resolution (sharper flows/edges), capped so runtime and VRAM stay
+    # bounded.  USERPLAN §3: ``auto_audit`` lets the *balanced* path escalate
+    # high-risk windows automatically without the caller opting into an
+    # "audit" preset.
+    # USERPLAN §6 P0.2: Tier-3 is *not* native resolution by default — the
+    # ``tier3_max_width`` cap keeps RAFT within a safe working grid on 16 GB
+    # GPUs.  Native resolution is only used when the source is already below
+    # the cap.
     n_audit = 0
     eff_frac = (p.audit_top_fraction if p.audit_top_fraction > 0
                 else (p.auto_audit_fraction if p.auto_audit else 0.0))
     eff_max = (p.audit_max_windows if p.audit_max_windows > 0
                else (p.auto_audit_max if p.auto_audit else 0))
+    # USERPLAN §6 P0.2: cap the Tier-3 working resolution.
+    tier3_width = min(source.meta.width, p.tier3_max_width) \
+        if p.tier3_max_width > 0 else source.meta.width
     if eff_frac > 0 and wfs:
         ranked = sorted(wfs, key=lambda wf: -max(
             _window_category_errors(wf).values(), default=0.0))
@@ -278,14 +286,14 @@ def evaluate_endpoint_reference(
                       max(1, int(round(len(ranked) * eff_frac))))
         audit_wfs = ranked[:n_audit]
         audit_cache = SourceCache(
-            source, cfg, flow_width=source.meta.width, backend=backend)
+            source, cfg, flow_width=tier3_width, backend=backend)
         audit_pairs = {wf.window.pair for wf in audit_wfs if wf.window.pair >= 0}
         audit_cache.ensure_pairs(
             audit_pairs, skip=set(int(c) for c in alignment.scene_cuts))
-        say(f"tier-3 audit: re-evaluating top {n_audit} windows at native resolution")
+        say(f"tier-3 audit: re-evaluating top {n_audit} windows at width {tier3_width}")
         for wf in audit_wfs:
             try:
-                nb = candidate.read_frames(wf.window.indices, width=None)
+                nb = candidate.read_frames(wf.window.indices, width=tier3_width)
                 if nb.rgb.shape[0] < p.window_frames:
                     continue
                 nw = WindowFlows(nb, backend)
@@ -300,7 +308,7 @@ def evaluate_endpoint_reference(
                 ):
                     wf.scalars.update(fn())
                 if p.run_tracker:
-                    # Rebuild the proxy ROI at native resolution before passing
+                    # Rebuild the proxy ROI at the audit resolution before passing
                     # it to OpenCV/CoTracker; never reuse the tier-2 960px mask.
                     wf.scalars.update(character_segmenter.compute_window(
                         nb, nw, npair, cfg))
@@ -526,10 +534,19 @@ def evaluate_endpoint_reference(
             if calibrator_contract else None),
     ))
 
+    # USERPLAN §6 P0.5: collect backend performance telemetry for the report.
+    from .motion.flow_estimator import collect_backend_telemetry
+    performance = collect_backend_telemetry(
+        backend,
+        tier2_flow_width=p.flow_width,
+        tier3_flow_width=tier3_width,
+    )
+
     report = Report(overall_score=overall,
                     confidence=conf, scores=subscores,
                     event_ambiguity=event_amb, worst_windows=worst,
-                    features=feat_out, meta=meta)
+                    features=feat_out, meta=meta,
+                    performance=performance)
 
     if out_dir:
         say("writing reports")

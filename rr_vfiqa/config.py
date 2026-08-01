@@ -65,6 +65,11 @@ class Preset:
     full_res_edges: bool = False
     run_tracker: bool = False             # KLT/CoTracker weapon tracking
     run_depth: bool = False
+    # USERPLAN §6 P0.2: cap Tier-3 audit flow width.  Native-resolution RAFT
+    # on a 16 GB GPU OOMs (see USERPLAN root-cause analysis); the cap keeps
+    # the audit working grid bounded.  0 == "no cap" (use native resolution),
+    # which is only safe for low-resolution sources or large-VRAM GPUs.
+    tier3_max_width: int = 960
     # USERPLAN §3: when True the *pipeline* auto-escalates the highest-risk
     # windows to native resolution even if the preset sets no explicit audit
     # budget, so callers do not have to pick an "audit" tier by hand.  Off by
@@ -95,6 +100,7 @@ FAST = Preset(
     risk_windows=8,
     flow_width=480,
     run_region_branches=False,
+    tier3_max_width=480,
 )
 
 STANDARD = Preset(
@@ -104,6 +110,7 @@ STANDARD = Preset(
     risk_windows=32,
     flow_width=960,
     run_region_branches=True,
+    tier3_max_width=960,
 )
 
 AUDIT = Preset(
@@ -117,6 +124,8 @@ AUDIT = Preset(
     audit_max_windows=64,
     full_res_edges=True,
     run_tracker=True,
+    # USERPLAN §6 P0.2: audit Tier-3 is capped at 960 px even for 4K sources.
+    tier3_max_width=960,
 )
 
 # USERPLAN §3: the auto path's "balanced" tier = standard resources but with
@@ -131,6 +140,8 @@ BALANCED = Preset(
     flow_width=960,
     run_region_branches=True,
     auto_audit=True,
+    # USERPLAN §6 P0.2: the default inspect path must not OOM on 16 GB GPUs.
+    tier3_max_width=960,
 )
 
 PRESETS: dict[str, Preset] = {

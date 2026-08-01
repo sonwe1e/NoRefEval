@@ -277,6 +277,8 @@ class Report:
     worst_windows: list[WorstWindow]
     features: dict[str, Any]
     meta: dict[str, Any]
+    # USERPLAN §6 P0.5: structured performance telemetry, surfaced in reports.
+    performance: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -287,6 +289,7 @@ class Report:
             "worst_windows": [w.to_dict() for w in self.worst_windows],
             "features": _sanitize(self.features),
             "meta": _sanitize(self.meta),
+            "performance": _sanitize(self.performance),
         }
 
 
