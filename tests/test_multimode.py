@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 import pytest
@@ -406,8 +408,14 @@ def test_no_reference_odd_blur_lowers_phase_score(mode_videos):
     clean = evaluate_no_reference(str(mode_videos["hfr"]), **common)
     blurred = evaluate_no_reference(
         str(mode_videos["hfr_odd_blur"]), **common)
-    assert blurred.scores["phase_consistency"] < \
-        clean.scores["phase_consistency"]
+    # USERPLAN §6: a clean clip has no stable two-phase structure -> phase is
+    # gated out (N/A); the odd-blur clip HAS a phase-locked blur -> phase is
+    # applicable and scores low.
+    assert clean.meta["phase"]["applicable"] is False
+    assert math.isnan(clean.scores["phase_consistency"])
+    assert blurred.meta["phase"]["applicable"] is True
+    assert blurred.meta["phase"]["dominant_bad_phase"] == "B"
+    assert blurred.scores["phase_consistency"] < 60.0
 
 
 def test_nr_compare_rejects_different_content(mode_videos):

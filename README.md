@@ -185,7 +185,7 @@ NR 的 `confidence` 上限为 0.75，因为它无法证明真实轨迹或显露�
 
 ```bash
 rr-vfiqa inspect --candidate out.mp4 --out runs/fast      --speed fast
-rr-vfiqa inspect --candidate out.mp4 --out runs/balanced  -- speed balanced     # 默认，含 tier-3 审计
+rr-vfiqa inspect --candidate out.mp4 --out runs/balanced  --speed balanced    # --speed balanced = standard 预设；tier-3 自动审计请用 --preset balanced
 rr-vfiqa inspect --candidate out.mp4 --out runs/thorough  --speed thorough
 
 rr-vfiqa inspect --candidate out.mp4 --device cuda --flow-backend raft    # GPU 精确光流
@@ -242,19 +242,30 @@ A: 可以，使用 `--no-clips` 跳过坏例视频导出，速度更快。
 
 ## 开发与贡献
 
+完整目录结构、运行环境（**Python 使用 `G:\ds-torch\Scripts\python.exe`**）与开发约定见 **[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)**。
+
 ```text
 rr_vfiqa/
-├── io/                 视频读取与对齐
-├── sampling/           全片扫描与窗口选择
-├── motion/             独立光流后端
-├── metrics/            模式核心指标
-├── regions/            UI、文字、人物、细物体代理
-├── fusion/             模式独立归一化与融合
-├── diagnosis/          多证据规则与空间定位
-├── report/             JSON、HTML、Heatmap、Clips
-├── calibration/        标定和相关性验证
-├── testing/            合成视频和参考插值器
-└── execution/          Batch 等执行入口
+├── cli.py               命令行入口（evaluate/compare/inspect/inspect-batch）
+├── multimode.py         NR + FR 执行管线与调度
+├── pipeline.py          Endpoint-2x 执行管线
+├── mode_router.py       inspect 自动安全路由
+├── config.py            模式枚举、PRESETS、全局配置
+├── schema.py            三模式共享数据契约
+├── io/                  视频读取与对齐
+├── sampling/            全片扫描与窗口选择
+├── motion/              独立光流后端
+├── metrics/             模式核心指标
+├── regions/             UI、文字、人物、细物体代理
+├── fusion/              模式独立归一化与融合
+├── diagnosis/           多证据规则与空间定位
+├── report/              JSON、HTML、Heatmap、Clips
+├── cache/               源视频特征缓存（SourceCache）
+├── models/              可选学习后端（tracker/vqa/segmentation）
+├── visualization/       空间诊断可视化
+├── calibration/         标定和相关性验证
+├── testing/             合成视频和参考插值器
+└── execution/           Batch 等执行入口
 ```
 
 最重要的使用原则：先确认手中的 reference 到底是"端点参考"还是"逐帧 Ground Truth"。`inspect` 的 auto-safe 路由会在证据不足时**拒绝猜测并拒绝打分**，因此可以放心地让程序自动判定。

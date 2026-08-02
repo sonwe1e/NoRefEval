@@ -398,6 +398,7 @@ def diagnose_windows(
                 probable_causes=list(rule.probable_causes),
                 center_index=center,
                 boxes=boxes,
+                support_spans=[[start, end]],
             ))
     return merge_issues(raw, nms_seconds)
 
@@ -495,6 +496,12 @@ def merge_issues(issues: list[DiagnosticIssue], nms_seconds: float) -> list[Diag
             if iss.thumbnail:
                 thumbnail = iss.thumbnail
                 break
+        # USERPLAN §9: the merged card keeps its display span as the union of
+        # the whole cluster, but ``support_spans`` stays the *actually sampled*
+        # intervals (overlap/touch deduped), so affected-duration never counts
+        # the unsampled gaps between close windows as affected.
+        support_spans = _merge_spans(list(
+            span for iss in cluster for span in _issue_support_spans(iss)))
         merged.append(DiagnosticIssue(
             issue_type=representative.issue_type, title=representative.title,
             severity=max(iss.severity for iss in cluster),
@@ -505,6 +512,7 @@ def merge_issues(issues: list[DiagnosticIssue], nms_seconds: float) -> list[Diag
             probable_causes=list(representative.probable_causes),
             center_index=representative.center_index,
             boxes=list(representative.boxes), maps=list(representative.maps),
+            support_spans=support_spans,
             clip_paths=merged_clip_paths, thumbnail=thumbnail,
             representative_center_index=representative.center_index,
             supporting_center_indices=[int(iss.center_index) for iss in cluster]))
@@ -512,32 +520,80 @@ def merge_issues(issues: list[DiagnosticIssue], nms_seconds: float) -> list[Diag
     return merged
 
 
+def _issue_support_spans(issue: DiagnosticIssue) -> list[list[float]]:
+    """Return an issue's sampled ``support_spans`` (fallback: display span).
+
+    Older issues / hand-built issues without ``support_spans`` fall back to the
+    display span so downstream consumers keep working.
+    """
+    if issue.support_spans:
+        return [[float(s), float(e)] for s, e in issue.support_spans]
+    return [[float(issue.start_time), float(issue.end_time)]]
+
+
+def _merge_spans(spans: list[list[float]] | list[tuple[float, float]],
+                 ) -> list[list[float]]:
+    """Merge overlapping / touching ``[start, end]`` intervals, deduped + sorted.
+
+    Used for both the ``support_spans`` union during issue merge and the
+    affected-duration computation, so the reported numbers always reflect the
+    actually-sampled windows rather than the (wider) display span.
+    """
+    if not spans:
+        return []
+    ordered = sorted((float(s), float(e)) for s, e in spans)
+    merged: list[list[float]] = []
+    cs, ce = ordered[0]
+    for s, e in ordered[1:]:
+        if s <= ce:
+            ce = max(ce, e)
+        else:
+            merged.append([cs, ce])
+            cs, ce = s, e
+    merged.append([cs, ce])
+    return merged
+
+
+def confirmed_affected_seconds(issues: list[DiagnosticIssue]) -> float:
+    """Total seconds of *sampled* support spans across all issues (USERPLAN §9).
+
+    The union of every issue's ``support_spans`` — never the display span — so
+    unsampled gaps inside a merged card do not inflate the number.
+    """
+    spans = [span for issue in issues for span in _issue_support_spans(issue)]
+    return float(sum(e - s for s, e in _merge_spans(spans)))
+
+
 def affected_duration_fraction(issues: list[DiagnosticIssue],
                                total_seconds: float) -> float:
-    """Fraction of the timeline covered by any issue (union of spans)."""
+    """Fraction of the timeline actually sampled as affected (USERPLAN §9).
+
+    Computed from the union of every issue's ``support_spans`` (the real
+    sampled windows), never the display span.  Unsampled gaps inside a merged
+    card are therefore not counted as affected.
+    """
     if total_seconds <= 0 or not issues:
         return 0.0
-    spans = sorted((i.start_time, i.end_time) for i in issues)
-    covered = 0.0
-    cs, ce = -1.0, -1.0
-    for s, e in spans:
-        if s > ce:
-            covered += max(0.0, ce - cs)
-            cs, ce = s, e
-        else:
-            ce = max(ce, e)
-    covered += max(0.0, ce - cs)
+    covered = confirmed_affected_seconds(issues)
     return float(np.clip(covered / total_seconds, 0.0, 1.0))
 
 
 def build_diagnostics_block(issues: list[DiagnosticIssue], meta,
-                            confidence: float) -> dict:
+                            confidence: float,
+                            *,
+                            overall: float | None = None) -> dict:
     """Serialize a diagnosis for ``report.meta`` / the HTML report.
 
     ``meta`` only needs ``.n_frames`` and ``.fps`` (a VideoMeta), so this is
     reusable from every pipeline without importing them back.
+
+    ``overall`` is the 0..100 overall score used to derive the *global* quality
+    level.  It is not available inside the diagnosis step (the overall score is
+    fused afterwards), so callers that have it may pass it; when it is ``None``
+    the global level is reported as ``unknown`` and flagged as based on the
+    overall score (USERPLAN §10).
     """
-    from .schema import quality_level
+    from .schema import issue_level, quality_level
     total_seconds = (float(meta.n_frames) / float(meta.fps)
                      if getattr(meta, "fps", 0) > 0 else 0.0)
     by_track: dict[str, int] = {}
@@ -546,16 +602,28 @@ def build_diagnostics_block(issues: list[DiagnosticIssue], meta,
         by_track[issue.track] = by_track.get(issue.track, 0) + 1
         by_type[issue.issue_type] = by_type.get(issue.issue_type, 0) + 1
     worst = issues[0] if issues else None
+    confirmed = confirmed_affected_seconds(issues)
+    g_key, g_label = quality_level(
+        overall if overall is not None else float("nan"))
+    w_key, w_label = (issue_level(worst.severity)
+                      if worst is not None else ("none", "无问题"))
     return {
         "issues": [i.to_dict() for i in issues],
         "issue_count": len(issues),
         "affected_duration_fraction": round(
             affected_duration_fraction(issues, total_seconds), 4),
+        "confirmed_affected_seconds": round(confirmed, 3),
+        "estimated_affected_fraction": round(
+            confirmed / total_seconds, 4) if total_seconds > 0 else 0.0,
         "total_seconds": round(total_seconds, 3),
         "by_track": by_track,
         "by_type": by_type,
         "worst_issue": worst.to_dict() if worst else None,
         "overall_confidence": round(float(confidence), 4),
-        "quality_level": (quality_level(float("nan"))
-                          if worst is None else None),
+        # USERPLAN §10: global (whole video, from overall) vs worst local issue
+        # level are reported independently, so one severe local issue is not
+        # read as "the whole video is severely bad".
+        "global_quality_level": {"key": g_key, "label": g_label},
+        "global_quality_level_basis": "overall",
+        "worst_issue_level": {"key": w_key, "label": w_label},
     }

@@ -211,8 +211,17 @@ def compute_mode_scores(
     mode: EvaluationMode,
     windows: list[WindowFeatures],
     global_features: dict[str, float] | None = None,
+    gated_categories: set[str] | None = None,
 ) -> tuple[float, dict[str, float], dict[str, float]]:
-    """Fuse using the selected mode's own features, weights, and semantics."""
+    """Fuse using the selected mode's own features, weights, and semantics.
+
+    ``gated_categories`` names categories whose evidence is NOT trusted for
+    this video (e.g. ``{"phase"}`` when the clip has no stable two-phase
+    structure — USERPLAN §6).  Gated categories contribute no error to the
+    overall, their weights are renormalised over the active categories, and
+    their subscores are reported as NaN (N/A).
+    """
+    gated = set(gated_categories or ())
     schema = _schema(mode)
     per_category: dict[str, list[float]] = {category: [] for category in schema}
     for wf in windows:
@@ -240,11 +249,21 @@ def compute_mode_scores(
         )
         for category, error in aggregated.items()
     }
-    if any(not np.isfinite(aggregated[c]) for c in CORE_CATEGORIES[mode]):
+    # Gated categories are excluded from the fused overall (their subscore is
+    # reported as N/A so the reader sees why).
+    for category in gated:
+        name = SUBSCORE_NAMES[mode].get(category)
+        if name in subscores:
+            subscores[name] = float("nan")
+
+    active_core = [c for c in CORE_CATEGORIES[mode] if c not in gated]
+    if active_core and any(not np.isfinite(aggregated[c]) for c in active_core):
         return float("nan"), subscores, aggregated
 
     numerator = denominator = 0.0
     for category, weight in MODE_WEIGHTS[mode].items():
+        if category in gated:
+            continue
         error = aggregated[category]
         if np.isfinite(error):
             numerator += weight * error

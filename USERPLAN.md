@@ -1,531 +1,706 @@
-# 结论
+核心判断
 
-最新提交 `5618ac80` 对上一轮问题进行了有针对性的整改。多 Issue 文件覆盖、Error Map 归一化、显式模式传递、preferred map 选择、动态版本和特征契约等实现已经落地。
+这两次 no-reference 结果的 Overall Quality 8.8 和 8.0 当前都不具备有效解释性。它们几乎完全是被错误偏高的 Cadence 风险压低的：
 
-**但测试整改仍未完全形成可靠的质量门禁。** 当前状态更准确地说是：
+69.1 \times 12.8\% \approx 8.8
 
-| 项目          |        评价 |
-| ----------- | --------: |
-| 被测实现整改      | **约 90%** |
-| 基础单元测试      | **约 70%** |
-| 三模式端到端测试    | **约 60%** |
-| 变形测试有效性     | **约 45%** |
-| 媒体证据测试      | **约 55%** |
-| 当前测试能否证明可发布 |    **不能** |
+64.9 \times 12.3\% \approx 8.0
 
-Review 结论建议为：
+因此，这不是“原始视频只有 8.8 分、插帧视频只有 8.0 分”，而是：
 
-```text
-实现可进入内部 Beta
-测试体系仍需 Request Changes
-```
+当前 60 FPS Cadence 判定把正常战斗运动、特效和相位变化误识别成了接近完全的帧率塌缩。
 
-最新提交没有可见的 GitHub Actions workflow run 或状态检查，因此目前也不能声称测试已经实际通过。 我的执行环境仍无法解析 GitHub 域名，无法独立 clone 后运行 pytest，以下结论来自最新代码和测试定义的静态审查。
+短期内应忽略这两项结果中的：
 
----
+* Overall Quality
+* Cadence Integrity
+* cadence risk
+* Quality Level
+* Affected
 
-# 一、这次测试整改已经完成的部分
+更有参考价值的是 Common-time 和各子分数，但其中 phase_consistency 也存在明显的 60 FPS 适用性问题。
 
-## 1. Endpoint reference 获取逻辑已经修复
+⸻
 
-测试会从 manifest 中读取 Endpoint 和 FR 的 `source` 作为 reference，不再默认把 Endpoint case 当作 NR 运行。
+一、这组结果实际说明了什么
 
-## 2. Metric Direction 已把错误方向纳入分母
+先排除 Cadence 惩罚，原始视频与插帧视频的基础分数是：
 
-现在统计：
+指标	原始 60 FPS	插帧 60 FPS	变化
+Common-time	69.1	64.9	-4.2
+Temporal stability	88.4	87.5	基本相同
+Motion smoothness	37.3	38.5	插帧略高
+Phase consistency	42.7	24.5	插帧明显更低
+UI/text stability	27.7	27.9	基本相同
+Technical quality	56.3	49.0	插帧略差
 
-```text
-correct
-wrong
-inconclusive
-```
+当前 NR 融合权重为：
 
-方向错误不再被遗漏，正确率分母改为 `correct + wrong`。
+temporal 35%
+motion   30%
+phase    20%
+UI       10%
+technical 5%
 
-这是必要的修正。
+子分数和总分又都通过指数函数融合。
 
-## 3. 默认媒体路径已有 E2E 测试
+按照当前公式从你提供的子分数逆算：
 
-测试不再全部使用 `--no-clips`，已经开始验证：
+如果暂时去掉 phase category，两个视频的基础分数约为 70.86 和 70.84，几乎完全相同。
 
-* JSON 和 HTML；
-  -热力图路径；
-  -Overlay/Compare 路径；
-  -PyAV 能否解码导出视频。
+也就是说，原始与插帧视频 4.2 分的 Common-time 差距，几乎全部来自：
 
-## 4. 多 Issue 覆盖问题已有回归测试
+phase_consistency：42.7 → 24.5
 
-新增测试会寻找三个以上问题，检查多个 Overlay 文件存在且内容 hash 不同。
+而不是运动平滑度或时序稳定性。
 
-实现侧也已经改成一次批量调用 exporter，不再逐个调用并反复生成 `issue_000`。
+对当前视频的合理解释
 
-## 5. 静态视频 Cadence 已有真实视频测试
+从这组数据能够相对可信地得出：
 
-不再只是手工构造 scalar，而是编码一段静态视频并运行完整 `inspect`，验证 cadence risk 接近零。
+* 插帧没有明显降低普通的时间连续性，temporal_stability 基本不变。
+* 插帧没有让当前光流运动指标明显恶化，motion_smoothness 反而略高。
+* 插帧帧与原始帧之间存在明显的奇偶相位差异，可能表现为生成帧更模糊、边缘密度不同、锐度不同或编码特征不同。
+* 插帧视频的绝对技术质量略差，可能有锐度损失、压缩损失或噪声差异。
+* UI 分数对两个视频都异常低，说明它主要反映当前检测器对战斗特效和动态 HUD 的误判，而不是插帧引入的差异。
 
----
+因此，当前唯一值得重点检查的真实差异是相位一致性和技术质量，而不是 Cadence 或 Motion。
 
-# 二、测试数据存在一个严重基础问题
+⸻
 
-## RPG 视频只有 2 秒，但缺陷区间最长到 3.1 秒
+二、为什么两个 60 FPS 视频都会得到 0.93～0.95 Cadence Risk
 
-测试 fixture 将所有 RPG 视频生成为：
+这是当前实现中的结构性问题。
 
-```python
-duration_seconds=2.0
-```
+1. 60 FPS 下 native 和 1/60 实际是同一个时间尺度
 
-但 case 定义中的缺陷区间包括：
+当前时间规划同时构造：
 
-```text
-1.20–2.80 秒
-1.00–3.10 秒
-1.30–2.70 秒
-1.00–3.00 秒
-```
+native：相邻帧
+lag_1_60：相隔 1/60 秒的帧
+lag_1_30：相隔 1/30 秒的帧
 
-这意味着许多缺陷：
+对 60 FPS 视频：
 
--只注入了一部分；
--结束阶段被裁掉；
--没有缺陷后的恢复区间；
--实际视频缺陷时长与 manifest 标注不一致；
--定位测试仍用原始的 2.8 或 3.1 秒作为 GT。
+native       = t → t+1
+lag_1_60     = t → t+1
+lag_1_30     = t → t+2
 
-这很可能正是 Endpoint 定位能力低、测试不得不把门槛降到零的原因之一。
+但 Cadence motion gate 当前传入的是：
 
-## 修复方案
+nr_raw_diff_1_60
 
-测试视频时长不能固定为 2 秒，应从 case spec 动态推导：
+并把它称作“较长时间尺度运动”。
 
-```python
-duration_seconds = max(
-    case.end_time for case in CASES
-) + 0.5
-```
+对 60 FPS 视频，它根本不是较长尺度，而就是原生相邻帧。
 
-当前数据至少应生成约 3.6 秒，建议直接使用 4 秒。
+正确设计应该是：
 
-更严格的生成器还应断言：
+输入 FPS	Native cadence	Parent/common cadence
+60 FPS	1/60 秒	1/30 秒
+120 FPS	1/120 秒	1/60 秒
 
-```python
-assert defect.start_time < video_duration
-assert defect.end_time <= video_duration
-assert defect.end_time - defect.start_time >= minimum_defect_duration
-```
+所以在 60 FPS 下，Cadence gate 应使用 1/30 的运动证据，而不是 1/60。
 
----
+2. 低运动补偿误差被错误当成 Cadence 塌缩证据
 
-# 三、Endpoint 定位测试目前等价于没有测试
+当前 Cadence 风险把以下现象视为“没有新内容”：
 
-当前 Endpoint localization floor 是：
+MCT residual 很低
+self composition error 很低
+self cycle error 很低
 
-```python
-floor = 0.0
-```
+并且两个信号一致就可以产生很高风险。
 
-所以 Endpoint 五个 case 全部定位失败，测试仍然通过。
+但对一段正常、连续、光流估计准确的战斗视频：
 
-Endpoint 是三种模式中最成熟、参考条件最强的模式，它不应该拥有最低的测试要求。
+运动越平滑
+光流越准确
+MCT / composition / cycle residual 越低
 
-## 推荐门槛
+这些本来也是高质量运动的表现。
 
-完成 4 秒、640×360 测试数据修复后，最低应设为：
+只有在存在明显的奇偶帧信息不对称时，低 residual 才可能支持“复制帧或帧率塌缩”的结论。它们不能独立作为塌缩证据。
 
-| 阶段      | Endpoint 定位率 |
-| ------- | -----------: |
-| 当前整改验收  |         ≥40% |
-| 内部 Beta |         ≥65% |
-| 稳定版本    |         ≥80% |
+3. Cadence 在高风险采样窗口上聚合
 
-不能通过把门槛设置为零来适配检测器，而应提高 fixture 的缺陷强度、分辨率和时长。
+NR 先选择 Uniform + Risk 窗口，然后只在这些窗口上计算 Cadence。Balanced 默认风险窗口数量比均匀窗口还多。
 
----
+战斗特效、镜头震动、闪光、粒子和遮挡本来就容易被 Risk Selector 选中。
 
-# 四、模式断言写了，但没有真正使用
+随后 Cadence 使用：
 
-`_inspect()` 已经支持：
+max(P80, median)
 
-```python
-expected_mode
-```
+聚合窗口风险。
 
-并可断言报告模式。
+因此它实际回答的接近：
 
-但目前 localization、score 和 metric-direction 调用都没有传入 `expected_mode`。例如 localization 只是：
+在一批故意挑出的高风险战斗片段中，Cadence 风险有多高？
 
-```python
-_inspect(..., mode=mode)
-```
+而不是：
 
-`mode` 参数本身也没有加入 CLI 命令。
+整条视频有多少区域真正发生了帧率塌缩？
 
-因此即使：
+这会系统性放大战斗视频的 Cadence Risk。
 
-* Endpoint 错误路由成 NR；
-  -FR 错误路由成 Endpoint；
+4. 战斗特效天然会产生奇偶相位能量
 
-测试仍可能继续读取分数和特征，并将结果记为 inconclusive 或跳过。
+当前 Phase 使用绝对帧索引的奇偶性，将视频拆成：
 
-## 修复方案
+偶数帧 phase A
+奇数帧 phase B
 
-所有 case 评测必须写成：
+再比较锐度、边缘和交替能量。
 
-```python
-rep = _inspect(
-    case["candidate"],
-    _reference_for_case(case),
-    output_dir,
-    mode=mode,
-    expected_mode=mode,
-)
-```
+对 30→60 的插帧视频，这种相位拆分可能有意义；因为一组可能是原帧，另一组可能是生成帧。
 
-并在 `_inspect()` 中加入：
+但对真实 60 FPS 战斗视频，以下内容也可能产生周期性奇偶差：
 
-```python
-rc = main(cmd)
+-技能特效闪烁；
+-粒子隔帧生成；
+-屏幕震动；
 
-assert rjson.exists(), "inspect did not write report.json"
+* Bloom 或曝光变化；
+    -游戏内部动画采样频率；
+    -编码 GOP 和量化变化。
 
-rep = json.loads(rjson.read_text())
-expected = _MODE_ALIAS_TO_META[expected_mode]
-assert rep["meta"]["mode"] == expected
+所以原始视频也得到了很低的 phase_consistency=42.7。
 
-if rep["meta"]["status"] == "failed":
-    assert rc == 1
-else:
-    assert rc == 0
-```
+⸻
 
-目前 `_inspect()` 忽略 CLI 返回码，报告不存在时只返回 `{}`，这会把真正的执行失败转换为后续的 skip 或 inconclusive。
+三、对当前结果的临时使用规则
 
----
+在代码整改前，建议按以下方式阅读本次报告。
 
-# 五、媒体 E2E 仍可能空通过
+原始视频
 
-当前媒体测试只在 `issues` 非空时检查卡片和媒体路径。若选中的第一个 case 没有触发任何 Issue：
+可信：
+Temporal stability 88.4
+部分可信：
+Technical quality 56.3
+需要谨慎：
+Motion smoothness 37.3
+Phase consistency 42.7
+UI/text stability 27.7
+当前无效：
+Cadence risk 0.93
+Cadence integrity 12.8
+Overall 8.8
+Affected 52.3%
 
-```text
-issues = []
-map 检查循环不执行
-clip 检查循环不执行
-视频解码检查不执行
-```
+一个正常原始战斗视频出现：
 
-测试仍然通过。
+22 Issues
+52.3% Affected
+严重问题
 
-它还只严格断言 NR 模式；Endpoint 和 FR 的实际路由仍未验证。
+本身已经可以作为负对照证明：当前诊断阈值和持续时间估计明显过于激进。
 
-## 修复方案
+插帧视频
 
-不要使用“每种模式的第一个 case”，而应指定三个保证触发问题的强缺陷 case：
+相对于原始视频，最值得检查的是：
 
-```text
-NR：长时间 freeze / cadence collapse
-Endpoint：大范围 generated_freeze_copy
-FR：大范围 global_blur 或 spatial shift
-```
+Phase consistency：42.7 → 24.5
+Technical quality：56.3 → 49.0
 
-测试必须要求：
+建议打开相应 Issue 的 Compare Clip，逐帧查看：
 
-```python
-assert rep["meta"]["mode"] == expected_mode
-assert rep["meta"]["status"] != "failed"
+-是否一帧清晰、一帧模糊；
+-生成帧是否明显更软；
+-细线、角色轮廓和技能特效是否隔帧变化；
+-输出编码是否只对生成帧产生更严重的压缩；
+-是否存在原帧和生成帧不同的锐化或降噪处理。
 
-issues = rep["meta"]["diagnostics"]["issues"]
-assert issues, "strong defect produced no diagnostic issue"
+由于 Motion 和 Temporal 基本相同，目前没有证据证明插帧让运动连续性显著变差。
 
-issue = issues[0]
-assert issue["maps"]
-assert "overlay" in issue["clip_paths"]
-assert "compare" in issue["clip_paths"]
-assert issue["thumbnail"]
-```
+⸻
 
-然后逐个验证：
+四、下一步评分逻辑的具体整改方案
 
--文件存在；
--非零大小；
--可以解码；
--帧数至少为 2；
--HTML 包含相同相对路径。
+P0：重写 60/120 FPS Cadence
 
----
+这是最优先的修改。
 
-# 六、多 Issue 测试仍可整体跳过
+1. 使用 FPS 自适应 Parent Lag
 
-当前测试会遍历 NR case，寻找三个以上 Issue；如果没有找到，则：
+新增：
 
-```python
-pytest.skip(...)
-```
+native_dt = median(diff(pts))
+parent_dt = 2.0 * native_dt
 
-因此文件覆盖 bug 重新出现时，只要检测器没有产生三个 Issue，这个专门的回归测试仍可能不执行。
+对应：
 
-它也只检查 Overlay，没有检查：
+60 FPS  → parent lag = 1/30
+120 FPS → parent lag = 1/60
 
-* Compare；
-  -Keyframe；
-  -Heatmap；
-  -报告中的路径是否唯一。
+新增特征：
 
-## 推荐改成确定性单元测试
+nr_raw_diff_native
+nr_raw_diff_parent
+nr_parent_motion_p90
+nr_parent_moving_pixel_fraction
 
-不要依赖诊断器生成 Issue。直接构造三个 Issue：
+不要再固定使用 nr_raw_diff_1_60 作为所有 FPS 的 motion gate。
 
-```python
-issues = [
-    make_issue(0.2, 0.4, "freeze"),
-    make_issue(0.6, 0.8, "blur"),
-    make_issue(1.0, 1.2, "ghost"),
-]
-```
+2. Cadence 必须以奇偶信息不对称为硬门槛
 
-使用一个固定的小视频直接调用 Artifact Pipeline，然后断言：
+建议在移动区域计算相邻帧差：
 
-```python
-expected = {
-    "issue_000_overlay.mp4",
-    "issue_001_overlay.mp4",
-    "issue_002_overlay.mp4",
-    "issue_000_compare.mp4",
-    "issue_001_compare.mp4",
-    "issue_002_compare.mp4",
+d_t =
+\operatorname{mean}_{x\in M_t}
+|Y_{t+1}(x)-Y_t(x)|
+
+父尺度运动：
+
+p_t =
+\operatorname{mean}_{x}
+|Y_{t+2}(x)-Y_t(x)|
+
+然后计算：
+
+even median difference
+odd median difference
+phase asymmetry
+phase coherence
+moving duplicate fraction
+
+例如：
+
+A =
+\frac{|\operatorname{median}(d_{\text{even}})
+-\operatorname{median}(d_{\text{odd}})|}
+{\operatorname{median}(d_{\text{even}})
++\operatorname{median}(d_{\text{odd}})+\epsilon}
+
+Cadence Risk 只有在以下条件同时成立时才能大于零：
+
+parent-scale motion 足够大
+AND 奇偶相邻差明显不对称
+AND 不对称方向在多个窗口内稳定
+AND 某一相位缺少新的时序信息
+
+低 MCT、低 composition、低 cycle 只能作为辅助证据，不能作为主要证据。
+
+3. 增加 Phase Coherence
+
+真实战斗特效可能在局部产生奇偶差，但这种差异通常：
+
+-方向不稳定；
+-只出现在少量区域；
+-不同时间段相位会变化。
+
+插帧输出的原帧/生成帧差异通常在整段视频中保持同一个相位。
+
+应记录：
+
+phase_gap_signed
+phase_coherence
+phase_coverage
+dominant_phase
+
+例如：
+
+C =
+\frac{
+\left|\sum_i w_i\,g_i\right|
+}{
+\sum_i w_i|g_i|+\epsilon
 }
 
-assert expected <= {p.name for p in badcases.iterdir()}
-assert len(set(issue["clip_paths"]["overlay"] for issue in issues)) == 3
-assert len(set(issue["clip_paths"]["compare"] for issue in issues)) == 3
-```
+其中 g_i 是带正负号的 phase gap。
 
-该测试不得 skip。
+没有高 coherence 时，不允许触发严重 Cadence 惩罚。
 
----
+4. Cadence 应从全片低分辨率扫描估计
 
-# 七、静态视频测试也能空通过
+不要再从 Risk-selected windows 估计全片 Cadence。
 
-当前逻辑是：
+建议在 Tier-1 低分辨率扫描中直接维护：
 
-```python
-if os.path.exists(rjson):
-    assert cadence_risk < 0.1
-```
+native adjacent differences
+parent-lag differences
+even/odd phase statistics
+moving-pixel fractions
+scene ID
 
-如果 `report.json` 根本没有生成，测试不会失败。
+风险窗口只用于：
 
-应改为：
+-生成 Issue；
+-输出 Heatmap；
+-做精细诊断。
 
-```python
-assert os.path.exists(rjson), "static inspect did not produce report.json"
+全局 Cadence 应从全片或每个场景的均匀序列统计。
 
-rep = ...
-assert rep["meta"]["mode"] == "no-reference"
-assert rep["meta"]["status"] != "failed"
-assert rep["meta"]["cadence"]["cadence_risk"] < 0.02
-assert rep["scores"]["cadence_integrity"] >= 98.0
-```
+⸻
 
----
+五、暂时取消当前指数 Cadence 乘法
 
-# 八、当前变形测试门槛仍然过低
+当前：
 
-现有门槛大致为：
+S = S_{\text{base}}\exp(-2.2R)
 
-| 项目              | 当前门槛 |
-| --------------- | ---: |
-| NR 定位率          |  40% |
-| Endpoint 定位率    |   0% |
-| FR 定位率          |  20% |
-| 总分方向            |  50% |
-| 指标方向            |  30% |
-| 允许 inconclusive |  70% |
+当 R=0.93 时，倍率只有约 0.13。
 
-这样的门槛只能作为 smoke test，不能作为回归门禁。
+对于一个尚未完成真实视频标定的 NR Cadence 检测器，这个惩罚强度过于危险。
 
-## 内部 Beta 建议门槛
+推荐的短期输出
 
-| 项目                   | 建议门槛 |
-| -------------------- | ---: |
-| NR 定位率               | ≥60% |
-| Endpoint 定位率         | ≥60% |
-| FR 定位率               | ≥70% |
-| 总分下降方向               | ≥75% |
-| 目标指标方向               | ≥70% |
-| Inconclusive 比例      | ≤30% |
-| 每个模式 conclusive case |   ≥3 |
-| Clean severe 误报率     | ≤10% |
+在 Cadence v2 完成前：
 
-测试不应在 `valid == 0` 或 `conclusive == 0` 时直接 skip。应要求最少有效样本数：
+artifact_quality = 69.1
+cadence_integrity = diagnostic_only
+overall_score = artifact_quality
 
-```python
-assert valid >= 3
-assert conclusive >= 3
-```
+报告显示两条独立轴：
 
----
+字段	含义
+Artifact Quality	画面、运动、技术和结构风险
+Cadence Integrity	有效新增帧和奇偶相位风险
+Final Quality	暂不提供或标记 uncalibrated
 
-# 九、新实现缺少对应的直接单元测试
+更保守的替代方案是最多只允许 Cadence 扣 15 分：
 
-最新提交新增或修改了以下关键机制：
+S_{\text{final}}
+=
+S_{\text{base}}
+\left(0.85+0.15\frac{S_{\text{cadence}}}{100}\right)
 
-* Error Map P99.5 normalization；
-  -Overlay resize；
-  -显式 mode；
-  -preferred map 选择；
-  -Artifact Status；
-  -动态 package version；
-  -Feature Registry resolution contract。
+但在完成真实视频标定前，分开报告比继续构造单一总分更诚实。
 
-实现本身已经存在，例如 Overlay 会 resize 并归一化真实 map。
+⸻
 
-但目前测试主要通过完整 RPG pipeline 间接覆盖，问题定位困难。建议增加以下独立测试文件：
+六、Phase Consistency 的具体整改
 
-```text
-tests/test_artifact_pipeline.py
-tests/test_error_map_contract.py
-tests/test_diagnosis_map_selection.py
-tests/test_package_contract.py
-```
+当前原始与插帧的主要差异完全由 Phase 驱动，因此必须提高它的解释能力。
 
-## 必须增加的单元测试
+增加 Two-phase Applicability
 
-### Error Map normalization
+先判断视频是否真的具有稳定的双相位结构：
 
-```python
-def test_normalize_map_p995_keeps_dynamic_range():
-    x = np.linspace(0, 255, 10000).reshape(100, 100)
-    y = _normalize_map(x)
-    assert y.min() == 0
-    assert 0.9 < np.percentile(y, 95) <= 1.0
-```
+source_phase_likelihood
+phase_coherence
+phase_sharpness_direction
+phase_edge_direction
 
-### Preferred Map
+只有当：
 
-构造两个热区位于不同位置的 map：
+source_phase_likelihood >= 0.7
+phase_coherence >= 0.6
 
-```text
-composition map：左上热
-duplicate map：右下热
-```
+时，Phase Consistency 才进入总分。
 
-对 `duplicate_freeze` 诊断，box 必须位于右下，并且 `issue.maps` 必须是 duplicate map。
+否则：
 
-### Artifact failure isolation
+phase_consistency = N/A
+phase_weight = 0
 
-Monkeypatch Overlay exporter 抛异常，要求：
+真实 60 FPS 原始视频通常不应被强制解释为“原帧相位 + 生成帧相位”。
 
-```text
-overall score 保持有效
-meta.status 不变
-artifact_status.overlay_clips.status = degraded
-report.json 中能读到该状态
-```
+提供可解释字段
 
-### Package version
+报告中增加：
 
-```python
-assert importlib.metadata.version("rr-vfiqa") == rr_vfiqa.__version__
-```
+{
+  "phase": {
+    "applicable": true,
+    "phase_a_sharpness": 312.4,
+    "phase_b_sharpness": 205.7,
+    "sharpness_ratio": 0.66,
+    "phase_a_edge_density": 0.083,
+    "phase_b_edge_density": 0.061,
+    "coherence": 0.84,
+    "dominant_bad_phase": "B"
+  }
+}
 
-### Feature Contract
+Issue Clip 应展示：
 
-```python
-assert fr_edge_chamfer.units == "frame-diagonal-ratio"
-assert fr_edge_chamfer.resolution_invariant
-```
+phase A frame | phase B frame | difference/edge map
 
----
+而不是笼统地说“生成帧模糊”，因为 NR 模式实际上不知道哪一组一定是生成帧。
 
-# 十、Artifact Status 仍有一个测试应当捕获的实现缺口
+⸻
 
-当前在 atomic write 前将 `artifact_status` 写入 meta；如果 atomic write 自身失败，代码随后把：
+七、Motion Smoothness 对战斗特效的鲁棒性整改
 
-```text
-report_write.status = degraded
-```
+原始视频只有 37.3，说明当前 Motion 分数也明显偏低。
 
-写进内存，但不会再次落盘。
+战斗特效会导致：
 
-因此磁盘中的基础报告仍可能显示 `report_write=ok`，尽管最终写入失败。
+-粒子出现和消失；
+-透明叠加；
+-大面积闪光；
+-非刚体能量扩散；
+-遮挡和显露；
+-低纹理 Bloom；
+-光流估计失效。
 
-需要设计：
+这些情况应先被判定为“光流证据不可靠”，而不是直接判定为运动不平滑。
 
-```python
-monkeypatch.setattr(os, "replace", raise_error)
-```
+增加 Flow Reliability Gate
 
-然后验证磁盘报告如何表达写入失败。比较可靠的策略是：
+每个窗口记录：
 
-1. 先写基础报告；
-2. 尝试 atomic final write；
-3. 失败后更新 `report_write=degraded`；
-4. 使用普通覆盖方式尽力更新基础 JSON；
-5. 保证至少 JSON 中包含失败状态。
+flow_valid_fraction
+forward_backward_consistency
+photometric_support_fraction
+persistent_track_fraction
+effect_transient_fraction
 
----
+只有可靠区域进入：
 
-# 十一、CI 需要拆分，否则测试成本和故障定位都会失控
+fold
+divergence
+curl
+acceleration
+jerk
+reversal
 
-当前一共有 15 个 RPG case。
+若有效覆盖不足，例如：
 
-现有测试大约会执行：
+flow_valid_fraction < 0.25
 
-```text
-Localization：15 次 inspect
-Score：30 次 inspect
-Metric Direction：30 次 inspect
-Media E2E：3 次 inspect
-Multi Issue 搜索：最多 5 次 inspect
-Static：1 次 inspect
-```
+则：
 
-合计约 **84 次完整评测**，而且大量 candidate/oracle 被重复计算。
+motion_smoothness = N/A 或低置信度
 
-建议拆成：
+而不是给出 37 分。
 
-```text
-unit:
-  普通函数、Schema、map、artifact 测试
+区分运动错误和外观变化
 
-smoke-e2e:
-  每种模式 1 个强缺陷
-  每个 PR 执行
+新增两类：
 
-metamorphic:
-  全部 15 case
-  nightly / 手动 / main 合并前执行
+trackable_motion_error
+appearance_change_uncertainty
 
-gpu:
-  RAFT 路径
-  自托管 GPU
-```
+粒子、爆炸、闪光应主要增加 uncertainty，而不是直接增加 motion error。
 
-并增加 session 级评测缓存：
+验收标准应是：
 
-```python
-inspection_cache[(case_id, role, mode, clips)] = report
-```
+真实 60 FPS 战斗视频：
+motion_smoothness ≥70
+或 flow coverage 不足时显示 N/A
 
-让 localization、score 和 metric-direction 共用同一份 no-clips 评测结果，预计可将约 75 次 no-clips 评测降低到约 30 次。
+不能继续稳定输出 30～40 分。
 
----
+⸻
 
-# 最终评价
+八、UI/Text 分支需要增加可靠性门控
 
-这次整改已经解决了大量实现问题，尤其是多 Issue 导出、Error Map normalization 和 preferred map 选择。但**测试本身仍存在大量可跳过、空通过和错误数据区间问题**。
+两个视频都是约 27.8，说明 UI 分支没有提供比较价值。
 
-当前最优先的四项测试整改是：
+当前战斗特效可能被 UI detector 误认为：
 
-1. 将 RPG 时长从 2 秒改为至少 4 秒；
-2. 所有评测强制断言实际模式和 CLI 返回码；
-3. Endpoint 定位门槛从 0 提升到至少 40%～60%；
-4. 将媒体、多 Issue、preferred map 和 failure isolation 改为确定性、不可 skip 的单元/E2E 测试。
+-屏幕固定边缘；
+-文字笔画；
+-持久组件；
+-静态 HUD。
 
-完成这些后，测试体系才足以支持：
+建议新增：
 
-```text
-APPROVE FOR INTERNAL BETA
-```
+ui_detection_confidence
+ui_persistence_seconds
+ui_screen_motion
+ui_component_area_ratio
+ui_transient_rejection
 
-当前实现已经接近这一阶段，但现有绿灯仍不足以证明三模式及媒体证据链可靠。
+只有满足：
+
+长时间屏幕坐标固定
+组件面积合理
+跨帧持续存在
+不属于全屏闪光或粒子
+
+才进入 UI 分数。
+
+动态但合法的内容，例如：
+
+-技能冷却数字；
+-血条变化；
+-伤害数字；
+-技能亮起；
+-状态图标变化；
+
+不能仅凭变化就判为不稳定，应区分：
+
+内容更新
+几何漂移
+轮廓破损
+双重曝光
+
+⸻
+
+九、Issues 和 Affected 比例需要重写
+
+原始视频：
+
+22 issues
+52.3% affected
+
+插帧视频：
+
+19 issues
+77.8% affected
+
+这两个结果明显不可信。
+
+当前同类 Issue 在间隔不超过 0.5 秒时会被聚合成一个长区间，然后 Affected 直接计算这些合并区间的并集。
+
+这会把未实际采样和未确认的问题间隙也算成 affected。
+
+正确设计
+
+Issue Card 的合并区间和受影响时长必须分开。
+
+每个 Issue 保存：
+
+{
+  "display_span": [10.0, 12.5],
+  "support_spans": [
+    [10.02, 10.09],
+    [10.51, 10.58],
+    [12.31, 12.38]
+  ]
+}
+
+其中：
+
+* display_span 用于将相近问题合并成一张卡；
+* support_spans 才用于计算受影响时长；
+    -未采样的 0.4 秒间隙不能自动计入。
+
+更好的方案是使用 Tier-1 全片扫描估计 prevalence：
+
+sampled_issue_fraction
+estimated_affected_fraction
+confirmed_affected_seconds
+
+分开呈现。
+
+⸻
+
+十、Quality Level 需要拆分
+
+当前页面显示“严重问题”，容易被理解为整条视频质量严重不合格。
+
+应拆成：
+
+Global Quality Level
+Worst Local Issue Level
+
+例如：
+
+Global Quality：中等 / 未标定
+Worst Local Issue：严重
+
+一段 60 秒视频中存在一个严重局部 Issue，不等于整条视频是“严重问题”。
+
+⸻
+
+十一、针对这两条视频建立最小真实回归集
+
+这两条视频非常适合作为下一阶段负对照和差异对照。
+
+建议截取一段包含：
+
+-大量战斗特效；
+-角色运动；
+-镜头运动；
+
+* UI；
+    -文字；
+    -粒子和遮挡；
+
+长度约 10～20 秒的片段。
+
+构造以下版本：
+
+版本	目标
+True 60 FPS original	负对照
+30 FPS 下采样后重复帧升到 60	明确 Cadence collapse
+30→60 线性混合	模糊插帧
+当前模型 30→60 或 60→60 输出	实际候选
+原始 60 加压缩/模糊	技术质量对照
+
+Cadence 验收
+
+视频	目标
+True 60 original	risk ≤0.10
+Duplicate 30→60	risk ≥0.70
+Linear blend 30→60	risk 0.20～0.60
+好的插帧 60	risk ≤0.30
+
+其他验收
+
+原始视频 Affected ≤10%
+原始视频不得出现全局 Severe
+原始 Motion ≥70 或显示 N/A
+原始 UI ≥70 或显示 N/A
+插帧 Phase 应低于原始，但差异应能由 Phase A/B 证据解释
+
+⸻
+
+十二、当前最合适的评测方式
+
+如果两条 60 FPS 视频是同一内容、逐帧时间对齐，并且原始视频是真实 60 FPS Ground Truth，不应只运行两个独立 NR。
+
+应该运行：
+
+rr-vfiqa inspect \
+  --reference original_60.mp4 \
+  --candidate interpolated_60.mp4 \
+  --out runs/full_reference \
+  --flow-backend farneback \
+  --device cpu
+
+自动路由应进入 full-reference，直接比较对应帧。Full Reference 比两个独立 NR 更适合判断插帧帧是否正确。
+
+如果实际插帧输入是 30 FPS、输出是 60 FPS，则应该使用：
+
+rr-vfiqa inspect \
+  --reference source_30.mp4 \
+  --candidate interpolated_60.mp4 \
+  --out runs/endpoint
+
+此时进入 Endpoint 模式。
+
+NR 更适合：
+
+只有一条视频时的风险筛查
+
+不适合作为有 Ground Truth 或端点参考时的主要模型评价手段。项目文档也明确说明三种模式使用不同标尺，不能跨模式或脱离输入契约解释。
+
+⸻
+
+最终优先级
+
+P0：立即修正
+
+1. 60 FPS Cadence parent lag 改为 1/30。
+2. 低 MCT/comp/cycle 不再独立构成 Cadence Risk。
+3. Cadence 增加 phase asymmetry 和 phase coherence 硬门控。
+4. Cadence 从全片均匀扫描统计，不使用风险窗口分布。
+5. 暂停 Cadence 指数乘法，分别报告 Artifact Quality 和 Cadence。
+6. Phase 增加双相位适用性判断。
+
+P1：真实战斗视频鲁棒性
+
+1. Motion 增加 Flow Reliability Gate。
+2. 粒子、闪光和外观变化不直接作为运动错误。
+3. UI 增加检测置信度和动态内容区分。
+4. Affected 改为 support spans 或全片 prevalence。
+5. Global Quality 与 Worst Issue 分离。
+
+P2：效果验证
+
+1. 将这条原始战斗视频作为负对照。
+2. 建立 True 60、Duplicate 60、Blend 60、Model 60 梯度。
+3. 使用 FR 或 Endpoint 结果标定 NR Phase/Cadence。
+4. 达成原始视频 Cadence Risk ≤0.1 后，再恢复单一 Overall。
+
+⸻
+
+当前这两份报告最可靠的结论不是“8.8 对 8.0”，而是：
+
+两条视频在普通时序和运动指标上几乎相同；插帧视频主要出现了更明显的奇偶相位质量差异和少量技术质量下降。当前 Cadence、UI、Affected 和全局严重等级存在明显误判，必须先整改后才能用于模型质量门禁。

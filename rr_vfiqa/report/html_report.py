@@ -17,7 +17,7 @@ import html
 from pathlib import Path
 from typing import Any
 
-from ..diagnosis.schema import quality_level, severity_band
+from ..diagnosis.schema import issue_level, quality_level, severity_band
 from ..diagnosis.rules import TRACKS
 
 _TRACK_COLOR = {
@@ -40,11 +40,22 @@ def render_html_report(report, *, mode_label: str | None = None) -> str:
     cad = meta.get("cadence", {}) or {}
     overall = d.get("overall_score")
     conf = d.get("confidence")
-    level_key, level_label = quality_level(overall if overall is not None else float("nan"))
+    # USERPLAN §10: the global (whole-video) level and the worst local issue
+    # level are two independent KPIs — one severe local issue is not a claim
+    # that the whole video is severely bad.
+    global_key, global_label = quality_level(
+        overall if overall is not None else float("nan"))
     issues = diag.get("issues", []) or []
     total_seconds = float(diag.get("total_seconds") or 0.0)
     affected = diag.get("affected_duration_fraction", 0.0)
+    confirmed = float(diag.get("confirmed_affected_seconds") or 0.0)
     worst = diag.get("worst_issue")
+    wl = diag.get("worst_issue_level") or {}
+    worst_key = wl.get("key") if isinstance(wl, dict) else None
+    worst_label = wl.get("label") if isinstance(wl, dict) else None
+    if not worst_label and worst is not None:
+        worst_key, worst_label = issue_level(float(worst.get("severity") or 0.0))
+    worst_label = worst_label or "—"
 
     mode = mode_label or meta.get("mode", "?")
     status = meta.get("status", "?")
@@ -57,10 +68,14 @@ def render_html_report(report, *, mode_label: str | None = None) -> str:
     parts.append(_kpi("Overall Quality", _fmt(overall, 1) + " / 100",
                       _BAND_COLOR.get(_score_band(overall), "#888")))
     parts.append(_kpi("Confidence", _fmt(conf, 2)))
-    parts.append(_kpi("Quality Level", level_label))
+    parts.append(_kpi("Global Quality", global_label,
+                      _BAND_COLOR.get(global_key, "#888")))
+    parts.append(_kpi("Worst Local Issue", worst_label,
+                      _BAND_COLOR.get(worst_key, "#888")))
     parts.append(_kpi("Mode", mode))
     parts.append(_kpi("Issues", str(len(issues))))
-    parts.append(_kpi("Affected", f"{affected * 100:.1f}%"))
+    parts.append(_kpi("Affected", f"{affected * 100:.1f}%"
+                      + (f"（确认 {confirmed:.1f}s）" if confirmed > 0 else "")))
     parts.append(_kpi("Worst", _fmt_interval(worst) if worst else "—"))
     parts.append("</div>")
     if cad:
@@ -230,6 +245,13 @@ def _render_card(i: int, issue: dict) -> str:
     thumb_block = (f'<h4>关键帧</h4><a href="{_esc(thumb)}" target="_blank">'
                    f'<img class="thumb" src="{_esc(thumb)}" alt="keyframe" '
                    f'loading="lazy"></a>' if thumb else "")
+    # USERPLAN §9: the display span (merged card) is shown separately from the
+    # actually-sampled support spans, so the reader can see what really backs
+    # the affected-duration figure (unsampled gaps are never counted).
+    spans = issue.get("support_spans") or []
+    span_parts = [f"{_ts(p[0])}–{_ts(p[1])}" for p in spans
+                  if isinstance(p, (list, tuple)) and len(p) == 2]
+    span_block = f"<span>采样 {'、'.join(span_parts)}</span>" if span_parts else ""
     return (
         f'<article class="card band-{band}" id="issue-{i}">'
         f'<div class="card-h" style="border-left:6px solid {color}">'
@@ -238,6 +260,7 @@ def _render_card(i: int, issue: dict) -> str:
         f'</div>'
         f'<div class="card-m">'
         f'<span>⏱ {_fmt_interval(issue)}</span>'
+        f'{span_block}'
         f'<span>严重度 {_fmt(issue.get("severity"), 2)}</span>'
         f'<span>置信度 {_fmt(issue.get("confidence"), 2)}</span>'
         f'<span>轨道 {_esc(issue.get("track"))}</span>'

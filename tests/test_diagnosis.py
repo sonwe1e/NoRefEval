@@ -14,7 +14,7 @@ import pytest
 
 from rr_vfiqa.diagnosis import (
     DiagnosticIssue, Evidence, TRACKS, cadence_integrity, cadence_penalty,
-    diagnose_windows, merge_issues,
+    confirmed_affected_seconds, diagnose_windows, issue_level, merge_issues,
 )
 from rr_vfiqa.diagnosis.rules import (
     RULES, Condition, Rule, affected_duration_fraction, evaluate_rules,
@@ -116,31 +116,48 @@ def test_cadence_penalty_nan_propagates():
     assert math.isnan(cadence_penalty(float("nan"), 0.5))
 
 
+def _collapsed_nr():
+    """Full v2 cadence-collapse evidence: parent motion + strong, coherent
+    parity asymmetry + duplicate/freeze corroboration."""
+    return {
+        "nr_parent_motion_p90": 25.0,
+        "nr_parent_moving_pixel_fraction": 0.5,
+        "nr_phase_asymmetry": 0.9,
+        "nr_phase_gap_signed": 0.85,
+        "nr_native_duplicate_fraction": 0.5,
+        "nr_native_freeze_fraction": 0.4,
+        "nr_mct_native_mean": 1.5,
+        "nr_native_self_comp": 0.01,
+        "nr_native_self_cycle": 1.0,
+    }
+
+
 def test_cadence_integrity_aggregation():
+    # Clean windows have no parent-motion / asymmetry signals -> zero risk.
     clean_windows = [_clean_nr() for _ in range(8)]
     rep = cadence_integrity(clean_windows, common_overall=85.0)
     assert rep.cadence_risk < 0.15
     assert rep.cadence_integrity > 70.0
-    assert rep.overall == pytest.approx(
-        85.0 * math.exp(-2.2 * rep.cadence_risk), rel=1e-6)
+    # separate reporting: overall stays the artifact-quality score.
+    assert rep.overall == pytest.approx(85.0, rel=1e-6)
 
-    # collapse every window: native dup + freeze + near-zero native mct/comp
-    bad = dict(_clean_nr())
-    bad.update(nr_native_duplicate_fraction=0.5, nr_native_freeze_fraction=0.4,
-               nr_mct_native_mean=1.5, nr_native_self_comp=0.01,
-               nr_native_self_cycle=1.0)
-    rep2 = cadence_integrity([bad] * 8, common_overall=85.0)
+    # collapse every window with FULL v2 evidence.
+    rep2 = cadence_integrity([_collapsed_nr()] * 8, common_overall=85.0)
     assert rep2.cadence_risk > 0.5
     assert rep2.cadence_integrity < 40.0
-    assert rep2.overall < rep.overall
+    # separate mode: overall is NOT exponentially crushed (USERPLAN §5).
+    assert rep2.overall == pytest.approx(85.0, rel=1e-6)
 
 
-def test_cadence_alternation_signal_helps():
-    base = dict(_clean_nr(), nr_mct_native_mean=4.0, nr_native_self_comp=0.03)
-    rep_no = cadence_integrity([base], common_overall=80.0)
-    rep_alt = cadence_integrity([base], common_overall=80.0,
-                                alternation_per_window=[0.9])
-    assert rep_alt.cadence_risk >= rep_no.cadence_risk
+def test_cadence_unstable_direction_is_suppressed():
+    # Same collapse evidence but the signed phase gap flips sign across
+    # windows -> the coherence gate suppresses the risk (USERPLAN §4.2 gate 3).
+    rep = cadence_integrity(
+        [_collapsed_nr()] * 4, common_overall=85.0,
+        phase_gap_signed_per_window=[0.8, -0.8, 0.8, -0.8])
+    assert rep.cadence_risk == 0.0, rep.evidence
+    assert rep.gates["phase_coherence"] is False
+    assert rep.overall == pytest.approx(85.0, rel=1e-6)
 
 
 # --------------------------------------------------------- issues / merging
@@ -181,6 +198,53 @@ def test_affected_duration_union():
     assert frac == pytest.approx(0.25)
 
 
+def test_affected_duration_uses_support_spans():
+    # A wide display span backed by narrow sampled windows must NOT count the
+    # unsampled gaps (USERPLAN §9): affected-duration is the support union.
+    issues = [
+        DiagnosticIssue("a", "t", 0.8, 0.9, 0.0, 2.0, "Temporal",
+                        support_spans=[[0.1, 0.3], [1.7, 1.9]]),
+    ]
+    # support union = 0.2 + 0.2 = 0.4; the display span alone would have been 2.0
+    assert confirmed_affected_seconds(issues) == pytest.approx(0.4)
+    assert affected_duration_fraction(issues, total_seconds=10.0) \
+        == pytest.approx(0.04)
+
+
+def test_merge_issues_unions_support_spans():
+    a = DiagnosticIssue("x", "t", 0.3, 0.8, 0.0, 0.5, "Temporal",
+                        support_spans=[[0.02, 0.09]])
+    b = DiagnosticIssue("x", "t", 0.9, 0.8, 0.6, 1.4, "Temporal",
+                        support_spans=[[0.61, 0.68], [1.31, 1.38]])
+    merged = merge_issues([a, b], nms_seconds=0.5)
+    assert len(merged) == 1
+    # display span stays the whole cluster union
+    assert merged[0].start_time == pytest.approx(0.0)
+    assert merged[0].end_time == pytest.approx(1.4)
+    # support_spans keep every sampled interval, overlap-deduped + sorted
+    assert merged[0].support_spans == [
+        [0.02, 0.09], [0.61, 0.68], [1.31, 1.38]]
+
+
+def test_merge_issues_dedupes_overlapping_support_spans():
+    a = DiagnosticIssue("x", "t", 0.3, 0.8, 0.0, 0.9, "Temporal",
+                        support_spans=[[0.1, 0.5]])
+    b = DiagnosticIssue("x", "t", 0.4, 0.8, 0.3, 1.4, "Temporal",
+                        support_spans=[[0.4, 0.7], [1.2, 1.3]])
+    merged = merge_issues([a, b], nms_seconds=0.5)
+    assert len(merged) == 1
+    assert merged[0].support_spans == [[0.1, 0.7], [1.2, 1.3]]
+
+
+def test_diagnose_windows_records_support_spans():
+    freeze = dict(_clean_nr(), nr_native_duplicate_fraction=0.5,
+                  nr_native_freeze_fraction=0.4, nr_native_self_comp=0.01,
+                  nr_mct_native_mean=2.0)
+    issues = diagnose_windows([(1.0, 1.2, 120, freeze, 0.9)], nms_seconds=0.5)
+    assert len(issues) == 1
+    assert issues[0].support_spans == [[1.0, 1.2]]
+
+
 # ------------------------------------------------------------------ schema
 def test_severity_and_quality_bands():
     assert severity_band(0.9)[0] == "severe"
@@ -193,6 +257,14 @@ def test_severity_and_quality_bands():
     assert quality_level(float("nan"))[0] == "unknown"
 
 
+def test_issue_level_mapping():
+    # Worst-local-issue level reuses the severity-band thresholds (USERPLAN §10).
+    assert issue_level(0.9) == severity_band(0.9)
+    assert issue_level(0.5)[0] == "high"
+    assert issue_level(0.25)[0] == "medium"
+    assert issue_level(0.05)[0] == "low"
+
+
 def test_issue_dict_marks_causes_inferred():
     issue = DiagnosticIssue("duplicate_freeze", "t", 0.8, 0.9, 1.0, 1.2,
                             "Temporal", probable_causes=["x"],
@@ -201,6 +273,17 @@ def test_issue_dict_marks_causes_inferred():
     assert d["causes_are_inferred"] is True
     assert d["severity_band"] == "severe"
     assert d["evidence"][0]["strength"] == 0.8
+
+
+def test_issue_dict_serializes_support_spans():
+    issue = DiagnosticIssue("duplicate_freeze", "t", 0.8, 0.9, 1.0, 1.2,
+                            "Temporal",
+                            support_spans=[[1.02, 1.09], [1.51, 1.58]])
+    d = issue.to_dict()
+    assert d["support_spans"] == [[1.02, 1.09], [1.51, 1.58]]
+    # issues without support_spans still serialize (backward compatible)
+    assert DiagnosticIssue("x", "t", 0.1, 0.5, 0.0, 1.0,
+                           "Temporal").to_dict()["support_spans"] == []
 
 
 # ----------------------------------------------------------- HTML report
@@ -235,6 +318,32 @@ def _fake_report():
     ), issues
 
 
+def test_build_diagnostics_block_splits_quality_levels():
+    from rr_vfiqa.diagnosis import build_diagnostics_block
+
+    class _Meta:
+        n_frames = 240
+        fps = 60.0
+
+    freeze = dict(_clean_nr(), nr_native_duplicate_fraction=0.5,
+                  nr_native_freeze_fraction=0.4, nr_native_self_comp=0.01,
+                  nr_mct_native_mean=2.0)
+    issues = diagnose_windows(
+        [(1.0, 1.2, 60, freeze, 0.9), (3.0, 3.2, 180, freeze, 0.9)],
+        nms_seconds=0.5)
+    diag = build_diagnostics_block(issues, _Meta(), 0.8)
+    # USERPLAN §10: global level (based on overall, unknown here) is separate
+    # from the worst local issue level (based on the worst issue severity).
+    assert diag["global_quality_level"]["key"] == "unknown"
+    assert diag["global_quality_level_basis"] == "overall"
+    assert diag["worst_issue_level"]["key"] in {"severe", "high", "medium", "low"}
+    assert diag["worst_issue"] is not None
+    # USERPLAN §9: confirmed seconds + estimated fraction from support spans.
+    assert diag["confirmed_affected_seconds"] == pytest.approx(0.4)
+    assert diag["estimated_affected_fraction"] == pytest.approx(0.1)
+    assert diag["affected_duration_fraction"] == pytest.approx(0.1)
+
+
 def test_html_report_renders_key_sections(tmp_path):
     from rr_vfiqa.report.html_report import render_html_report, write_html_report
     report, issues = _fake_report()
@@ -246,10 +355,15 @@ def test_html_report_renders_key_sections(tmp_path):
     assert "可能原因" in htmlstr
     assert "推断" in htmlstr                  # causes tagged as inferred
     assert "MOS" in htmlstr                    # honest semantics note
+    # USERPLAN §10: global vs worst-local level shown as independent KPIs.
+    assert "Global Quality" in htmlstr
+    assert "Worst Local Issue" in htmlstr
     # one card per diagnosed issue, each with a timeline target
     assert htmlstr.count('class="card band-') == len(issues)
     for track in ("Temporal", "UI/Text"):
         assert f">{track}<" in htmlstr or f'>{track}</span>' in htmlstr
+    # USERPLAN §9: sampled support spans shown on each card
+    assert "采样" in htmlstr
     # self-contained: no external links / scripts / stylesheets
     assert "http://" not in htmlstr and "https://" not in htmlstr
     assert "<script src" not in htmlstr and "<link" not in htmlstr

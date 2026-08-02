@@ -40,6 +40,18 @@ def quality_level(overall: float) -> tuple[str, str]:
     return "severe", "严重问题"
 
 
+def issue_level(severity: float) -> tuple[str, str]:
+    """Map the worst *local* issue severity (0..1) to a level (USERPLAN §10).
+
+    Reuses the ``SEVERITY_BANDS`` thresholds so the level stays consistent with
+    the per-issue severity badge shown on each card.  This is deliberately
+    separate from :func:`quality_level`: one severe local issue does *not* mean
+    the whole video is severely bad, so the two levels are reported as
+    independent fields.
+    """
+    return severity_band(severity)
+
+
 @dataclass
 class Evidence:
     """One measurable signal supporting (or weakening) a diagnosis.
@@ -87,6 +99,12 @@ class DiagnosticIssue:
     center_index: int = -1
     boxes: list[list[int]] = field(default_factory=list)
     maps: list[str] = field(default_factory=list)   # names of heatmaps in out/heatmaps/
+    # USERPLAN §9: the actually-sampled support intervals (seconds) that back
+    # this issue. ``start_time``/``end_time`` is the merged *display* span used
+    # to render one card; ``support_spans`` (the real sampled windows) is what
+    # counts toward ``affected_duration_fraction``, so unsampled gaps inside the
+    # display span are never counted as affected.
+    support_spans: list[list[float]] = field(default_factory=list)
     # USERPLAN §10: paths (relative to result root) to the companion videos and
     # keyframe thumbnail for this issue, populated by the report writer.
     clip_paths: dict[str, str] = field(default_factory=dict)
@@ -110,6 +128,7 @@ class DiagnosticIssue:
             "confidence": _r(self.confidence),
             "start_time": _r(self.start_time),
             "end_time": _r(self.end_time),
+            "support_spans": [list(s) for s in self.support_spans],
             "track": self.track,
             "center_index": int(self.center_index),
             "evidence": [e.to_dict() for e in self.evidence],

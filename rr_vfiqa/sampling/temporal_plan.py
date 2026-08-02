@@ -18,17 +18,27 @@ class TemporalTriplet:
 @dataclass(frozen=True)
 class TemporalLagPlan:
     native: tuple[tuple[int, int], ...]
+    parent: tuple[tuple[int, int], ...]      # 2× native_dt (FPS-adaptive, USERPLAN §4.1)
     lag_1_60: tuple[tuple[int, int], ...]
     lag_1_30: tuple[tuple[int, int], ...]
     native_triplets: tuple[TemporalTriplet, ...]
     common_triplets: tuple[TemporalTriplet, ...]
+    native_dt: float                         # median diff(pts), seconds
+    parent_dt: float                         # 2.0 * native_dt, seconds
 
     @classmethod
     def build(cls, times: np.ndarray) -> "TemporalLagPlan":
         times = np.asarray(times, np.float64)
         native = tuple((i, i + 1) for i in range(max(0, len(times) - 1)))
+        native_dt = (
+            float(np.median(np.diff(times))) if len(times) > 1 else float("nan"))
+        parent_dt = 2.0 * native_dt if np.isfinite(native_dt) else float("nan")
+        # FPS-adaptive parent lag (USERPLAN §4.1): 60 FPS -> 1/30 s, 120 FPS -> 1/60 s.
+        parent = tuple(
+            _target_pairs(times, parent_dt)) if np.isfinite(parent_dt) else ()
         return cls(
             native=native,
+            parent=parent,
             lag_1_60=tuple(_target_pairs(times, 1.0 / 60.0)),
             lag_1_30=tuple(_target_pairs(times, 1.0 / 30.0)),
             native_triplets=tuple(
@@ -36,6 +46,8 @@ class TemporalLagPlan:
                                 float(times[i + 2] - times[i]))
                 for i in range(max(0, len(times) - 2))),
             common_triplets=tuple(_target_triplets(times, 1.0 / 60.0)),
+            native_dt=native_dt,
+            parent_dt=parent_dt,
         )
 
 
@@ -68,6 +80,7 @@ class FlowPairPlan:
                 plan.add(triplet.middle, triplet.right, tag)
                 plan.add(triplet.left, triplet.right, tag)
         plan.extend(lag_plan.native, "mct-native")
+        plan.extend(lag_plan.parent, "mct-parent")
         plan.extend(lag_plan.lag_1_60, "mct-1-60")
         plan.extend(lag_plan.lag_1_30, "mct-1-30")
         return plan

@@ -519,7 +519,8 @@ def evaluate_endpoint_reference(
         },
         "calibrator": "lightgbm" if calibrator else "formula",
         "calibrator_contract": calibrator_contract,
-        "diagnostics": build_diagnostics_block(ep_issues, candidate.meta, conf),
+        "diagnostics": build_diagnostics_block(
+            ep_issues, candidate.meta, conf, overall=overall),
         "elapsed_seconds": round(time.perf_counter() - t_start, 2),
     }
     meta.update(report_provenance(

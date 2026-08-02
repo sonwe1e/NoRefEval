@@ -108,10 +108,16 @@ def _inspect_core(*, candidate: str, reference: str | None, mode: str = "auto",
         "overall": d.get("overall_score"),
         "confidence": d.get("confidence"),
         "mode": mode,
+        # USERPLAN §10: global (whole video) vs worst local issue level are
+        # reported independently; ``quality_level`` is kept as the worst local
+        # issue label for backward compatibility with older consumers.
         "quality_level": ((diag.get("worst_issue") or {}).get("severity_label")
                           if diag.get("worst_issue") else None),
+        "global_quality_level": (diag.get("global_quality_level") or {}).get("label"),
+        "worst_issue_level": (diag.get("worst_issue_level") or {}).get("label"),
         "issues": diag.get("issue_count", 0),
         "affected_duration_fraction": diag.get("affected_duration_fraction", 0.0),
+        "confirmed_affected_seconds": diag.get("confirmed_affected_seconds", 0.0),
         "report_dir": out_dir,
         "auto_route": route.to_dict() if route else None,
     }

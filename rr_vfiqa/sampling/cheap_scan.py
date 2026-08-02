@@ -14,6 +14,11 @@ import numpy as np
 
 from ..io.video_reader import VideoReader
 
+# Luma delta (0-255) above which a pixel counts as "moving" for the scan-level
+# cadence motion gate.  Kept deliberately low so genuine content motion is not
+# dismissed; a collapsed cadence still shows a high parent-lag moving fraction.
+MOVING_PIXEL_DELTA = 3.0
+
 
 @dataclass
 class CheapScan:
@@ -28,6 +33,14 @@ class CheapScan:
     hash_dist: np.ndarray           # (N,) hamming distance to previous frame
     frame_diff: np.ndarray          # (N,) mean |Y_k - Y_{k-1}| at scan res
     hist_dist: np.ndarray           # (N,) per-channel Bhattacharyya to previous
+    # USERPLAN §4.1/§4.4: parent-lag (2× native) differences and moving-pixel
+    # fractions maintained by the Tier-1 scan so the *full-film* cadence is
+    # estimated from uniform per-scene statistics, never from risk-selected
+    # windows. ``moving_frac_*`` is the fraction of pixels whose luma moved by
+    # more than ``MOVING_PIXEL_DELTA`` at that lag.
+    frame_diff_parent: np.ndarray   # (N,) mean |Y_k - Y_{k-2}| at scan res
+    moving_frac_native: np.ndarray  # (N,) moving-pixel fraction at lag-1
+    moving_frac_parent: np.ndarray  # (N,) moving-pixel fraction at lag-2
 
     def parity_sharpness_gap(self) -> np.ndarray:
         """|sharpness_even - local trend| — systematic odd-frame blur shows up
@@ -93,8 +106,10 @@ def _hamming(a: np.int64, b: np.int64) -> int:
 def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:
     idxs, lmean, lstd, sharp, grad, edgef, hashes = [], [], [], [], [], [], []
     prev_gray = None
+    prev2_gray = None
     prev_hist = None
     hdist, fdiff, hgdist = [0.0], [0.0], [0.0]
+    fdiff_parent, mfrac_native, mfrac_parent = [0.0], [0.0], [0.0]
 
     for idx, img in reader.iter_frames(width=width):
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
@@ -114,10 +129,22 @@ def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:
         hashes.append(_phash64(gray))
         if prev_gray is not None and prev_gray.shape == gray.shape:
             hdist.append(float(_hamming(hashes[-1], hashes[-2])))
-            fdiff.append(float(np.abs(gf - prev_gray.astype(np.float32)).mean()))
+            diff_native = np.abs(gf - prev_gray.astype(np.float32))
+            fdiff.append(float(diff_native.mean()))
+            mfrac_native.append(
+                float(np.mean(diff_native > MOVING_PIXEL_DELTA)))
             hgdist.append(float(np.mean([
                 cv2.compareHist(p, h, cv2.HISTCMP_BHATTACHARYYA)
                 for p, h in zip(prev_hist, hist)])))
+            if prev2_gray is not None and prev2_gray.shape == gray.shape:
+                diff_parent = np.abs(gf - prev2_gray.astype(np.float32))
+                fdiff_parent.append(float(diff_parent.mean()))
+                mfrac_parent.append(
+                    float(np.mean(diff_parent > MOVING_PIXEL_DELTA)))
+            else:
+                fdiff_parent.append(0.0)
+                mfrac_parent.append(0.0)
+        prev2_gray = prev_gray
         prev_gray = gray
         prev_hist = hist
 
@@ -134,6 +161,12 @@ def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:
         hash_dist=np.asarray(hdist + [0.0] * (n - len(hdist)), np.float32)[:n],
         frame_diff=np.asarray(fdiff + [0.0] * (n - len(fdiff)), np.float32)[:n],
         hist_dist=np.asarray(hgdist + [0.0] * (n - len(hgdist)), np.float32)[:n],
+        frame_diff_parent=np.asarray(
+            fdiff_parent + [0.0] * (n - len(fdiff_parent)), np.float32)[:n],
+        moving_frac_native=np.asarray(
+            mfrac_native + [0.0] * (n - len(mfrac_native)), np.float32)[:n],
+        moving_frac_parent=np.asarray(
+            mfrac_parent + [0.0] * (n - len(mfrac_parent)), np.float32)[:n],
     )
 
 

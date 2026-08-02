@@ -16,6 +16,7 @@ from ..motion.flow_geometry import geometry_stats, jacobian_det
 from ..motion.global_camera_motion import dense_affine_residual
 from ..motion.occlusion import cycle_occlusion
 from ..models.tracker_backend import KLTTracker
+from ..sampling.cheap_scan import MOVING_PIXEL_DELTA
 from ..sampling.temporal_plan import TemporalLagPlan, TemporalTriplet
 from ..schema import (
     FrameBundle,
@@ -219,6 +220,8 @@ def _track_smoothness(bundle: FrameBundle) -> dict[str, float]:
     if points is None or len(points) < 12:
         return {
             "nr_track_points": float(0 if points is None else len(points)),
+            "nr_track_initial_points": float(0 if points is None else len(points)),
+            "nr_persistent_track_fraction": float("nan"),
             "nr_track_accel_p90": float("nan"),
             "nr_track_jerk_p90": float("nan"),
             "nr_track_turn_p90": float("nan"),
@@ -229,6 +232,8 @@ def _track_smoothness(bundle: FrameBundle) -> dict[str, float]:
     if good.sum() < 8:
         return {
             "nr_track_points": float(good.sum()),
+            "nr_track_initial_points": float(len(points)),
+            "nr_persistent_track_fraction": float(good.sum() / len(points)),
             "nr_track_accel_p90": float("nan"),
             "nr_track_jerk_p90": float("nan"),
             "nr_track_turn_p90": float("nan"),
@@ -269,6 +274,8 @@ def _track_smoothness(bundle: FrameBundle) -> dict[str, float]:
 
     return {
         "nr_track_points": float(good.sum()),
+        "nr_track_initial_points": float(len(points)),
+        "nr_persistent_track_fraction": float(good.sum() / len(points)),
         "nr_track_accel_p90": (
             float(np.percentile(accel_ratio, 90))
             if accel_ratio.size else float("nan")),
@@ -281,31 +288,108 @@ def _track_smoothness(bundle: FrameBundle) -> dict[str, float]:
     }
 
 
+# USERPLAN §7 flow-reliability thresholds.
+FLOW_VALID_FRACTION_MIN = 0.25     # below this, motion evidence is not trusted
+_PHOTOMETRIC_SUPPORT_THRESHOLD = 8.0   # luma delta explained by warping
+_APPEARANCE_CHANGE_THRESHOLD = 12.0    # luma delta NOT explained by warping
+
+
+def _visibility_masks(
+    y: np.ndarray,
+    flows: WindowFlows,
+    pairs: list[tuple[int, int]],
+    cfg: EvalConfig,
+) -> list[np.ndarray]:
+    """Per-pair forward-backward cycle-consistency visibility masks."""
+    masks: list[np.ndarray] = []
+    for a, b in pairs:
+        f_ab, f_ba = flows.pair(a, b)
+        cycle = flow_magnitude(warp_flow(f_ab, f_ba))
+        masks.append(cycle < cfg.occlusion_cycle_threshold)
+    return masks
+
+
+def _flow_reliability(
+    y: np.ndarray,
+    flows: WindowFlows,
+    pairs: list[tuple[int, int]],
+    cfg: EvalConfig,
+) -> dict[str, float]:
+    """Flow validity / photometric support / effect-transience per window.
+
+    USERPLAN §7: particles, explosions, flashes and occlusion make optical
+    flow unreliable; those appearance changes must raise *uncertainty*, not
+    motion error.  ``nr_effect_transient_fraction`` is the share of pixels
+    whose change is NOT explained by the flow (new/vanishing content) — it is
+    reported as uncertainty, never folded into accel/jerk/fold.
+    """
+    cycle_thr = float(cfg.occlusion_cycle_threshold)
+    valid: list[float] = []
+    fwbw: list[float] = []
+    photo: list[float] = []
+    trans: list[float] = []
+    for a, b in pairs:
+        f_ab, f_ba = flows.pair(a, b)
+        warped = backward_warp(y[b], f_ab)
+        cycle = flow_magnitude(warp_flow(f_ab, f_ba))
+        vis = cycle < cycle_thr
+        if vis.size == 0:
+            continue
+        valid.append(float(np.mean(vis)))
+        fwbw.append(float(np.clip(
+            1.0 - float(np.median(cycle)) / (cycle_thr + 1e-6), 0.0, 1.0)))
+        res = np.abs(warped - y[a])
+        photo.append(float(np.mean(res[vis] < _PHOTOMETRIC_SUPPORT_THRESHOLD)))
+        trans.append(float(np.mean(res > _APPEARANCE_CHANGE_THRESHOLD)))
+
+    def _m(vals: list[float]) -> float:
+        return float(np.mean(vals)) if vals else float("nan")
+
+    return {
+        "nr_flow_valid_fraction": _m(valid),
+        "nr_forward_backward_consistency": _m(fwbw),
+        "nr_photometric_support_fraction": _m(photo),
+        "nr_effect_transient_fraction": _m(trans),
+    }
+
+
 def _tile_motion_dynamics(
     bundle: FrameBundle,
     flows: WindowFlows,
     pairs: tuple[tuple[int, int], ...],
     grid: int = 4,
+    visibility_masks: list[np.ndarray] | None = None,
 ) -> dict[str, float]:
+    n_tiles = grid * grid
     vectors: list[np.ndarray] = []
     centers: list[float] = []
-    for a, b in pairs:
+    for i, (a, b) in enumerate(pairs):
         dt = max(float(bundle.times[b] - bundle.times[a]), 1e-6)
         field = flows.forward(a, b)
         h, w = field.shape[:2]
+        mask = (visibility_masks[i] if visibility_masks
+                and i < len(visibility_masks) else None)
         # USERPLAN P2: remove affine camera motion (rotation/zoom/translation)
         # before measuring per-tile dynamics, so camera pans do not read as
         # local acceleration/jerk.
         residual = dense_affine_residual(field)
-        tiles = []
-        for gy in range(grid):
-            for gx in range(grid):
-                tile = residual[
+        tiles = np.full((n_tiles, 2), np.nan, np.float64)
+        for ti, (gy, gx) in enumerate(
+                (gy, gx) for gy in range(grid) for gx in range(grid)):
+            tile = residual[
+                gy * h // grid:(gy + 1) * h // grid,
+                gx * w // grid:(gx + 1) * w // grid,
+            ].reshape(-1, 2)
+            if mask is not None:
+                tm = mask[
                     gy * h // grid:(gy + 1) * h // grid,
                     gx * w // grid:(gx + 1) * w // grid,
-                ]
-                tiles.append(np.median(tile.reshape(-1, 2), axis=0) / dt)
-        vectors.append(np.asarray(tiles, np.float64))
+                ].reshape(-1)
+                if tm.sum() < 32:
+                    continue          # unreliable tile -> no motion evidence
+                tile = tile[tm]
+            tiles[ti] = np.median(tile, axis=0) / dt
+        vectors.append(tiles)
         centers.append(0.5 * float(bundle.times[a] + bundle.times[b]))
     if len(vectors) < 2:
         return {
@@ -323,7 +407,8 @@ def _tile_motion_dynamics(
         if len(velocity) >= 3 else np.zeros_like(acceleration))
     speed = np.linalg.norm(velocity, axis=2)
     dt_sample = max(float(np.median(np.diff(flow_times))), 1e-6)
-    speed_ref = np.median(speed, axis=0) + 1.0
+    # nan-aware: unreliable tiles (NaN) must not poison the aggregate.
+    speed_ref = np.nanmedian(speed, axis=0) + 1.0
     accel_ratio = np.linalg.norm(acceleration, axis=2) * dt_sample / speed_ref
     jerk_ratio = (
         np.linalg.norm(jerk, axis=2) * dt_sample * dt_sample / speed_ref)
@@ -331,12 +416,21 @@ def _tile_motion_dynamics(
     dot = np.sum(a * b, axis=2)
     moving = (np.linalg.norm(a, axis=2) > 8.0) & (
         np.linalg.norm(b, axis=2) > 8.0)
-    reversal = float(np.mean(dot[moving] < 0.0)) if moving.any() else 0.0
+    reversal = (
+        float(np.mean(dot[moving] < 0.0)) if moving.any() else 0.0)
     return {
-        "nr_flow_accel_ratio": float(np.median(accel_ratio)),
-        "nr_flow_jerk_ratio": float(np.median(jerk_ratio)),
-        "nr_tile_accel_p90": float(np.percentile(accel_ratio, 90)),
-        "nr_tile_jerk_p90": float(np.percentile(jerk_ratio, 90)),
+        "nr_flow_accel_ratio": (
+            float(np.nanmedian(accel_ratio))
+            if np.isfinite(accel_ratio).any() else float("nan")),
+        "nr_flow_jerk_ratio": (
+            float(np.nanmedian(jerk_ratio))
+            if np.isfinite(jerk_ratio).any() else float("nan")),
+        "nr_tile_accel_p90": (
+            float(np.nanpercentile(accel_ratio, 90))
+            if np.isfinite(accel_ratio).any() else float("nan")),
+        "nr_tile_jerk_p90": (
+            float(np.nanpercentile(jerk_ratio, 90))
+            if np.isfinite(jerk_ratio).any() else float("nan")),
         "nr_local_reversal_fraction": reversal,
     }
 
@@ -383,6 +477,39 @@ def _screen_static_ui_mask(
             persistent.astype(np.uint8), np.ones((3, 3), np.uint8)
         ).astype(bool)
     return ui_mask, edge_stack
+
+
+def _ui_reliability(
+    edge_maps: list[np.ndarray],
+    frame_shape: tuple[int, int],
+) -> tuple[dict[str, float], np.ndarray]:
+    """UI detection confidence / persistence / screen motion (USERPLAN §8).
+
+    A real HUD persists at fixed screen coordinates with a compact area.  A
+    flash or particle burst does not: its per-frame UI mask is erratic and
+    moves around.  ``ui_screen_motion`` is the mean 1-IoU of consecutive
+    per-frame UI masks; ``ui_detection_confidence`` is the fraction of frames
+    showing a compact, non-trivial mask.  Both gate whether the UI instability
+    features are trustworthy at all.
+    """
+    h, w = frame_shape
+    frame_area = max(h * w, 1)
+    per_frame = [_screen_static_ui_mask([em])[0] for em in edge_maps]
+    areas = np.asarray([m.sum() for m in per_frame], np.float64)
+    ious: list[float] = []
+    for t in range(len(per_frame) - 1):
+        inter = int((per_frame[t] & per_frame[t + 1]).sum())
+        union = int((per_frame[t] | per_frame[t + 1]).sum())
+        ious.append(inter / (union + 1e-6))
+    screen_motion = 1.0 - (float(np.mean(ious)) if ious else 1.0)
+    has_ui = areas >= max(32.0, 0.0005 * frame_area)
+    persistence = (float(np.mean(has_ui)) if len(areas) else 0.0)
+    median_area_ratio = float(np.median(areas)) / frame_area
+    return {
+        "ui_detection_confidence": round(persistence, 4),
+        "ui_screen_motion": round(screen_motion, 4),
+        "ui_component_area_ratio": round(median_area_ratio, 6),
+    }, np.asarray(per_frame)
 
 
 def compute_window(
@@ -439,17 +566,27 @@ def compute_window(
         "nr_mct_medium_mean": medium_mean,
         "nr_mct_medium_p90": medium_p90,
     })
-    out.update(_tile_motion_dynamics(bundle, flows, short_pairs))
+    # USERPLAN §7: flow reliability gate.  Particles, flashes, explosions and
+    # occlusion make optical flow unreliable; those appearance changes raise
+    # uncertainty, not motion error.  Reliable-region tile dynamics are
+    # computed only over cycle-consistent pixels.
+    vis_masks = _visibility_masks(y, flows, list(short_pairs), cfg)
+    out.update(_flow_reliability(y, flows, list(short_pairs), cfg))
+    out.update(_tile_motion_dynamics(
+        bundle, flows, short_pairs, visibility_masks=vis_masks))
+    out.update(_track_smoothness(bundle))
 
     # Local flow geometry after removing the affine camera motion (USERPLAN P2).
     # Negative/low Jacobian determinants expose folding and tearing without an
     # endpoint reference; using the affine residual stops camera rotation/zoom
-    # from being mistaken for local folding.
+    # from being mistaken for local folding.  Geometry is computed on reliable
+    # pixels only (USERPLAN §7).
     geometry: list[dict[str, float]] = []
-    for a, b in short_pairs:
+    for i, (a, b) in enumerate(short_pairs):
         field = flows.forward(a, b)
         residual = dense_affine_residual(field)
-        geometry.append(geometry_stats(residual))
+        mask = (vis_masks[i] if i < len(vis_masks) else None)
+        geometry.append(geometry_stats(residual, mask=mask))
     for source_key, output_key in (
         ("flow_fold_frac", "nr_flow_fold_fraction"),
         ("flow_jdet_low_frac", "nr_flow_jdet_low_fraction"),
@@ -463,7 +600,25 @@ def compute_window(
         out[output_key] = (
             float(np.mean(values)) if values else float("nan"))
 
-    out.update(_track_smoothness(bundle))
+    # USERPLAN §7: separate trackable-motion error from appearance-change
+    # uncertainty.  The flow-valid / photometric support fractions describe
+    # how much of the frame's change is actually *motion*; the rest is
+    # uncertainty that must NOT be scored as smoothness failure.
+    vf = out.get("nr_flow_valid_fraction", float("nan"))
+    if np.isfinite(vf) and vf < FLOW_VALID_FRACTION_MIN:
+        # Motion evidence not trustworthy -> N/A (like phase gating).
+        out["nr_trackable_motion_error"] = float("nan")
+        out["nr_flow_reliable"] = 0.0
+    else:
+        out["nr_trackable_motion_error"] = float(np.nanmax([
+            out.get(k, float("nan")) for k in (
+                "nr_flow_accel_ratio", "nr_flow_jerk_ratio",
+                "nr_flow_fold_fraction", "nr_flow_jdet_low_fraction",
+                "nr_flow_divergence_std", "nr_flow_curl_std",
+            ) if np.isfinite(out.get(k, float("nan")))]) or float("nan"))
+        out["nr_flow_reliable"] = 1.0
+    out["nr_appearance_change_uncertainty"] = out.get(
+        "nr_effect_transient_fraction", float("nan"))
 
     # Phase-invariant alternation: swapping phase labels leaves |gap| intact.
     sharp = np.asarray([
@@ -521,11 +676,90 @@ def compute_window(
     out["nr_duplicate_native"] = out["nr_native_duplicate_fraction"]
     out["nr_freeze_native"] = out["nr_native_freeze_fraction"]
 
+    # --- USERPLAN §4.1: FPS-adaptive native/parent lags ---------------------
+    # For a 60 FPS input, native = 1/60 s and parent = 1/30 s (t -> t+2); for a
+    # 120 FPS input, native = 1/120 s and parent = 1/60 s.  The cadence motion
+    # gate MUST use the parent scale, never the fixed 1/60 s ``nr_raw_diff_1_60``
+    # (which equals native for 60 FPS and is therefore not "longer-scale").
+    if len(native_diffs):
+        out["nr_raw_diff_native"] = float(np.mean(native_diffs))
+    else:
+        out["nr_raw_diff_native"] = float("nan")
+
+    parent_pairs = getattr(lag_plan, "parent", ())
+    parent_diffs = [
+        float(np.mean(np.abs(y[b] - y[a]))) for a, b in parent_pairs
+    ]
+    parent_moving: list[float] = []
+    for a, b in parent_pairs:
+        parent_moving.append(float(np.mean(
+            np.abs(y[b] - y[a]) > MOVING_PIXEL_DELTA)))
+    if parent_diffs:
+        pd = np.asarray(parent_diffs, np.float64)
+        out["nr_raw_diff_parent"] = float(np.mean(pd))
+        out["nr_parent_motion_p90"] = float(np.percentile(pd, 90))
+    else:
+        out["nr_raw_diff_parent"] = float("nan")
+        out["nr_parent_motion_p90"] = float("nan")
+    out["nr_parent_moving_pixel_fraction"] = (
+        float(np.mean(parent_moving)) if parent_moving else float("nan"))
+
+    # --- USERPLAN §4.2: parity asymmetry of native adjacent diffs -----------
+    # d_t = mean |Y_{t+1} - Y_t| (in moving regions implicitly, since static
+    # pixels contribute ~0).  Split by parity of t.  A 30->60 duplicate stream
+    # has d alternating ~0 / real-motion, so |median(d_even) - median(d_odd)|
+    # is large; a true 60 FPS combat clip has roughly uniform d, so the
+    # asymmetry stays small.
+    d_all = np.asarray(native_diffs, np.float64)
+    k = bundle.indices.astype(np.int64)[: len(d_all)]
+    even_sel = (k % 2 == 0)
+    d_even = d_all[even_sel]
+    d_odd = d_all[~even_sel]
+    if len(d_even) and len(d_odd):
+        med_e, med_o = float(np.median(d_even)), float(np.median(d_odd))
+        denom = (med_e + med_o + 1e-6)
+        out["nr_phase_asymmetry"] = float(abs(med_e - med_o) / denom)
+        out["nr_phase_gap_signed"] = float((med_o - med_e) / denom)
+        # +1 => even phase carries less new content; -1 => odd phase deficient;
+        # 0 => no usable parity structure (numeric so scalars stay float).
+        out["nr_phase_deficient_sign"] = (
+            float(np.sign(med_e - med_o))
+            if abs(med_e - med_o) > 1e-6 else 0.0)
+    else:
+        out["nr_phase_asymmetry"] = float("nan")
+        out["nr_phase_gap_signed"] = float("nan")
+        out["nr_phase_deficient_sign"] = 0.0
+    # Alternation energy of the adjacent-diff sequence: the previously-referenced
+    # but never-computed ``nr_native_motion_alternation`` signal used by the
+    # cadence gate as parity-structure corroboration.
+    out["nr_native_motion_alternation"] = (
+        _alternation_energy(d_all, k) if len(d_all) else float("nan"))
+
     # Screen-coordinate edge stability in typical HUD bands. Camera motion
     # does not explain changes here; this remains an honest UI/text proxy.
     edge_maps = [
         cv2.Canny(y[i].astype(np.uint8), 60, 160) > 0 for i in range(n)
     ]
+    # USERPLAN §8: only trust the UI instability signals when the "UI" is a
+    # compact structure that persists at FIXED screen coordinates.  Combat
+    # flashes and particles produce erratic, moving masks -> rejected.
+    ui_rel, _ui_per_frame = _ui_reliability(edge_maps, (y.shape[1], y.shape[2]))
+    native_dt = (float(np.median(np.diff(bundle.times)))
+                 if len(bundle.times) > 1 else 1.0 / 60.0)
+    ui_rel["ui_persistence_seconds"] = round(
+        ui_rel["ui_detection_confidence"] * max(n - 1, 0) * native_dt, 4)
+    out.update(ui_rel)
+    # USERPLAN §8: reject what is clearly NOT a HUD.  A persistent compact
+    # mask is trusted and scored (even one that drifts — a real UI defect must
+    # be detected, not hidden); a mask that covers most of the frame (a
+    # full-screen flash / particle burst) or is essentially absent is rejected.
+    # ``ui_screen_motion`` stays in the report as diagnostic metadata only —
+    # per-frame masks are too noisy to hard-gate on.
+    ui_trustworthy = bool(
+        ui_rel["ui_detection_confidence"] >= 0.5
+        and 0.0002 <= ui_rel["ui_component_area_ratio"] <= 0.25)
+    out["nr_ui_reliable"] = 1.0 if ui_trustworthy else 0.0
+
     ui_mask, edge_stack = _screen_static_ui_mask(edge_maps)
     ui_changes = [
         float(np.mean(np.logical_xor(
@@ -572,6 +806,13 @@ def compute_window(
     counts = np.asarray(component_counts, np.float64)
     out["nr_ui_component_instability"] = float(
         np.std(counts) / (np.mean(counts) + 1.0))
+
+    # USERPLAN §8: unreliable UI evidence is N/A, not a score.  This keeps
+    # combat flashes / particles from producing a misleading UI instability.
+    if not ui_trustworthy:
+        for _key in ("nr_ui_edge_instability", "nr_text_stroke_instability",
+                     "nr_ui_component_instability"):
+            out[_key] = float("nan")
 
     # Learned backend is optional and weak. Missing means unavailable, not
     # perfect quality; the mode fusion simply omits this category.

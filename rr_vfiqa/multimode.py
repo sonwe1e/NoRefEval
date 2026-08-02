@@ -17,6 +17,7 @@ from .diagnosis import (
     build_diagnostics_block,
     cadence_integrity,
     diagnose_windows,
+    scan_phase_stats,
     select_map_name,
 )
 from .fusion.feature_registry import feature_contract_hash, required_features
@@ -29,6 +30,7 @@ from .fusion.mode_score_schemas import (
 from .io.full_reference_alignment import build_full_reference_alignment
 from .io.video_reader import VideoReader
 from .metrics import full_reference, no_reference
+from .metrics.parity_frequency import scan_phase_applicability
 from .metrics.window_flows import WindowFlows
 from .models.vqa_backend import get_vqa_backend
 from .motion.flow_estimator import get_flow_backend
@@ -674,6 +676,11 @@ def evaluate_no_reference(
     say("tier-1 candidate scan")
     scan = scan_candidate(candidate, width=cfg.preset.scan_width)
     cuts = scene_cuts_from_scan(scan)
+    # USERPLAN §6: is a two-phase interpretation applicable for THIS clip?
+    # True 60 FPS combat flicker is direction-unstable -> phase gated out.
+    phase_meta = scan_phase_applicability(scan)
+    gated_categories: set[str] = (
+        set() if phase_meta["applicable"] else {"phase"})
     windows, _, _ = select_time_windows(
         cfg,
         candidate.meta,
@@ -719,8 +726,24 @@ def evaluate_no_reference(
         wf for wf in window_features
         if all(np.isfinite(wf.scalars.get(key, float("nan"))) for key in required)
     ]
+    # USERPLAN §7: if the flow is unreliable in most windows, motion evidence
+    # is N/A (particles / flashes / explosions make flow untrustworthy).
+    valid_flow = [
+        float(wf.scalars["nr_flow_valid_fraction"])
+        for wf in valid
+        if np.isfinite(wf.scalars.get("nr_flow_valid_fraction", float("nan")))
+    ]
+    flow_reliability = {
+        "median_valid_fraction": (round(float(np.median(valid_flow)), 4)
+                                  if valid_flow else None),
+        "unreliable": bool(valid_flow) and (
+            float(np.median(valid_flow)) < 0.25),
+    }
+    if flow_reliability["unreliable"]:
+        gated_categories.add("motion")
     overall, subscores, category_errors = compute_mode_scores(
-        EvaluationMode.NO_REFERENCE, valid)
+        EvaluationMode.NO_REFERENCE, valid,
+        gated_categories=gated_categories)
     coverage = _unique_coverage(valid, candidate.meta.n_frames)
     confidence = compute_mode_confidence(
         valid_windows=len(valid),
@@ -760,7 +783,8 @@ def evaluate_no_reference(
     valid = [wf for wf in window_features
              if all(np.isfinite(wf.scalars.get(key, float("nan"))) for key in required)]
     overall, subscores, category_errors = compute_mode_scores(
-        EvaluationMode.NO_REFERENCE, valid)
+        EvaluationMode.NO_REFERENCE, valid,
+        gated_categories=gated_categories)
     coverage = _unique_coverage(valid, candidate.meta.n_frames)
     confidence = compute_mode_confidence(
         valid_windows=len(valid),
@@ -782,25 +806,19 @@ def evaluate_no_reference(
         confidence, cfg.preset.temporal_nms_seconds,
     )
 
-    # --- USERPLAN §5 cadence integrity + §7 diagnostic evidence ------------
-    # The shared 1/60 s score must not hide a collapsed native cadence, so we
-    # penalise the common-time overall multiplicatively and surface both the
-    # common-time and cadence-integrity numbers.  Diagnostics are built from
-    # every window (incl. ones that failed the required-feature gate) so a
-    # localized defect still produces a located issue.
-    # USERPLAN P0-R1: shared-scale (1/60 s) motion per window drives the
-    # cadence motion gate — windows with no longer-scale motion and no
-    # odd/even alternation are treated as genuinely static, not collapsed.
+    # --- USERPLAN §4/§5 cadence integrity v2 + §7 diagnostic evidence --------
+    # v2 (USERPLAN §4) declares a cadence collapse only when ALL hard gates
+    # hold — parent-scale motion present, parity asymmetry strong, direction
+    # coherent — estimated from the full-film Tier-1 scan (scan_phase_stats),
+    # never from risk-selected windows.  Before real-video calibration the
+    # exponential multiplier is suspended (USERPLAN §5): overall stays the
+    # artifact quality and Cadence Integrity is reported as a separate
+    # diagnostic axis.
     cad_rep = cadence_integrity(
         [wf.scalars for wf in valid], overall,
-        alternation_per_window=[
-            float(wf.scalars.get("nr_native_motion_alternation", float("nan")))
-            for wf in valid],
-        # USERPLAN P0-R2: use the raw (non-motion-compensated) frame diff, not
-        # nr_mct_1_60_mean, for the cadence motion gate — MCT residual is low
-        # for smooth motion and would misclassify moving duplicate frames.
-        common_time_motion_per_window=[
-            float(wf.scalars.get("nr_raw_diff_1_60", float("nan")))
+        scan_stats=scan_phase_stats(scan, cuts),
+        phase_gap_signed_per_window=[
+            float(wf.scalars.get("nr_phase_gap_signed", float("nan")))
             for wf in valid],
     )
     if np.isfinite(overall):
@@ -865,11 +883,16 @@ def evaluate_no_reference(
         "time_scales_seconds": [round(1.0 / 60.0, 6), round(1.0 / 30.0, 6)],
         "temporal_lag_contract": {
             "native": "input-cadence",
+            "parent": "2x-native-cadence (FPS-adaptive, USERPLAN §4.1)",
             "lag_1_60_seconds": round(1.0 / 60.0, 6),
             "lag_1_30_seconds": round(1.0 / 30.0, 6),
             "self_reference_half_span_seconds": round(1.0 / 60.0, 6),
         },
         "phase_contract": "two-phase-self-reference",
+        "phase": phase_meta,
+        "phase_gated": "phase" in gated_categories,
+        "flow_reliability": flow_reliability,
+        "motion_gated": "motion" in gated_categories,
         "diagnostic_branches": {
             "flow_geometry": "global-translation-residual-jacobian",
             "track_smoothness": "camera-relative-klt",
@@ -896,11 +919,17 @@ def evaluate_no_reference(
             "cadence_integrity": round(cad_rep.cadence_integrity, 2),
             "common_time_quality": round(cad_rep.common_time_quality, 2)
             if np.isfinite(cad_rep.common_time_quality) else None,
+            "penalty_mode": cad_rep.penalty_mode,
             "penalty_lambda": 2.2,
+            "gates": cad_rep.gates,
+            "phase_asymmetry": cad_rep.phase_asymmetry,
+            "phase_coherence": cad_rep.phase_coherence,
+            "parent_motion_p90": cad_rep.parent_motion_p90,
+            "parent_moving_fraction": cad_rep.parent_moving_fraction,
             "evidence": cad_rep.evidence,
         },
         "diagnostics": build_diagnostics_block(
-            nr_issues, candidate.meta, confidence),
+            nr_issues, candidate.meta, confidence, overall=overall),
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
     meta.update(report_provenance(
@@ -1227,7 +1256,7 @@ def evaluate_full_reference(
         },
         "calibrator": "fr-formula-v2",
         "diagnostics": build_diagnostics_block(
-            fr_issues, candidate.meta, confidence),
+            fr_issues, candidate.meta, confidence, overall=overall),
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
     meta.update(report_provenance(
