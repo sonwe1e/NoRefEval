@@ -384,7 +384,21 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 
 ### 11.3 留待后续（含理由）
 
-- error-map 阶段（NR/FR top-8 窗口）重解码+重算流，fast 档实测 18.8s/75.8s（25%）：复用需保留 37MB/窗口（standard 150MB），32 窗口 4.7GB 峰值换 ~9% 时间，不值（§9.11h）。
+- FR error map 按设计用原生分辨率（§9.11h），无法复用 working-res 流；NR 侧已 eager 化（R7-R8）。
 - real_corpus 320×180 语料 × 规则阈值灵敏度缺口（§10 已记录根因与数据）；修复属阈值标定研究。
 - 4K/长视频 GPU 性能矩阵：需要 GPU 基准机（`scripts/bench_1080p.py` + `tools/perf_micro.py` 已就绪）。
 - USERPLAN §N 旧编号 docstring：纯注释低价值，未批量改。
+
+### 11.4 目标达成核对（2026-08 终审）
+
+| 目标条款 | 证据 |
+|---|---|
+| 整理并优化项目结构 | 死代码×7、luma/robust_z 收敛、陈旧产物清理、memo 键修复、ruff F 全仓零告警 + CI lint 门禁（c27de63/f1b2d7c/c39129d/49347a6） |
+| 避免之后的冗余工作 | 可复现基准 `tools/perf_micro.py`；§11 审查总账（含被推翻主张与留待项及理由）；描述符/重建/残差缓存消除三处重复计算 |
+| 同步更新文档 | README/PROJECT_STRUCTURE/BENCHMARKS/index.html 全部与代码一致；real_corpus 根因、性能 backlog、审查记录完整 |
+| 项目审查 | 三轮独立审计（文档/性能/结构）+ 全部冲突经实验裁决（4 项主张被推翻并记录）；endpoint/FR/standard 三路 profile |
+| 性能优化 | NR fast 97→14.3s（6.8×）；endpoint 28→16s；FR 44→25s；解码遍数 6→3/7→5；全部步骤分数/特征逐位一致 |
+| 简单高效、小改不重构 | 全部改动为局部小改；每步有 bit-identical 或行为等价验证；两处被证明不值的优化（流保留、FR 扫描并发）明确否决并记录 |
+| 多 agents 独立验证 | 三轮审计均独立运行、输出 file:line 证据；冲突主张（splat 扁平化、phash、preset、robust_z）回到实验裁决 |
+
+**三模式 CLI 端到端复验（2026-08，fast/farneback）**：NR `ok`（overall 76.58，conf 0.75 上限生效）；endpoint-2x `ok`（87.39）；full-reference `ok`（100.0）；产物齐全（report.json/html、timeline、heatmaps、badcases）。
