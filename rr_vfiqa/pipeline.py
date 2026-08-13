@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import collections
 import os
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
