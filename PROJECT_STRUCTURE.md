@@ -341,4 +341,41 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 
 **real_corpus 本地失败根因（2026-08 复现验证）**：conftest 的语料是 320×180/4s（`tests/real_corpus/conftest.py` 为提速缩减分辨率），而多证据诊断规则（`diagnosis/rules.py`）的阈值是在更高分辨率下校准的。320×180 下注入缺陷产生的信号全部低于规则门槛，例如 endpoint case_01（generated_motion_blur 1.2-2.5s）实测：`parity_window_sharp_gap` ≤0.054（阈值 >0.1）、`gtq_sharp_odd_even_ratio` ≥0.947（阈值 <0.8）、`edge_recall` ≥0.80（阈值 <0.7）；ghost 规则虽达到 mass 0.9 但只有 1 条证据（要求 ≥2）。因此诊断规则不触发、`diag.issues` 为空，定位/方向类断言失败。这是**语料分辨率 × 规则灵敏度的标定缺口**，不是评测管线缺陷（融合层仍能检出 temporal 误差 0.568）。修复方向是低分辨率阈值标定或提高语料分辨率，属研究级工作，未在本轮改动。
 
-**当前活跃开发面**：`diagnosis/`（cadence v2、rules、schema）与 `metrics/`（`no_reference.py`、`parity_frequency.py`）——对应未提交的 USERPLAN P0/P1 整改。
+**当前活跃开发面**：`diagnosis/`（cadence v2、rules、schema）与 `metrics/`（`no_reference.py`、`parity_frequency.py`）——对应 USERPLAN P0/P1 整改（已提交）。
+
+---
+
+## 11. 审查与整改记录（2026-08，跨 6 轮）
+
+三轮独立审计（文档同步 / 性能热点 / 结构死代码）+ 逐条实验复核后的整改总账。**所有结论冲突都以可复现实验裁决，未采用投票**。
+
+### 11.1 已落地（全部验证）
+
+| 项 | 内容 | 证据 |
+|---|---|---|
+| 解码遍数 | 对齐描述符 memo + scan 复用 + 路由跳过 scene-cut 解码：inspect endpoint 6→3、FR 7→5、NR 1 | 实测计数；每遍 ≈4.3s/10s·720p |
+| forward_splat | `np.add.at` → `np.bincount` 累加（60 组随机 bit-identical；**索引扁平化本身无收益**，勿回退） | NR fast 97→74s，分数逐位一致 |
+| Tier-3 | 同分辨率（960=960）重复重跑跳过，audit_notes 说明 | balanced 实测 audited_windows=0 |
+| warp 网格 | `_warp_grid` lru_cache | 11.6→2.8ms，双模型 bit-identical |
+| geometry | 单次梯度 | 54→25ms，bit-identical |
+| 缓存 IO | savez 代替 savez_compressed（旧条目仍可读） | 写 22× |
+| 窗口流 | 默认只预计算被消费的 5 对 | 10/14 有向流，计数后端验证 |
+| 杂项 | y_channel×1、anchor 对复用、edge npz×1、scene_cuts 提升、gc 提升 | 全绿套件 |
+| 死代码 | 6 个符号 + 4 契约常量 + 测试专用 robust_z | 全仓零引用 grep |
+| luma | 收敛到 `imutils.luma`（4 处委托；2 处 float64 按设计保留） | uint8/float32/float64 位级一致 |
+| lint | 全仓 ruff `--select F` 零告警 + CI lint 作业 | c39129d + 49347a6 |
+| 描述符 memo 键 | 补上 width（防撞键） | c39129d |
+
+### 11.2 审计主张中被实验推翻的项（勿重复尝试）
+
+- `forward_splat` 1-D 扁平化索引：实测 170.7→168.8ms（~1%），audit 的 86ms 是单次 splat 误测。
+- `phash64` packbits 向量化：实测 0.531→0.520ms/帧（瓶颈是 resize+DCT）。
+- `--preset balanced` 加入 CLI choices：config.py 注释表明刻意排除（显式预设字节稳定）；改的是文档。
+- `robust_z` 合并：maps 版与 schema 版 NaN 语义不同，保留双实现。
+
+### 11.3 留待后续（含理由）
+
+- error-map 阶段（NR/FR top-8 窗口）重解码+重算流，fast 档实测 18.8s/75.8s（25%）：复用需保留 37MB/窗口（standard 150MB），32 窗口 4.7GB 峰值换 ~9% 时间，不值（§9.11h）。
+- real_corpus 320×180 语料 × 规则阈值灵敏度缺口（§10 已记录根因与数据）；修复属阈值标定研究。
+- 4K/长视频 GPU 性能矩阵：需要 GPU 基准机（`scripts/bench_1080p.py` + `tools/perf_micro.py` 已就绪）。
+- USERPLAN §N 旧编号 docstring：纯注释低价值，未批量改。
