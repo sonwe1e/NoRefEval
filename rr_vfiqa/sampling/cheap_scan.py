@@ -41,6 +41,10 @@ class CheapScan:
     frame_diff_parent: np.ndarray   # (N,) mean |Y_k - Y_{k-2}| at scan res
     moving_frac_native: np.ndarray  # (N,) moving-pixel fraction at lag-1
     moving_frac_parent: np.ndarray  # (N,) moving-pixel fraction at lag-2
+    # (N, 9, 16) float32 luma descriptors (16x9 AREA downscale of the scan
+    # gray), reused by alignment instead of a second full decode; empirically
+    # identical alignment outcomes to the 96px descriptor pass.
+    descriptors: np.ndarray | None = None
 
     def parity_sharpness_gap(self) -> np.ndarray:
         """|sharpness_even - local trend| — systematic odd-frame blur shows up
@@ -110,9 +114,13 @@ def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:
     prev_hist = None
     hdist, fdiff, hgdist = [0.0], [0.0], [0.0]
     fdiff_parent, mfrac_native, mfrac_parent = [0.0], [0.0], [0.0]
+    descriptors: list[np.ndarray] = []
 
     for idx, img in reader.iter_frames(width=width):
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        descriptors.append(cv2.resize(gray, (16, 9),
+                                      interpolation=cv2.INTER_AREA)
+                           .astype(np.float32))
         gf = gray.astype(np.float32)
         lap = cv2.Laplacian(gray, cv2.CV_32F)
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
@@ -167,6 +175,8 @@ def scan_candidate(reader: VideoReader, width: int = 384) -> CheapScan:
             mfrac_native + [0.0] * (n - len(mfrac_native)), np.float32)[:n],
         moving_frac_parent=np.asarray(
             mfrac_parent + [0.0] * (n - len(mfrac_parent)), np.float32)[:n],
+        descriptors=(np.stack(descriptors) if descriptors
+                     else np.zeros((0, 9, 16), np.float32)),
     )
 
 

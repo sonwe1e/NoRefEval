@@ -181,6 +181,7 @@ def evaluate_endpoint_reference(
 
     say("aligning candidate to source (PTS + anchors)")
     alignment = build_alignment(cfg, source, candidate,
+                                cand_desc=cheap.descriptors,
                                 scene_cuts_cand=scene_cuts)
 
     say("anchor integrity + color baseline")

@@ -1012,7 +1012,7 @@ def evaluate_full_reference(
     say("building same-rate PTS/content alignment")
     alignment = build_full_reference_alignment(
         reference, candidate, scene_cuts_candidate=cuts,
-        geometry_policy=geometry_policy)
+        geometry_policy=geometry_policy, cand_desc=scan.descriptors)
     scan_size = _fr_target_size(
         reference.meta,
         candidate.meta,

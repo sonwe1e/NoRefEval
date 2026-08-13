@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import cv2
 import numpy as np
 
 from ..schema import FullReferenceAlignment
@@ -13,12 +12,10 @@ _RADIUS = 4
 
 
 def _descriptors(reader: VideoReader) -> np.ndarray:
-    out: list[np.ndarray] = []
-    for _, rgb in reader.iter_frames(width=_DESCRIPTOR_WIDTH):
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        out.append(cv2.resize(gray, (16, 9), interpolation=cv2.INTER_AREA)
-                   .astype(np.float32))
-    return np.stack(out) if out else np.zeros((0, 9, 16), np.float32)
+    # Process-level memo: routing and the pipeline share one full decode.
+    from .video_reader import frame_descriptors
+
+    return frame_descriptors(reader, width=_DESCRIPTOR_WIDTH)
 
 
 def _monotonic_match(
@@ -87,6 +84,7 @@ def build_full_reference_alignment(
     *,
     scene_cuts_candidate: np.ndarray | None = None,
     geometry_policy: str = "strict",
+    cand_desc: np.ndarray | None = None,
 ) -> FullReferenceAlignment:
     """Build and validate a one-to-one same-rate alignment.
 
@@ -115,9 +113,11 @@ def build_full_reference_alignment(
             f"frame geometry rejected by {geometry_policy!r}: reference "
             f"{rm.width}x{rm.height}, candidate {cm.width}x{cm.height}")
 
+    if cand_desc is None:
+        cand_desc = _descriptors(candidate)
     ref_mapping, cand_mapping, errors = _monotonic_match(
         _descriptors(reference),
-        _descriptors(candidate),
+        cand_desc,
         rm.pts_seconds,
         cm.pts_seconds,
     )

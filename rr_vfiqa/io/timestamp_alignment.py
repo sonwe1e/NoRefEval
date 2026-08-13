@@ -55,17 +55,14 @@ def detect_offset(source_meta: VideoMeta, cand_meta: VideoMeta) -> tuple[int, fl
 
 
 def _frame_descriptors(reader: VideoReader) -> np.ndarray:
-    """One-pass low-resolution luma descriptors for local anchor matching."""
-    import cv2
+    """One-pass low-resolution luma descriptors for local anchor matching.
 
-    desc: list[np.ndarray] = []
-    for _, rgb in reader.iter_frames(width=_DESCRIPTOR_WIDTH):
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        small = cv2.resize(gray, (16, 9), interpolation=cv2.INTER_AREA)
-        desc.append(small.astype(np.float32))
-    if not desc:
-        return np.zeros((0, 8, 16), np.float32)
-    return np.stack(desc)
+    Delegates to the process-level memo so routing and the pipeline share a
+    single full decode per video.
+    """
+    from .video_reader import frame_descriptors
+
+    return frame_descriptors(reader, width=_DESCRIPTOR_WIDTH)
 
 
 def _monotonic_anchor_match(
@@ -179,7 +176,8 @@ def detect_scene_cuts(reader: VideoReader, width: int = 256,
 
 
 def build_alignment(cfg: EvalConfig, source: VideoReader, candidate: VideoReader,
-                    scene_cuts_cand: np.ndarray | None = None) -> Alignment:
+                    scene_cuts_cand: np.ndarray | None = None,
+                    cand_desc: np.ndarray | None = None) -> Alignment:
     sm, cm = source.meta, candidate.meta
     warnings: list[str] = []
 
@@ -202,7 +200,8 @@ def build_alignment(cfg: EvalConfig, source: VideoReader, candidate: VideoReader
     # Local monotonic anchor matching recovers after isolated drops/duplicates
     # instead of applying one global phase offset to the rest of the video.
     src_desc = _frame_descriptors(source)
-    cand_desc = _frame_descriptors(candidate)
+    if cand_desc is None:
+        cand_desc = _frame_descriptors(candidate)
     mapping, match_errs = _monotonic_anchor_match(
         src_desc, cand_desc, sm.pts_seconds, cm.pts_seconds)
     events: list[dict[str, int | str]] = []

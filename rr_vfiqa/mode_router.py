@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from .config import EvalConfig, EvaluationMode
 
 # USERPLAN §3: public speed names -> internal presets.  ``balanced`` is the
@@ -143,8 +145,13 @@ def _endpoint_ok(candidate_video: str, reference_video: str
             candidate_video=candidate_video,
             reference_video=reference_video,
             mode=EvaluationMode.ENDPOINT_2X, preset="fast")
+        # Scene-cut detection is a full extra decode and the route only
+        # consults reliable/warnings (scene cuts affect neither), so pass an
+        # empty cut list and skip it here; the pipeline recomputes cuts from
+        # its own tier-1 scan.
         alignment = build_alignment(
-            cfg, VideoReader(reference_video), VideoReader(candidate_video))
+            cfg, VideoReader(reference_video), VideoReader(candidate_video),
+            scene_cuts_cand=np.zeros(0, np.int32))
     except Exception as exc:  # noqa: BLE001
         return False, f"端点对齐异常：{exc!r}", []
     return (bool(alignment.reliable),
