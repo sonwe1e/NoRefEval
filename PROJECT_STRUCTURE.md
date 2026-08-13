@@ -337,6 +337,8 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 
 1. 改文档后跑 `python -m pytest tests/test_docs_contract.py`（README 与 `docs/index.html` 与生产代码同步）。
 2. 本地跑 `python -m pytest`（CPU/Farneback）；改 cadence/flow/phase/UI 门控的跑四个新增可靠性测试 + `test_cadence_motion_gate.py`。CI 的 `unit` 作业不含这些，别只靠它。
-3. 本地 `tests/real_corpus/` 有约 10 个环境性失败（语料生成 + 系统 python 的 farneback）属已知现象，不以它们为合并阻断；CI 的 `metamorphic` 作业在干净环境跑全量。
+3. 本地 `tests/real_corpus/` 有约 10 个失败属已知现象（已定位根因，见下），不以它们为合并阻断；CI 的 `metamorphic` 作业在干净环境跑全量。
+
+**real_corpus 本地失败根因（2026-08 复现验证）**：conftest 的语料是 320×180/4s（`tests/real_corpus/conftest.py` 为提速缩减分辨率），而多证据诊断规则（`diagnosis/rules.py`）的阈值是在更高分辨率下校准的。320×180 下注入缺陷产生的信号全部低于规则门槛，例如 endpoint case_01（generated_motion_blur 1.2-2.5s）实测：`parity_window_sharp_gap` ≤0.054（阈值 >0.1）、`gtq_sharp_odd_even_ratio` ≥0.947（阈值 <0.8）、`edge_recall` ≥0.80（阈值 <0.7）；ghost 规则虽达到 mass 0.9 但只有 1 条证据（要求 ≥2）。因此诊断规则不触发、`diag.issues` 为空，定位/方向类断言失败。这是**语料分辨率 × 规则灵敏度的标定缺口**，不是评测管线缺陷（融合层仍能检出 temporal 误差 0.568）。修复方向是低分辨率阈值标定或提高语料分辨率，属研究级工作，未在本轮改动。
 
 **当前活跃开发面**：`diagnosis/`（cadence v2、rules、schema）与 `metrics/`（`no_reference.py`、`parity_frequency.py`）——对应未提交的 USERPLAN P0/P1 整改。

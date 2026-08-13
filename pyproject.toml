@@ -22,7 +22,7 @@ fusion = ["lightgbm>=4.0"]
 viz = ["matplotlib>=3.7"]
 audit = ["cotracker>=0.3"]     # audit-tier point tracker (USERPLAN §8.5)
 vqa = ["torch>=2.1", "pyiqa>=0.1.13"]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff>=0.6"]
 
 [project.scripts]
 rr-vfiqa = "rr_vfiqa.cli:main"
