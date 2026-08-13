@@ -314,7 +314,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 5. **`schema.py::Window.start_time` 是 NaN stub**：要用 `sampling.window_selector.window_times` 取真实时间（仓库内无引用，仅防外部误用）。
 6. **`pipeline.py::_classify_window` 硬编码 `/120.0`** 起始时间假设（调用方会用真实 PTS 覆盖，读早了会误标）。
 7. **`docs/calibration/synthetic_detection_12class.json` 是历史 0.1.0 产物**（numpy 2.5.1 / opencv 5.0.0 等），别当现役规格。
-8. ~~**`fusion/mode_score_schemas.py` 契约常量是死代码**~~ ✅ 已删除（`METRIC_CONTRACTS` 等 4 个常量 + `exposure_map` + `schema.FlowPair` + `testing.render_streaming` 均已移除）。
+8. ~~**`fusion/mode_score_schemas.py` 契约常量是死代码**~~ ✅ 已删除（`METRIC_CONTRACTS` 等 4 个常量 + `exposure_map` + `schema.FlowPair` + `testing.render_streaming` + `visualization.maps.robust_z` 测试专用重复均已移除）。BT.601 luma 收敛到 `imutils.luma` 单一实现（`schema.FrameBundle.y_channel`、`no_reference`、`anchor_integrity`、`cycle_reconstruction` 委托；`timestamp_alignment`/`pseudo_gt` 的 float64 版本按设计保留）。
 9. **语料不可由 provenance 单独复现**：生成时 working-tree 是脏的，`validation*` 又 gitignore。
 10. **ds-torch 缺 pyiqa/cotracker**：vqa、audit 功能当前不可跑（见 §2.4）。
 11. **性能已知项（待办，未动）**：(a) endpoint 对齐阶段 build_alignment 会对候选视频做第二次完整解码（96px 描述符，紧跟在 scan_candidate 之后）——可改为在 scan 中顺带产出 16×9 描述符复用；(b) schema.forward_splat 实测约 170ms/次（float64 累加主导），1-D 扁平化索引几乎无收益（已验证），不要按「索引扁平化」去改；(c) 单次评测可写数 GB cache，必要时删除 cache/ 目录。

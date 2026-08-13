@@ -91,10 +91,9 @@ class FrameBundle:
 
     def y_channel(self) -> np.ndarray:
         """(T, H, W) float32 luma in 0..255, BT.601 weights."""
-        r = self.rgb[..., 0].astype(np.float32)
-        g = self.rgb[..., 1].astype(np.float32)
-        b = self.rgb[..., 2].astype(np.float32)
-        return 0.299 * r + 0.587 * g + 0.114 * b
+        from .imutils import luma
+
+        return luma(self.rgb)
 
     def at(self, k: int) -> np.ndarray:
         return self.rgb[np.searchsorted(self.indices, k)]

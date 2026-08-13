@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from rr_vfiqa.schema import robust_z
 from rr_vfiqa.visualization import (
     MapNormalization,
     blend_heat,
@@ -16,7 +17,6 @@ from rr_vfiqa.visualization import (
     heat_bgr,
     heatmap_to_bgr,
     normalize_map,
-    robust_z,
     save_heatmap,
     fit_normalization,
 )

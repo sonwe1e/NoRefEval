@@ -21,10 +21,12 @@ _SHIFT_PROBES = 4        # of those, how many also test ±1-frame misalignment
 
 
 def _channel_errors(src: np.ndarray, cand: np.ndarray) -> dict[str, float]:
+    from ..imutils import luma
+
     s = src.astype(np.float32)
     c = cand.astype(np.float32)
-    y_s = 0.299 * s[..., 0] + 0.587 * s[..., 1] + 0.114 * s[..., 2]
-    y_c = 0.299 * c[..., 0] + 0.587 * c[..., 1] + 0.114 * c[..., 2]
+    y_s = luma(s)
+    y_c = luma(c)
     g_s = cv2.Sobel(y_s, cv2.CV_32F, 1, 0) ** 2 + cv2.Sobel(y_s, cv2.CV_32F, 0, 1) ** 2
     g_c = cv2.Sobel(y_c, cv2.CV_32F, 1, 0) ** 2 + cv2.Sobel(y_c, cv2.CV_32F, 0, 1) ** 2
     chroma_s = np.stack([s[..., 0] - y_s, s[..., 2] - y_s], -1)

@@ -31,11 +31,9 @@ from .window_flows import WindowFlows
 
 
 def _luma(rgb: np.ndarray) -> np.ndarray:
-    return (
-        0.299 * rgb[..., 0].astype(np.float32)
-        + 0.587 * rgb[..., 1].astype(np.float32)
-        + 0.114 * rgb[..., 2].astype(np.float32)
-    )
+    from ..imutils import luma
+
+    return luma(rgb)
 
 
 def _mc_residual(

@@ -91,14 +91,6 @@ def normalize_map(
     return out.astype(np.float32)
 
 
-def robust_z(field: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-    """(x - median) / (1.4826 * MAD + eps) — USERPLAN §6.4."""
-    f = np.nan_to_num(field.astype(np.float32, copy=False), nan=0.0)
-    med = float(np.median(f))
-    mad = _mad(f)
-    return (f - med) / (1.4826 * mad + eps)
-
-
 def fit_normalization(field: np.ndarray, method: str = "percentile",
                       p_low: float = 1.0,
                       p_high: float = 99.0) -> MapNormalization:

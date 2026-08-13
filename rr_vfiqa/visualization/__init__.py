@@ -16,11 +16,10 @@ runs in the CLI and in CI.
 
 from .flow_overlay import flow_to_bgr, flow_to_bgr_with_legend
 from .heatmaps import blend_heat, heat_bgr, heatmap_to_bgr, save_heatmap
-from .maps import MapNormalization, fit_normalization, normalize_map, robust_z
+from .maps import MapNormalization, fit_normalization, normalize_map
 
 __all__ = [
     "normalize_map",
-    "robust_z",
     "fit_normalization",
     "MapNormalization",
     "heat_bgr",
