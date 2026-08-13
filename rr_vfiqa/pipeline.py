@@ -207,10 +207,11 @@ def evaluate_endpoint_reference(
     stage_errors: dict[str, int] = collections.Counter()
     audit_tracker, tracker_note = (get_audit_tracker(cfg.device)
                                    if p.run_tracker else (None, None))
+    cut_pair_set = set(int(c) for c in alignment.scene_cuts)
     for n, w in enumerate(windows):
         if n % max(1, len(windows) // 10) == 0:
             say(f"window {n + 1}/{len(windows)}")
-        if w.pair < 0 or int(w.pair) in set(int(c) for c in alignment.scene_cuts):
+        if w.pair < 0 or int(w.pair) in cut_pair_set:
             continue
         bundle = candidate.read_frames(w.indices, width=p.flow_width)
         if bundle.rgb.shape[0] < p.window_frames:

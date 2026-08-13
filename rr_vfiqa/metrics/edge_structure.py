@@ -44,10 +44,12 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cache: SourceCache,
         interp = _cv2.INTER_NEAREST if arr.dtype == np.uint8 else _cv2.INTER_LINEAR
         return _cv2.resize(arr, (w, h), interpolation=interp)
 
-    e0 = _to_res(cache.get_edges(pair.pair).edges)
-    e1 = _to_res(cache.get_edges(pair.pair + 1).edges)
-    g0 = _to_res(cache.get_edges(pair.pair).grad_energy)
-    g1 = _to_res(cache.get_edges(pair.pair + 1).grad_energy)
+    se0 = cache.get_edges(pair.pair)
+    se1 = cache.get_edges(pair.pair + 1)
+    e0 = _to_res(se0.edges)
+    e1 = _to_res(se1.edges)
+    g0 = _to_res(se0.grad_energy)
+    g1 = _to_res(se1.grad_energy)
     f_01 = resize_flow(pair.f_01, h, w)
     f_10 = resize_flow(pair.f_10, h, w)
 

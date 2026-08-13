@@ -49,13 +49,14 @@ def evaluate_anchors(cfg: EvalConfig, source: VideoReader, candidate: VideoReade
     pick = anchors[np.linspace(0, len(anchors) - 1,
                                min(_MAX_ANCHORS, len(anchors))).astype(int)]
 
-    # First pass: color transform from a few pairs.
-    pairs = []
+    # First pass: color transform from a few pairs.  Decoded pairs are kept
+    # so the second pass does not re-read (and re-seek) the same anchors.
+    pairs: list[tuple[int, np.ndarray, np.ndarray]] = []
     for k in pick[:8]:
         s = source.read_one(int(alignment.anchor_of_candidate[k]), width=_EVAL_WIDTH)
         c = candidate.read_one(int(k), width=_EVAL_WIDTH)
-        pairs.append((s, c))
-    color = estimate_from_anchor_pairs(pairs)
+        pairs.append((int(k), s, c))
+    color = estimate_from_anchor_pairs([(s, c) for _, s, c in pairs])
     if not color.is_trivial():
         warnings.append(f"global color mismatch fitted: gain={np.round(color.gain, 3)} "
                         f"offset={np.round(color.offset, 2)} (residual "
@@ -64,10 +65,14 @@ def evaluate_anchors(cfg: EvalConfig, source: VideoReader, candidate: VideoReade
     errs = {k: [] for k in ("y_l1", "chroma_l1", "grad_l1")}
     errs_shift = []
     shift_better = 0
+    reused = {int(k): (s, c) for k, s, c in pairs}
     for n_probe, k in enumerate(pick):
         i = int(alignment.anchor_of_candidate[k])
-        s = source.read_one(i, width=_EVAL_WIDTH)
-        c = candidate.read_one(int(k), width=_EVAL_WIDTH)
+        if int(k) in reused:
+            s, c = reused[int(k)]
+        else:
+            s = source.read_one(i, width=_EVAL_WIDTH)
+            c = candidate.read_one(int(k), width=_EVAL_WIDTH)
         c_norm = color.apply(c)
         e = _channel_errors(s, c_norm)
         for kk, v in e.items():

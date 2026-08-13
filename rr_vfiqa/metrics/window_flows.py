@@ -23,6 +23,13 @@ class WindowFlows:
         self.backend = backend
         self._cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
 
+    # Default pair set for a 5-frame endpoint window (pos 0..4: gen/anchor/
+    # gen/anchor/gen). Only pairs actually consumed by endpoint metrics and
+    # regions are listed — (0,1) and (3,4) are never requested, so precomputing
+    # them would waste 4 of 14 directed flows per window. Missing pairs are
+    # still computed on demand by pair(), so adding a consumer stays safe.
+    DEFAULT_PAIRS = [(0, 2), (1, 2), (2, 3), (2, 4), (1, 3)]
+
     def precompute(self, pairs: list[tuple[int, int]] | None = None) -> None:
         """Batch-compute both directions for every requested frame pair.
 
@@ -30,8 +37,7 @@ class WindowFlows:
         """
         t = self.bundle.rgb.shape[0]
         if pairs is None:
-            pairs = [(a, b) for a in range(t) for b in range(t)
-                     if 0 < abs(a - b) <= 2]
+            pairs = [p for p in self.DEFAULT_PAIRS if max(p) < t]
         requested = sorted({
             (min(int(a), int(b)), max(int(a), int(b)))
             for a, b in pairs if a != b

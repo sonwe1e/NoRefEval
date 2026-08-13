@@ -167,8 +167,7 @@ def scan_phase_applicability(scan: CheapScan) -> dict:
     }
 
 
-def _sharpness_series(bundle: FrameBundle) -> np.ndarray:
-    y = bundle.y_channel()
+def _sharpness_series(y: np.ndarray) -> np.ndarray:
     return np.asarray([float(cv2.Laplacian(y[t].astype(np.float32), cv2.CV_32F).var())
                        for t in range(y.shape[0])])
 
@@ -177,8 +176,11 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
                    ) -> dict[str, float]:
     out: dict[str, float] = {}
 
+    # One luma pass for the whole window (y_channel per call was 4x/window).
+    y = bundle.y_channel()
+
     # Sharpness alternation inside the 5-frame window.
-    sh = _sharpness_series(bundle)
+    sh = _sharpness_series(y)
     med = np.median(sh) + 1e-6
     k = bundle.indices.astype(np.int64)
     out["parity_window_sharp_gap"] = float(
@@ -189,8 +191,8 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
     # subsequence (anchors pos 1↔3) should be at least as stable as the
     # generated subsequence (pos 0↔2 and 2↔4).
     def mc_diff(a: int, b: int) -> float:
-        ya = bundle.y_channel()[a]
-        yb = bundle.y_channel()[b]
+        ya = y[a]
+        yb = y[b]
         f_ab, f_ba = flow.pair(a, b)
         # Resample b onto a's grid: target a, source b, so the target→source
         # flow is f_ab (a→b) itself.

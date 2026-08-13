@@ -73,7 +73,7 @@ runs/example/
 ├── heatmaps/            # 问题空间热力图
 │   └── issue_000_*.png
 └── badcases/            # 坏例视频与关键帧
-    ├── issue_000_original.mp4
+    ├── badcase_00_000.35s_freeze.mp4   # 原始坏例片段（badcase_NN_<起始秒>s_<类型>.mp4）
     ├── issue_000_overlay.mp4
     ├── issue_000_compare.mp4
     └── issue_000_keyframe.png
@@ -185,12 +185,15 @@ NR 的 `confidence` 上限为 0.75，因为它无法证明真实轨迹或显露�
 
 ```bash
 rr-vfiqa inspect --candidate out.mp4 --out runs/fast      --speed fast
-rr-vfiqa inspect --candidate out.mp4 --out runs/balanced  --speed balanced    # --speed balanced = standard 预设；tier-3 自动审计请用 --preset balanced
+rr-vfiqa inspect --candidate out.mp4 --out runs/balanced  --speed balanced    # --speed balanced = standard 预设（不含自动审计）
 rr-vfiqa inspect --candidate out.mp4 --out runs/thorough  --speed thorough
 
 rr-vfiqa inspect --candidate out.mp4 --device cuda --flow-backend raft    # GPU 精确光流
-rr-vfiqa inspect --candidate out.mp4 --device cpu  --flow-backend farneback # CPU 默认
+rr-vfiqa inspect --candidate out.mp4 --device cpu  --flow-backend farneback # CPU 显式指定
 ```
+
+带 Tier-3 自动审计的 balanced 档是 inspect 的默认行为（省略 `--speed`/`--preset` 即可）；
+`--preset` 只接受 `fast` / `standard` / `audit`（balanced 不在显式预设里）。
 
 ---
 

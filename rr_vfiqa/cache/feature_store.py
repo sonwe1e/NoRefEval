@@ -27,7 +27,10 @@ class FeatureStore:
         return np.load(self._path(key, "npy"), mmap_mode=mode)
 
     def save_npz(self, key: str, **arrays) -> None:
-        np.savez_compressed(self._path(key, "npz"), **arrays)
+        # Plain (uncompressed) zip: float16 flows barely compress (~28% at
+        # best) but deflate costs ~20x on write; old compressed entries remain
+        # readable by np.load, so no cache migration is needed.
+        np.savez(self._path(key, "npz"), **arrays)
 
     def load_npz(self, key: str) -> dict[str, np.ndarray]:
         with np.load(self._path(key, "npz")) as z:

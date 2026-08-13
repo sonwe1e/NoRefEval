@@ -172,7 +172,7 @@ rr-vfiqa inspect --candidate output.mp4 --reference source.mp4 --out runs/exampl
 ├── heatmaps/            # 问题空间热力图
 │   └── issue_000_*.png
 └── badcases/            # 坏例视频与关键帧
-    ├── issue_000_original.mp4
+    ├── badcase_00_000.35s_freeze.mp4   # 原始坏例片段（badcase_NN_&lt;起始秒&gt;s_&lt;类型&gt;.mp4）
     ├── issue_000_overlay.mp4
     ├── issue_000_compare.mp4
     └── issue_000_keyframe.png</code></pre>
@@ -204,7 +204,7 @@ pip install -e ".[dev]"     # pytest</code></pre>
 <div class="flow-arrow">↓</div>
 <div class="flow-step"><div class="num">6</div><div class="label">Tier-2 核心指标</div><div class="detail">模式特定的核心证据计算</div></div>
 <div class="flow-arrow">↓</div>
-<div class="flow-step"><div class="num">7</div><div class="label">Tier-3 高风险原分辨率审计</div><div class="detail">balanced/thorough 模式下原分辨率复核</div></div>
+<div class="flow-step"><div class="num">7</div><div class="label">Tier-3 高风险审计</div><div class="detail">对最高风险窗口复核（工作宽度 ≤960px 封顶，非原分辨率）</div></div>
 <div class="flow-arrow">↓</div>
 <div class="flow-step"><div class="num">8</div><div class="label">模式独立融合</div><div class="detail">归一化、加权、置信度计算</div></div>
 <div class="flow-arrow">↓</div>

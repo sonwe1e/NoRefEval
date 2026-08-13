@@ -101,20 +101,6 @@ class FrameBundle:
 
 
 @dataclass
-class FlowPair:
-    """Bidirectional flow between two frames at a single working resolution."""
-
-    flow_ab: np.ndarray       # (H, W, 2) float32, a -> b
-    flow_ba: np.ndarray       # (H, W, 2) float32, b -> a
-    height: int
-    width: int
-    scale: float              # working_res / native_res (uniform)
-
-    def to_native_scale(self) -> float:
-        return 1.0 / self.scale
-
-
-@dataclass
 class OcclusionMasks:
     """Forward/backward occlusion derived from flow cycle consistency.
 

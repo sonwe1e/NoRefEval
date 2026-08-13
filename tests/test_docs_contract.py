@@ -164,6 +164,36 @@ def test_readme_has_output_directory(readme_text):
     assert "badcases/" in readme_text
 
 
+def test_readme_preset_claims_are_valid_cli_choices(readme_text):
+    """Every `--preset X` in README must be a real argparse choice.
+
+    Catches doc drift like the old "tier-3 自动审计请用 --preset balanced"
+    claim: argparse only accepts fast/standard/audit.
+    """
+    import argparse
+
+    import rr_vfiqa.cli as cli
+
+    probe = argparse.ArgumentParser()
+    cli._add_common(probe)
+    preset_action = next(a for a in probe._actions if a.dest == "preset")
+    choices = set(preset_action.choices)
+    for m in re.finditer(r'--preset\s+([a-z0-9-]+)', readme_text):
+        assert m.group(1) in choices, (
+            f"README documents --preset {m.group(1)!r} but the CLI accepts "
+            f"only {sorted(choices)}")
+
+
+def test_readme_badcase_naming_matches_exporter(readme_text):
+    """The badcases tree in README must use the real clip naming scheme."""
+    from rr_vfiqa.report.badcase_exporter import export_badcase_clips  # noqa: F401
+    # The real name embeds (index, start_time, tag); README must show it.
+    assert "badcase_" in readme_text, (
+        "README badcases tree is stale: original clips are named "
+        "badcase_NN_<start>s_<tag>.mp4, not issue_NNN_original.mp4")
+    assert "issue_000_original" not in readme_text
+
+
 # ---------------------------------------------------------- code block test
 def test_readme_quick_start_runs(tmp_path):
     """README's Quick Start command should execute successfully."""

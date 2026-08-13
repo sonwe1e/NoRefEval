@@ -4,8 +4,8 @@
 >
 > **规范：Python 统一使用 `G:\ds-torch\Scripts\python.exe`（见 [§2 环境](#2-环境python--ds-torch)）。**
 
-- 适用版本：源码 `rr_vfiqa/_version.py` = **0.4.0**（以此为准；磁盘上另有旧元数据 0.1.0 / 0.3.0，见 §10）
-- 上次整理：2026-08-02
+- 适用版本：源码 `rr_vfiqa/_version.py` = **0.4.0**（以此为准；版本号现状见 §2.6）
+- 上次整理：2026-08-14
 
 ---
 
@@ -47,29 +47,23 @@ python -m rr_vfiqa.cli inspect-batch  # 按 manifest 批量
 
 **规则：一切命令用 `python`（即 ds-torch），绝不写 `python3`。** 仓库源码树里混有 `cpython-314.pyc`，说明历史上有人在 3.14 下跑过，3.14 不是受支持的解释器。
 
-### 2.2 `.venv` 已损坏，不要用
+### 2.2 `.venv` 已删除，不要重建
 
-项目根 `.venv` 创建时基于 `C:\Users\Sonwe\miniforge3\python.exe`（Python 3.12.8），该基础解释器已被移除，所以 `.venv` 下所有可执行文件（`python.exe` / `pip` / `pytest` / `rr-vfiqa` / `pyav` …）都会直接报错：
+损坏的 `.venv`（基于已移除的 miniforge3 解释器）已删除。**不要**在仓库根重建 `.venv` —— 规范解释器就是 §2.1 的 ds-torch，直接用 `python` 即可（见 §2.3）。
 
-```
-No Python at '"C:\Users\Sonwe\miniforge3\python.exe'
-```
+### 2.3 导入模型：ds-torch 里已有 editable install
 
-`.venv` 目录本身被 gitignore，可以整体删除或重建（见 §2.5）。
-
-### 2.3 导入模型：未 pip 安装，靠 cwd / PYTHONPATH
-
-`rr_vfiqa` **没有**安装在 ds-torch 环境里（`G:\ds-torch` 里没有 editable install）。控制台脚本 `rr-vfiqa` 只存在于损坏的 `.venv` 里，**不能**直接敲 `rr-vfiqa`。
-
-两种可用方式：
+`rr_vfiqa` 已以 editable 方式安装在 ds-torch 环境（`pip show rr-vfiqa` → `Editable project location: I:\WorkStations\NoRefEval`），控制台脚本 `G:\ds-torch\Scripts\rr-vfiqa.exe` 可用，任意目录直接敲：
 
 ```bash
-# 方式 A：在仓库根目录运行（推荐，cwd 可导入）
+rr-vfiqa inspect --candidate out.mp4 --out runs/nr
+```
+
+等价地也可以从仓库根用模块方式（cwd 可导入）：
+
+```bash
 cd I:\WorkStations\NoRefEval
 python -m rr_vfiqa.cli inspect --candidate out.mp4 --out runs/nr
-
-# 方式 B：设置 PYTHONPATH
-PYTHONPATH=I:\WorkStations\NoRefEval python -m rr_vfiqa.cli --help
 ```
 
 测试同理，在仓库根目录：
@@ -103,9 +97,9 @@ uv pip install -e ".[dev,fusion,viz]"
 
 依赖策略：**只有 `pyproject.toml` 的 extras，无 requirements.txt / 无 lockfile**。声明的最小依赖：`numpy>=1.24, opencv-python-headless>=4.8, scipy>=1.10, av>=11.0`。
 
-### 2.6 版本三连警告
+### 2.6 版本号现状（已收敛）
 
-磁盘上有三个不一致的版本号：源码 `_version.py`=**0.4.0**（权威）｜`rr_vfiqa.egg-info/PKG-INFO`=0.3.0｜`.venv` editable dist-info=0.1.0。任何用到版本号的工具（`test_package_contract.py` 除外）都可能读到旧值。
+源码 `_version.py`=**0.4.0**（权威）＝`rr_vfiqa.egg-info/PKG-INFO`=0.4.0；`.venv` 已删除。磁盘上唯一的旧值在 gitignore 的构建产物里：`build/lib/rr_vfiqa/_version.py`=0.3.0（`build/` 可整体删除）。
 
 ---
 
@@ -148,15 +142,15 @@ uv pip install -e ".[dev,fusion,viz]"
 
 | 子包 | 职责 |
 |---|---|
-| `sampling/` | **Tier-1**：全片低分辨率扫描 `cheap_scan`、风险打分 `risk_score`、时间窗口选择 `window_selector`/`time_window_selector`、时间 NMS |
-| `metrics/` | 每窗口指标族（标量 + 可选稠密 error map）：`no_reference`、`full_reference`、`parity_frequency`、`flow_composition_metric`、`cycle_reconstruction`、`global_technical_quality` 等 |
+| `sampling/` | **Tier-1**：全片低分辨率扫描 `cheap_scan`、风险打分 `risk_score`、时间窗口选择 `window_selector`/`time_window_selector`、时间 NMS、PTS 时序规划 `temporal_plan`（lag/triplet/flow-pair 计划）、`full_reference_scan` |
+| `metrics/` | 每窗口指标族（标量 + 可选稠密 error map）：`no_reference`、`full_reference`、`parity_frequency`、`flow_composition_metric`、`cycle_reconstruction`、`global_technical_quality`、`window_flows`（窗口内流预计算）、`temporal_compensation`（MCT）、`anchor_integrity`、`edge_structure` |
 | `motion/` | 光流估计与几何：`flow_estimator`（Farneback/RAFT，内存感知 RAFT 微批）、`flow_composition`、`flow_geometry`、`global_camera_motion`、`occlusion` |
 | `regions/` | 高风险区域诊断分支：UI 检测、卡片跟踪、人物分割、文字评估、细物体、转场、武器跟踪 |
 | `diagnosis/` | **多证据诊断引擎**（近期重做）：`schema`（DiagnosticIssue/严重度带）、`rules`（8 条多证据规则 + issue 合并）、`cadence`（Cadence v2 硬门控 + 全片相位统计 + 独立/封顶惩罚模式） |
 | `fusion/` | 分数融合：`score_schema`、`mode_score_schemas`（模式权重/契约串）、`feature_normalizer`、`feature_registry`、`monotonic_calibrator`（LightGBM） |
 | `io/` | 视频解码 `video_reader`、端点/同帧对齐、颜色归一化 |
 | `cache/` | **源码实现（不是数据）**：`source_cache.py`（`SourceCache`，按内容哈希/后端/宽度/契约哈希缓存光流特征）、`feature_store`、`cache_schema` |
-| `report/` | 产物写出：`artifact_pipeline`（统一 heatmap→原帧→overlay→compare→keyframe，逐项失败隔离）、`html_report`、`json_report`、`badcase_exporter`、`heatmap_renderer` |
+| `report/` | 产物写出：`artifact_pipeline`（统一 heatmap→原帧→overlay→compare→keyframe，逐项失败隔离）、`html_report`、`json_report`、`timeline_report`、`badcase_exporter`（`badcase_NN_<秒>s_<类型>.mp4`）、`heatmap_renderer`、`overlay_exporter`、`compare_exporter` |
 | `models/` | 可选学习后端：`flow_backend`（转发）、`tracker_backend`（KLT/CoTracker）、`segmentation_backend`、`depth_backend`（未实现）、`vqa_backend`（pyIQA） |
 | `calibration/` | 启发式验证/标定：`detection_eval`、`model_validation`、`validate`（SROCC/PLCC）、`pseudo_gt`、`provenance`、`mode_validation` |
 | `execution/` | 批量执行 `batch_runner.inspect_batch()` + index HTML |
@@ -211,15 +205,15 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 ### 5.2 ⚠️ `balanced` 撞名（易踩坑）
 
 - `--speed balanced` → 解析为 **`standard`** 预设（`auto_audit=False`，**不含** Tier-3 自动审计）。
-- 真正带自动审计的 `balanced` 预设（`auto_audit=True`）**只能**通过 `--preset balanced` 到达。
-- CLI 还有一个怪癖：`inspect` 里**省略 `--speed`** 时，解析出的 `standard` 会被自动升级成 `balanced`（auto-audit）；而**显式 `--speed balanced`** 反而不会升级。
+- `--preset balanced` **不是合法 CLI 参数**：argparse 的 `--preset` 只接受 `fast` / `standard` / `audit`（config.py 里刻意把 balanced 留在显式预设之外，保证显式预设字节稳定）。带自动审计的 `balanced` 预设（`auto_audit=True`）只有两条路：**省略 `--speed`/`--preset` 跑 `inspect`**（默认即升级到 balanced），或 Python API `EvalConfig.build_mode(preset="balanced")`。
+- CLI 怪癖：`inspect` 里**省略 `--speed`** 时，解析出的 `standard` 会被自动升级成 `balanced`（auto-audit）；而**显式 `--speed balanced`** 反而不会升级。
 
 ### 5.3 档位速查
 
 | 期望 | 命令 |
 |---|---|
 | 快速 / 标准 / 深度审计 | `--speed fast` / `--speed balanced`(→standard) / `--speed thorough`(→audit) |
-| 带 Tier-3 自动审计 | `--preset balanced` |
+| 带 Tier-3 自动审计（inspect） | 省略 `--speed`/`--preset`（默认 balanced 档） |
 
 ---
 
@@ -229,17 +223,17 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 
 三个模式的 Schema 版本串（见 §1 表格）由 `tests/test_docs_contract.py` 强制与 README / `docs/index.html` 同步。
 
-**死代码警告**：`fusion/mode_score_schemas.py` 里 `METRIC_CONTRACTS` / `PRESET_CONTRACTS` / `ARTIFACT_CONTRACT` / `DIAGNOSIS_CONTRACT` **无任何引用**（PRESET_CONTRACTS 的键 `{fast, balanced, thorough}` 还与真实 `PRESETS` 键不匹配）。真实契约串是硬编码在 `multimode.py`（`nr-metrics-v3` / `fr-metrics-v3`）和 `pipeline.py`（`endpoint-metrics-v3` / `endpoint-reduced-reference-v3`）。两处来源可能漂移，改动契约时两处都要同步。
+**契约串来源**：真实契约串硬编码在 `multimode.py`（`nr-metrics-v3` / `fr-metrics-v3`）和 `pipeline.py`（`endpoint-metrics-v3` / `endpoint-reduced-reference-v3`）；Schema 版本串（`SCHEMA_IDS` / `ENDPOINT_SCHEMA_ID`）集中在 `fusion/mode_score_schemas.py` 并被 `test_docs_contract.py` 引用。⚠️ 两处来源（metrics 契约 vs schema 版本）独立演进，改动契约时两处都要同步。
 
 ### 6.2 规划文档（活跃）
 
 | 文档 | 内容 | 状态 |
 |---|---|---|
-| `USERPLAN.md` | P0/P1/P2 整改计划（Cadence v2、运动/UI 可靠性门控） | **工作区未提交版本**（中文一~十二编号结构） |
+| `USERPLAN.md` | P0/P1/P2 整改计划（Cadence v2、运动/UI 可靠性门控） | 已提交（中文一~十二编号结构） |
 | `PICPLAN.md` | 程序化 RPG 验证数据生成计划（23 节） | 已落地为 `tools/rpg_validation_generator/` |
 | `README.md` / `docs/index.html` / `docs/BENCHMARKS.md` | 三层文档系统 | README 是入口；`index.html` 是离线交互教程；`BENCHMARKS.md` 是性能证据 |
 
-> 代码里大量 `USERPLAN §N` 引用（cli.py、pyproject、ci.yml、test_docs_contract.py…）对应的是**旧版已提交**的 USERPLAN 章节号，与当前未提交的中文编号版本**不一致**（见 §10）。
+> 代码里大量 `USERPLAN §N` 引用（cli.py、pyproject、ci.yml、test_docs_contract.py…）对应的是**旧版** USERPLAN 章节号，与当前中文一~十二编号版本**不一致**（见 §9 第 2 条）。
 
 ---
 
@@ -313,16 +307,17 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 
 ## 9. 已知不一致与坑（索引）
 
-1. **版本三连**：源码 0.4.0 / egg-info 0.3.0 / .venv 0.1.0（见 §2.6）。
-2. **USERPLAN §N 引用失配**：代码里 `USERPLAN §N` 指旧提交版本；当前工作区版本是中文一~十二编号。
-3. **README `-- speed` 排版错误**（`--speed` 中间多了空格）+ 「balanced 默认含 tier-3 审计」不成立（tier-3 需 `--preset balanced` + audit extra）。
+1. ~~**版本三连**~~ ✅ 已收敛：源码 0.4.0 ＝ egg-info 0.4.0，`.venv` 已删；仅剩 gitignore 的 `build/lib` 里 0.3.0（见 §2.6）。
+2. **USERPLAN §N 引用失配**：代码里 `USERPLAN §N` 指旧提交版本；当前 USERPLAN.md 是中文一~十二编号（引用编号 ≠ 文档章节）。
+3. **`--preset balanced` 不是合法 CLI 参数**：argparse 只收 `fast` / `standard` / `audit`；README 曾指导该命令（已改）。带自动审计的 balanced 档 = `inspect` 省略 `--speed`/`--preset`（见 §5.2）。
 4. **`--speed balanced` 撞名**：实际是 `standard` 预设，不含自动审计（见 §5.2）。
-5. **`schema.py::Window.start_time` 是 NaN stub**：要用 `sampling.window_selector.window_times` 取真实时间。
-6. **`pipeline.py::_classify_window` 硬编码 `/120.0`** 起始时间假设（注释说调用方会用真实 PTS 覆盖，读早了会误标）。
+5. **`schema.py::Window.start_time` 是 NaN stub**：要用 `sampling.window_selector.window_times` 取真实时间（仓库内无引用，仅防外部误用）。
+6. **`pipeline.py::_classify_window` 硬编码 `/120.0`** 起始时间假设（调用方会用真实 PTS 覆盖，读早了会误标）。
 7. **`docs/calibration/synthetic_detection_12class.json` 是历史 0.1.0 产物**（numpy 2.5.1 / opencv 5.0.0 等），别当现役规格。
-8. **`fusion/mode_score_schemas.py` 契约常量是死代码**（见 §6.1）。
+8. ~~**`fusion/mode_score_schemas.py` 契约常量是死代码**~~ ✅ 已删除（`METRIC_CONTRACTS` 等 4 个常量 + `exposure_map` + `schema.FlowPair` + `testing.render_streaming` 均已移除）。
 9. **语料不可由 provenance 单独复现**：生成时 working-tree 是脏的，`validation*` 又 gitignore。
 10. **ds-torch 缺 pyiqa/cotracker**：vqa、audit 功能当前不可跑（见 §2.4）。
+11. **性能已知项（待办，未动）**：(a) endpoint 对齐阶段 build_alignment 会对候选视频做第二次完整解码（96px 描述符，紧跟在 scan_candidate 之后）——可改为在 scan 中顺带产出 16×9 描述符复用；(b) schema.forward_splat 实测约 170ms/次（float64 累加主导），1-D 扁平化索引几乎无收益（已验证），不要按「索引扁平化」去改；(c) 单次评测可写数 GB cache，必要时删除 cache/ 目录。
 
 ---
 
@@ -336,7 +331,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 | 加一条诊断证据 | `diagnosis/rules.py` + `diagnosis/cadence.py` 硬门控 |
 | 加一个子分数 / 权重 | `fusion/mode_score_schemas.py` |
 | 加一个产物/报告 | `report/artifact_pipeline.py`（逐项失败隔离模式） |
-| 改 CLI 契约串 | `multimode.py` / `pipeline.py` 硬编码处 + `fusion/mode_score_schemas.py` 死代码处 **两处同步** |
+| 改 Schema 版本串 | `fusion/mode_score_schemas.py`（`SCHEMA_IDS` / `ENDPOINT_SCHEMA_ID`）+ `test_docs_contract.py` |
 
 **提交前：**
 
