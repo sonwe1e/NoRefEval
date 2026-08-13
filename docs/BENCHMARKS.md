@@ -69,7 +69,8 @@ perf work (synthetic inputs, ~60 s, no repo caches touched):
 | feature_store save/load pair npz | 20 / 9 ms |
 
 Full-run reference (10 s @ 120 FPS 640x360, NR fast, farneback): 97 s ->
-53 s after the splat/bincount, eager error maps, shared reconstructions and
-the luma-only reconstruction (overall score identical at 80.69). Decode-
-pass inventory per inspect: endpoint 6 -> 3, full-reference 7 -> 5,
+51 s after the splat/bincount, eager error maps, shared reconstructions,
+luma-only reconstruction and the shared affine residual (overall score
+identical at 80.69). Standard preset on the same clip: 191 s -> 183 s.
+Decode-pass inventory per inspect: endpoint 6 -> 3, full-reference 7 -> 5,
 no-reference 1 (descriptor memo + scan reuse; see PROJECT_STRUCTURE §9.11).

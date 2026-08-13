@@ -363,6 +363,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 | NR error map | tier-2 内 eager 计算（运行期 top-12），lazy 只补漏 | 75.8→67.1s，13 组图逐位一致 |
 | 重建共享 | `_reconstruction_for` 缓存：scalar 与 maps 路径共用半程重建（splat 调用 968→648） | 67.1→57.3s，分数逐位一致 |
 | 亮度重建 | `_reconstruct_mid` 改纯 luma（线性等价，漂移 ~4e-5；RGB splat→gray splat 1.7×） | 57.3→52.5s，分数 80.69 不变 |
+| 仿射残差共享 | `dense_affine_residual` 每对只算一次（tile/geometry/maps 三处复用，RANSAC 确定性已验证） | fast 52.5→51.4s；standard 191.1→182.7s，分数不变 |
 | 杂项 | y_channel×1、anchor 对复用、edge npz×1、scene_cuts 提升、gc 提升 | 全绿套件 |
 | 死代码 | 6 个符号 + 4 契约常量 + 测试专用 robust_z | 全仓零引用 grep |
 | luma | 收敛到 `imutils.luma`（4 处委托；2 处 float64 按设计保留） | uint8/float32/float64 位级一致 |

@@ -388,6 +388,7 @@ def _tile_motion_dynamics(
     pairs: tuple[tuple[int, int], ...],
     grid: int = 4,
     visibility_masks: list[np.ndarray] | None = None,
+    residual_cache: dict | None = None,
 ) -> dict[str, float]:
     n_tiles = grid * grid
     vectors: list[np.ndarray] = []
@@ -400,8 +401,14 @@ def _tile_motion_dynamics(
                 and i < len(visibility_masks) else None)
         # USERPLAN P2: remove affine camera motion (rotation/zoom/translation)
         # before measuring per-tile dynamics, so camera pans do not read as
-        # local acceleration/jerk.
-        residual = dense_affine_residual(field)
+        # local acceleration/jerk.  The residual is shared with the flow-
+        # geometry features and the dense fold maps (same pairs, same field).
+        if residual_cache is not None and (a, b) in residual_cache:
+            residual = residual_cache[(a, b)]
+        else:
+            residual = dense_affine_residual(field)
+            if residual_cache is not None:
+                residual_cache[(a, b)] = residual
         tiles = np.full((n_tiles, 2), np.nan, np.float64)
         for ti, (gy, gx) in enumerate(
                 (gy, gx) for gy in range(grid) for gx in range(grid)):
@@ -548,6 +555,7 @@ def compute_window(
     *,
     vqa_backend: VQABackend | None = None,
     recon_cache: dict | None = None,
+    residual_cache: dict | None = None,
 ) -> dict[str, float]:
     """Compute two-phase self-reference and time-normalized generic evidence."""
     n = len(bundle.rgb)
@@ -603,7 +611,8 @@ def compute_window(
     vis_masks = _visibility_masks(y, flows, list(short_pairs), cfg)
     out.update(_flow_reliability(y, flows, list(short_pairs), cfg))
     out.update(_tile_motion_dynamics(
-        bundle, flows, short_pairs, visibility_masks=vis_masks))
+        bundle, flows, short_pairs, visibility_masks=vis_masks,
+        residual_cache=residual_cache))
     out.update(_track_smoothness(bundle))
 
     # Local flow geometry after removing the affine camera motion (USERPLAN P2).
@@ -614,7 +623,12 @@ def compute_window(
     geometry: list[dict[str, float]] = []
     for i, (a, b) in enumerate(short_pairs):
         field = flows.forward(a, b)
-        residual = dense_affine_residual(field)
+        if residual_cache is not None and (a, b) in residual_cache:
+            residual = residual_cache[(a, b)]
+        else:
+            residual = dense_affine_residual(field)
+            if residual_cache is not None:
+                residual_cache[(a, b)] = residual
         mask = (vis_masks[i] if i < len(vis_masks) else None)
         geometry.append(geometry_stats(residual, mask=mask))
     for source_key, output_key in (
@@ -859,6 +873,7 @@ def compute_window(
 # ---------------------------------------------------------------------------
 def compute_window_maps(bundle: FrameBundle, flows: WindowFlows, cfg: EvalConfig,
                         recon_cache: dict | None = None,
+                        residual_cache: dict | None = None,
                         ) -> dict[str, np.ndarray]:
     """Return named (H, W) diagnostic fields for one window.
 
@@ -930,7 +945,13 @@ def compute_window_maps(bundle: FrameBundle, flows: WindowFlows, cfg: EvalConfig
     fold_fields: list[np.ndarray] = []
     jdet_fields: list[np.ndarray] = []
     for a, b in short_pairs:
-        residual = dense_affine_residual(flows.forward(a, b))
+        field = flows.forward(a, b)
+        if residual_cache is not None and (a, b) in residual_cache:
+            residual = residual_cache[(a, b)]
+        else:
+            residual = dense_affine_residual(field)
+            if residual_cache is not None:
+                residual_cache[(a, b)] = residual
         jdet = jacobian_det(residual)
         jdet_fields.append(jdet.astype(np.float32))
         fold_fields.append(np.clip(1.0 - jdet, 0.0, None).astype(np.float32))
