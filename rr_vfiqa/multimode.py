@@ -83,6 +83,9 @@ def _compute_nr_error_maps(candidate, cfg, backend, window_features, worst, *,
         wf = by_center.get(center)
         if wf is None:
             continue
+        if wf.error_maps:   # already computed eagerly in the tier-2 loop
+            out[center] = dict(wf.error_maps)
+            continue
         try:
             bundle = candidate.read_frames(
                 wf.window.indices, width=cfg.preset.flow_width)
@@ -704,6 +707,7 @@ def evaluate_no_reference(
 
     stage_errors: collections.Counter[str] = collections.Counter()
     window_features: list[WindowFeatures] = []
+    eager: list[tuple[float, int]] = []     # running top-12 (severity, center)
     for index, window in enumerate(windows):
         if index % max(1, len(windows) // 10) == 0:
             say(f"no-reference window {index + 1}/{len(windows)}")
@@ -725,6 +729,28 @@ def evaluate_no_reference(
             wf.labels["metric_warnings"] = metric.warnings
             wf.labels["metric_coverage"] = metric.coverage
             wf.labels["metric_confidence"] = metric.confidence
+            # USERPLAN §8: compute the dense error maps EAGERLY for windows
+            # in the running top-12 by category severity while this window's
+            # flows are still live.  The lazy error-map phase would otherwise
+            # re-decode and re-compute every flow for these windows (~0.9 s
+            # each).  Evicted windows only waste the cheap map pass; the lazy
+            # phase still covers any final worst-window that missed the eager
+            # set — both paths run the same function on identical inputs.
+            try:
+                errs = window_category_errors(
+                    EvaluationMode.NO_REFERENCE, wf)
+                sev = float(max(errs.values(), default=0.0))
+                if sev >= 0.35:
+                    eager.append((sev, int(window.center)))
+                    eager.sort(key=lambda t: -t[0])
+                    del eager[12:]
+                    if int(window.center) in {c for _, c in eager}:
+                        from .metrics import nr_window_maps
+                        maps = nr_window_maps(bundle, flows, cfg)
+                        if maps:
+                            wf.error_maps.update(maps)
+            except Exception as exc:  # never let map generation fail the run
+                wf.labels["error_map_failure"] = repr(exc)
         except Exception as exc:
             wf.labels["error_no_reference"] = repr(exc)
             stage_errors["no_reference"] += 1
