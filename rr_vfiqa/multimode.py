@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import collections
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -647,6 +650,64 @@ def _render_issue_heatmaps(report: Report, windows: list[WindowFeatures],
         issue["maps"] = rel_maps
 
 
+
+def _nr_window_task(candidate, cfg, backend, learned, window, eager, eager_lock):
+    """One NR window's scalar + eager-map work (thread-safe).
+
+    All state is per-window except the locked running top-12 hint; the
+    eager set only decides WHERE maps are computed (eager or lazy), never
+    their values, so the report is deterministic regardless of thread
+    scheduling.  Failures are recorded on the window labels and counted
+    by the caller.
+    """
+    wf = WindowFeatures(window=window)
+    try:
+        bundle = candidate.read_frames(
+            window.indices, width=cfg.preset.flow_width)
+        flows = WindowFlows(bundle, backend)
+        lag_plan = TemporalLagPlan.build(bundle.times)
+        flow_plan = FlowPairPlan.for_no_reference(lag_plan)
+        flows.precompute(flow_plan.unique_pairs())
+        recon_cache: dict = {}
+        residual_cache: dict = {}
+        metric = MetricResult.from_scalars(
+            no_reference.compute_window(
+                bundle, flows, cfg, vqa_backend=learned,
+                recon_cache=recon_cache, residual_cache=residual_cache),
+            required=required_features(EvaluationMode.NO_REFERENCE),
+        )
+        wf.scalars.update(metric.scalars)
+        wf.labels["metric_status"] = metric.status
+        wf.labels["metric_warnings"] = metric.warnings
+        wf.labels["metric_coverage"] = metric.coverage
+        wf.labels["metric_confidence"] = metric.confidence
+        # USERPLAN §8: compute the dense error maps EAGERLY for windows in
+        # the running top-12 by category severity while this window's flows
+        # are still live.  The lazy error-map phase covers any final
+        # worst-window that missed the eager set; both paths run the same
+        # function on identical inputs.
+        try:
+            errs = window_category_errors(EvaluationMode.NO_REFERENCE, wf)
+            sev = float(max(errs.values(), default=0.0))
+            if sev >= 0.35:
+                with eager_lock:
+                    eager.append((sev, int(window.center)))
+                    eager.sort(key=lambda t: -t[0])
+                    del eager[12:]
+                    keep = int(window.center) in {c for _, c in eager}
+                if keep:
+                    from .metrics import nr_window_maps
+                    maps = nr_window_maps(bundle, flows, cfg,
+                                          recon_cache, residual_cache)
+                    if maps:
+                        wf.error_maps.update(maps)
+        except Exception as exc:  # never let map generation fail the run
+            wf.labels["error_map_failure"] = repr(exc)
+    except Exception as exc:
+        wf.labels["error_no_reference"] = repr(exc)
+    return wf
+
+
 def evaluate_no_reference(
     candidate_video: str,
     preset: str = "standard",
@@ -708,59 +769,36 @@ def evaluate_no_reference(
     stage_errors: collections.Counter[str] = collections.Counter()
     window_features: list[WindowFeatures] = []
     eager: list[tuple[float, int]] = []     # running top-12 (severity, center)
-    for index, window in enumerate(windows):
-        if index % max(1, len(windows) // 10) == 0:
-            say(f"no-reference window {index + 1}/{len(windows)}")
-        wf = WindowFeatures(window=window)
-        try:
-            bundle = candidate.read_frames(
-                window.indices, width=cfg.preset.flow_width)
-            flows = WindowFlows(bundle, backend)
-            lag_plan = TemporalLagPlan.build(bundle.times)
-            flow_plan = FlowPairPlan.for_no_reference(lag_plan)
-            flows.precompute(flow_plan.unique_pairs())
-            recon_cache: dict = {}
-            residual_cache: dict = {}
-            metric = MetricResult.from_scalars(
-                no_reference.compute_window(
-                    bundle, flows, cfg, vqa_backend=learned,
-                    recon_cache=recon_cache,
-                    residual_cache=residual_cache),
-                required=required_features(EvaluationMode.NO_REFERENCE),
-            )
-            wf.scalars.update(metric.scalars)
-            wf.labels["metric_status"] = metric.status
-            wf.labels["metric_warnings"] = metric.warnings
-            wf.labels["metric_coverage"] = metric.coverage
-            wf.labels["metric_confidence"] = metric.confidence
-            # USERPLAN §8: compute the dense error maps EAGERLY for windows
-            # in the running top-12 by category severity while this window's
-            # flows are still live.  The lazy error-map phase would otherwise
-            # re-decode and re-compute every flow for these windows (~0.9 s
-            # each).  Evicted windows only waste the cheap map pass; the lazy
-            # phase still covers any final worst-window that missed the eager
-            # set — both paths run the same function on identical inputs.
-            try:
-                errs = window_category_errors(
-                    EvaluationMode.NO_REFERENCE, wf)
-                sev = float(max(errs.values(), default=0.0))
-                if sev >= 0.35:
-                    eager.append((sev, int(window.center)))
-                    eager.sort(key=lambda t: -t[0])
-                    del eager[12:]
-                    if int(window.center) in {c for _, c in eager}:
-                        from .metrics import nr_window_maps
-                        maps = nr_window_maps(
-                            bundle, flows, cfg, recon_cache,
-                            residual_cache)
-                        if maps:
-                            wf.error_maps.update(maps)
-            except Exception as exc:  # never let map generation fail the run
-                wf.labels["error_map_failure"] = repr(exc)
-        except Exception as exc:
-            wf.labels["error_no_reference"] = repr(exc)
-            stage_errors["no_reference"] += 1
-        window_features.append(wf)
+    eager_lock = threading.Lock()
+    # Windows are independent (own frames, own flows); farneback releases the
+    # GIL, so a thread pool scales near-linearly on the CPU path.  The eager
+    # hint is lock-protected; every other piece of state is per-window, so the
+    # report is deterministic regardless of scheduling.  Override with
+    # RR_VFIQA_WORKERS=1 for strict sequential execution.
+    workers = int(os.environ.get("RR_VFIQA_WORKERS", "0"))
+    if workers == 0:
+        workers = (min(8, (os.cpu_count() or 1))
+                   if backend.name == "farneback" else 1)
+    if workers > 1 and len(windows) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            window_features = list(ex.map(
+                lambda w: _nr_window_task(
+                    candidate, cfg, backend, learned, w, eager, eager_lock),
+                windows))
+        for wf in window_features:
+            if "error_no_reference" in wf.labels:
+                stage_errors["no_reference"] += 1
+        say(f"{len(window_features)} windows evaluated "
+            f"({workers} threads)")
+    else:
+        for index, window in enumerate(windows):
+            if index % max(1, len(windows) // 10) == 0:
+                say(f"no-reference window {index + 1}/{len(windows)}")
+            wf = _nr_window_task(
+                candidate, cfg, backend, learned, window, eager, eager_lock)
+            if "error_no_reference" in wf.labels:
+                stage_errors["no_reference"] += 1
+            window_features.append(wf)
 
     required = required_features(EvaluationMode.NO_REFERENCE)
     valid = [
@@ -1010,6 +1048,38 @@ def evaluate_no_reference(
     return report
 
 
+
+def _fr_window_task(reference, candidate, alignment, cfg, backend, window,
+                    working_width, working_height):
+    """One FR window's metric work (thread-safe, per-window state only)."""
+    wf = WindowFeatures(window=window)
+    try:
+        ref_indices = alignment.reference_of_candidate[window.indices]
+        if np.any(ref_indices < 0) or np.any(np.diff(ref_indices) <= 0):
+            raise ValueError("window crosses an unmatched alignment interval")
+        rb = reference.read_frames(ref_indices, width=working_width)
+        cb = candidate.read_frames(window.indices, width=working_width)
+        rb = _resize_bundle(rb, width=working_width, height=working_height)
+        cb = _resize_bundle(cb, width=working_width, height=working_height)
+        cf = WindowFlows(cb, backend)
+        rf = WindowFlows(rb, backend)
+        pairs = [(i, i + 1) for i in range(len(cb.rgb) - 1)]
+        cf.precompute(pairs)
+        rf.precompute(pairs)
+        metric = MetricResult.from_scalars(
+            full_reference.compute_window(rb, cb, rf, cf, cfg),
+            required=required_features(EvaluationMode.FULL_REFERENCE),
+        )
+        wf.scalars.update(metric.scalars)
+        wf.labels["metric_status"] = metric.status
+        wf.labels["metric_warnings"] = metric.warnings
+        wf.labels["metric_coverage"] = metric.coverage
+        wf.labels["metric_confidence"] = metric.confidence
+    except Exception as exc:
+        wf.labels["error_full_reference"] = repr(exc)
+    return wf
+
+
 def evaluate_full_reference(
     reference_video: str,
     candidate_video: str,
@@ -1087,40 +1157,33 @@ def evaluate_full_reference(
 
     stage_errors: collections.Counter[str] = collections.Counter()
     window_features: list[WindowFeatures] = []
-    for index, window in enumerate(windows):
-        if index % max(1, len(windows) // 10) == 0:
-            say(f"full-reference window {index + 1}/{len(windows)}")
-        wf = WindowFeatures(window=window)
-        try:
-            ref_indices = alignment.reference_of_candidate[window.indices]
-            if np.any(ref_indices < 0) or np.any(np.diff(ref_indices) <= 0):
-                raise ValueError("window crosses an unmatched alignment interval")
-            rb = reference.read_frames(
-                ref_indices, width=working_width)
-            cb = candidate.read_frames(
-                window.indices, width=working_width)
-            rb = _resize_bundle(
-                rb, width=working_width, height=working_height)
-            cb = _resize_bundle(
-                cb, width=working_width, height=working_height)
-            cf = WindowFlows(cb, backend)
-            rf = WindowFlows(rb, backend)
-            pairs = [(i, i + 1) for i in range(len(cb.rgb) - 1)]
-            cf.precompute(pairs)
-            rf.precompute(pairs)
-            metric = MetricResult.from_scalars(
-                full_reference.compute_window(rb, cb, rf, cf, cfg),
-                required=required_features(EvaluationMode.FULL_REFERENCE),
-            )
-            wf.scalars.update(metric.scalars)
-            wf.labels["metric_status"] = metric.status
-            wf.labels["metric_warnings"] = metric.warnings
-            wf.labels["metric_coverage"] = metric.coverage
-            wf.labels["metric_confidence"] = metric.confidence
-        except Exception as exc:
-            wf.labels["error_full_reference"] = repr(exc)
-            stage_errors["full_reference"] += 1
-        window_features.append(wf)
+    # Windows are independent; farneback releases the GIL, so a thread pool
+    # scales near-linearly.  RR_VFIQA_WORKERS=1 forces sequential execution.
+    workers = int(os.environ.get("RR_VFIQA_WORKERS", "0"))
+    if workers == 0:
+        workers = (min(8, (os.cpu_count() or 1))
+                   if backend.name == "farneback" else 1)
+    if workers > 1 and len(windows) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            window_features = list(ex.map(
+                lambda w: _fr_window_task(
+                    reference, candidate, alignment, cfg, backend, w,
+                    working_width, working_height),
+                windows))
+        for wf in window_features:
+            if "error_full_reference" in wf.labels:
+                stage_errors["full_reference"] += 1
+        say(f"{len(window_features)} windows evaluated ({workers} threads)")
+    else:
+        for index, window in enumerate(windows):
+            if index % max(1, len(windows) // 10) == 0:
+                say(f"full-reference window {index + 1}/{len(windows)}")
+            wf = _fr_window_task(
+                reference, candidate, alignment, cfg, backend, window,
+                working_width, working_height)
+            if "error_full_reference" in wf.labels:
+                stage_errors["full_reference"] += 1
+            window_features.append(wf)
 
     required = required_features(EvaluationMode.FULL_REFERENCE)
     valid = [

@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 import collections
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -146,6 +149,64 @@ def _classify_window(wf: WindowFeatures, conf_base: float) -> WorstWindow | None
 # main entry
 # ---------------------------------------------------------------------------
 
+def _endpoint_window_task(candidate, p, cfg, backend, cache, ui, window,
+                         cut_pair_set):
+    """One endpoint window's stage work (thread-safe).
+
+    All state is per-window; the SourceCache and UIDetector are only read
+    here (pair/edge npz loads, prebuilt masks).  Failures land on the
+    window's labels and are counted by the caller.  Parallel mode is
+    restricted to run_tracker=False, so no tracker state is shared.
+    """
+    if window.pair < 0 or int(window.pair) in cut_pair_set:
+        return None
+    wf = WindowFeatures(window=window)
+    try:
+        bundle = candidate.read_frames(window.indices, width=p.flow_width)
+        if bundle.rgb.shape[0] < p.window_frames:
+            return None
+        wflows = WindowFlows(bundle, backend)
+        # All flows this window's metrics need, in one batched backend call.
+        wflows.precompute()
+        pair = cache.get_pair(window.pair)
+
+        stages = [
+            ("composition", lambda: flow_composition_metric.compute_with_maps(
+                wflows, pair, cfg)),
+            ("cycle", lambda: cycle_reconstruction.compute(bundle, wflows, cfg)),
+            ("temporal", lambda: temporal_compensation.compute(bundle, wflows, cfg)),
+            ("parity", lambda: parity_frequency.compute_window(bundle, wflows, cfg)),
+            ("edges", lambda: edge_structure.compute(bundle, wflows, cache, pair, cfg)),
+            ("gtq", lambda: global_technical_quality.compute_window(bundle)),
+        ]
+        if p.run_region_branches and ui is not None:
+            stages += [
+                ("ui", lambda: ui_detector.compute_window(bundle, ui, cfg)),
+                ("text", lambda: text_evaluator.compute_window(bundle, ui, cfg)),
+                ("transition", lambda: transition_evaluator.compute_window(bundle, wflows, cfg)),
+                ("card", lambda: card_tracker.compute_window(bundle, cfg)),
+                ("character", lambda: character_segmenter.compute_window(bundle, wflows, pair, cfg)),
+                ("thin", lambda: thin_object_detector.compute_window(bundle, wflows, pair, cfg)),
+            ]
+        for name, fn in stages:
+            try:                        # one failing stage must not
+                result = fn()           # take down the whole window
+                # USERPLAN P1: stages may return (scalars, maps) to populate
+                # dense error maps alongside the per-window scalars.
+                if isinstance(result, tuple):
+                    scalars, maps = result
+                    wf.scalars.update(scalars)
+                    if maps:
+                        wf.error_maps.update(maps)
+                else:
+                    wf.scalars.update(result)
+            except Exception as exc:
+                wf.labels[f"error_{name}"] = repr(exc)
+    except Exception as exc:
+        wf.labels["error_window"] = repr(exc)
+    return wf
+
+
 def evaluate_endpoint_reference(
     reference_video: str,
     candidate_video: str,
@@ -208,59 +269,83 @@ def evaluate_endpoint_reference(
     audit_tracker, tracker_note = (get_audit_tracker(cfg.device)
                                    if p.run_tracker else (None, None))
     cut_pair_set = set(int(c) for c in alignment.scene_cuts)
-    for n, w in enumerate(windows):
-        if n % max(1, len(windows) // 10) == 0:
-            say(f"window {n + 1}/{len(windows)}")
-        if w.pair < 0 or int(w.pair) in cut_pair_set:
-            continue
-        bundle = candidate.read_frames(w.indices, width=p.flow_width)
-        if bundle.rgb.shape[0] < p.window_frames:
-            continue
-        wflows = WindowFlows(bundle, backend)
-        # All flows this window's metrics need, in one batched backend call.
-        wflows.precompute()
-        pair = cache.get_pair(w.pair)
-        wf = WindowFeatures(window=w)
+    # Windows are independent; farneback releases the GIL, so a thread pool
+    # scales near-linearly.  Restricted to run_tracker=False (CoTracker state
+    # is shared) and the farneback backend.  RR_VFIQA_WORKERS=1 forces
+    # sequential execution.  Stage errors are counted via labels afterwards.
+    workers = int(os.environ.get("RR_VFIQA_WORKERS", "0"))
+    if workers == 0:
+        workers = (min(8, (os.cpu_count() or 1))
+                   if backend.name == "farneback" and not p.run_tracker
+                   else 1)
+    if workers > 1 and len(windows) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(
+                lambda w: _endpoint_window_task(
+                    candidate, p, cfg, backend, cache, ui, w, cut_pair_set),
+                windows))
+        for wf in results:
+            if wf is None:
+                continue
+            wfs.append(wf)
+            for key, val in wf.labels.items():
+                if key.startswith("error_"):
+                    stage_errors[key[len("error_"):]] += 1
+        say(f"{len(wfs)} windows evaluated ({workers} threads)")
+    else:
+        for n, w in enumerate(windows):
+            if n % max(1, len(windows) // 10) == 0:
+                say(f"window {n + 1}/{len(windows)}")
+            if w.pair < 0 or int(w.pair) in cut_pair_set:
+                continue
+            bundle = candidate.read_frames(w.indices, width=p.flow_width)
+            if bundle.rgb.shape[0] < p.window_frames:
+                continue
+            wflows = WindowFlows(bundle, backend)
+            # All flows this window's metrics need, in one batched backend call.
+            wflows.precompute()
+            pair = cache.get_pair(w.pair)
+            wf = WindowFeatures(window=w)
 
-        stages = [
-            ("composition", lambda: flow_composition_metric.compute_with_maps(
-                wflows, pair, cfg)),
-            ("cycle", lambda: cycle_reconstruction.compute(bundle, wflows, cfg)),
-            ("temporal", lambda: temporal_compensation.compute(bundle, wflows, cfg)),
-            ("parity", lambda: parity_frequency.compute_window(bundle, wflows, cfg)),
-            ("edges", lambda: edge_structure.compute(bundle, wflows, cache, pair, cfg)),
-            ("gtq", lambda: global_technical_quality.compute_window(bundle)),
-        ]
-        if p.run_region_branches and ui is not None:
-            stages += [
-                ("ui", lambda: ui_detector.compute_window(bundle, ui, cfg)),
-                ("text", lambda: text_evaluator.compute_window(bundle, ui, cfg)),
-                ("transition", lambda: transition_evaluator.compute_window(bundle, wflows, cfg)),
-                ("card", lambda: card_tracker.compute_window(bundle, cfg)),
-                ("character", lambda: character_segmenter.compute_window(bundle, wflows, pair, cfg)),
-                ("thin", lambda: thin_object_detector.compute_window(bundle, wflows, pair, cfg)),
+            stages = [
+                ("composition", lambda: flow_composition_metric.compute_with_maps(
+                    wflows, pair, cfg)),
+                ("cycle", lambda: cycle_reconstruction.compute(bundle, wflows, cfg)),
+                ("temporal", lambda: temporal_compensation.compute(bundle, wflows, cfg)),
+                ("parity", lambda: parity_frequency.compute_window(bundle, wflows, cfg)),
+                ("edges", lambda: edge_structure.compute(bundle, wflows, cache, pair, cfg)),
+                ("gtq", lambda: global_technical_quality.compute_window(bundle)),
             ]
-        if p.run_tracker:                            # audit-tier point tracking
-            stages.append(("weapon", lambda: weapon_tracker.compute_window(
-                bundle, wflows, cfg, tracker=audit_tracker,
-                roi_mask=wf.scalars.get("_char_mask"))))
-        for name, fn in stages:
-            try:                                    # one failing stage must not
-                result = fn()                       # take down the whole window
-                # USERPLAN P1: stages may return (scalars, maps) to populate
-                # dense error maps alongside the per-window scalars.
-                if isinstance(result, tuple):
-                    scalars, maps = result
-                    wf.scalars.update(scalars)
-                    if maps:
-                        wf.error_maps.update(maps)
-                else:
-                    wf.scalars.update(result)
-            except Exception as exc:
-                wf.labels[f"error_{name}"] = repr(exc)
-                stage_errors[name] += 1
+            if p.run_region_branches and ui is not None:
+                stages += [
+                    ("ui", lambda: ui_detector.compute_window(bundle, ui, cfg)),
+                    ("text", lambda: text_evaluator.compute_window(bundle, ui, cfg)),
+                    ("transition", lambda: transition_evaluator.compute_window(bundle, wflows, cfg)),
+                    ("card", lambda: card_tracker.compute_window(bundle, cfg)),
+                    ("character", lambda: character_segmenter.compute_window(bundle, wflows, pair, cfg)),
+                    ("thin", lambda: thin_object_detector.compute_window(bundle, wflows, pair, cfg)),
+                ]
+            if p.run_tracker:                        # audit-tier point tracking
+                stages.append(("weapon", lambda: weapon_tracker.compute_window(
+                    bundle, wflows, cfg, tracker=audit_tracker,
+                    roi_mask=wf.scalars.get("_char_mask"))))
+            for name, fn in stages:
+                try:                                # one failing stage must not
+                    result = fn()                   # take down the whole window
+                    # USERPLAN P1: stages may return (scalars, maps) to populate
+                    # dense error maps alongside the per-window scalars.
+                    if isinstance(result, tuple):
+                        scalars, maps = result
+                        wf.scalars.update(scalars)
+                        if maps:
+                            wf.error_maps.update(maps)
+                    else:
+                        wf.scalars.update(result)
+                except Exception as exc:
+                    wf.labels[f"error_{name}"] = repr(exc)
+                    stage_errors[name] += 1
 
-        wfs.append(wf)
+            wfs.append(wf)
 
     # --- tier 3: audit escalation (§10) -------------------------------------
     # The highest-risk windows get the core metrics recomputed at a higher
