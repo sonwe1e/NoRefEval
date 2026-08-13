@@ -719,9 +719,11 @@ def evaluate_no_reference(
             lag_plan = TemporalLagPlan.build(bundle.times)
             flow_plan = FlowPairPlan.for_no_reference(lag_plan)
             flows.precompute(flow_plan.unique_pairs())
+            recon_cache: dict = {}
             metric = MetricResult.from_scalars(
                 no_reference.compute_window(
-                    bundle, flows, cfg, vqa_backend=learned),
+                    bundle, flows, cfg, vqa_backend=learned,
+                    recon_cache=recon_cache),
                 required=required_features(EvaluationMode.NO_REFERENCE),
             )
             wf.scalars.update(metric.scalars)
@@ -746,7 +748,8 @@ def evaluate_no_reference(
                     del eager[12:]
                     if int(window.center) in {c for _, c in eager}:
                         from .metrics import nr_window_maps
-                        maps = nr_window_maps(bundle, flows, cfg)
+                        maps = nr_window_maps(
+                            bundle, flows, cfg, recon_cache)
                         if maps:
                             wf.error_maps.update(maps)
             except Exception as exc:  # never let map generation fail the run

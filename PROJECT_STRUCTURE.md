@@ -361,6 +361,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 | 缓存 IO | savez 代替 savez_compressed（旧条目仍可读） | 写 22× |
 | 窗口流 | 默认只预计算被消费的 5 对 | 10/14 有向流，计数后端验证 |
 | NR error map | tier-2 内 eager 计算（运行期 top-12），lazy 只补漏 | 75.8→67.1s，13 组图逐位一致 |
+| 重建共享 | `_reconstruction_for` 缓存：scalar 与 maps 路径共用半程重建（splat 调用 968→648） | 67.1→57.3s，分数逐位一致 |
 | 杂项 | y_channel×1、anchor 对复用、edge npz×1、scene_cuts 提升、gc 提升 | 全绿套件 |
 | 死代码 | 6 个符号 + 4 契约常量 + 测试专用 robust_z | 全仓零引用 grep |
 | luma | 收敛到 `imutils.luma`（4 处委托；2 处 float64 按设计保留） | uint8/float32/float64 位级一致 |

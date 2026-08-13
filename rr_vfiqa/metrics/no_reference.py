@@ -59,11 +59,37 @@ def _mc_residual(
     return float(np.mean(means)), float(np.mean(p90s))
 
 
+def _reconstruction_for(
+    recon_cache: dict | None,
+    a: int, b: int,
+    rgb: np.ndarray,
+    f_ab: np.ndarray, f_ba: np.ndarray,
+    weight_a: np.ndarray, weight_b: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Half-warp reconstruction, shared between the scalar and map paths.
+
+    compute_window and compute_window_maps reconstruct the same triplets
+    with identical inputs; the cache avoids running the expensive forward
+    splats twice per window (~30 % of all splat calls).
+    """
+    if recon_cache is not None:
+        hit = recon_cache.get((a, b))
+        if hit is not None:
+            return hit
+    recon, coverage = _reconstruct_mid(
+        rgb[a], rgb[b], f_ab, f_ba,
+        weight_a=weight_a, weight_b=weight_b)
+    if recon_cache is not None:
+        recon_cache[(a, b)] = (recon, coverage)
+    return recon, coverage
+
+
 def _triplet_features(
     triplets: tuple[TemporalTriplet, ...],
     bundle: FrameBundle,
     flows: WindowFlows,
     cfg: EvalConfig,
+    recon_cache: dict | None = None,
 ) -> tuple[float, float, float, float]:
     composition: list[float] = []
     cycle: list[float] = []
@@ -90,9 +116,9 @@ def _triplet_features(
         disocclusion.append(float(
             0.5 * (np.mean(occ.occ_ab) + np.mean(occ.occ_ba))))
 
-        reconstructed, coverage = _reconstruct_mid(
-            bundle.rgb[a], bundle.rgb[b], f_ab, f_ba,
-            weight_a=weight_a, weight_b=weight_b)
+        reconstructed, coverage = _reconstruction_for(
+            recon_cache, a, b, bundle.rgb, f_ab, f_ba,
+            weight_a, weight_b)
         visible = coverage > 0.25
         if visible.sum() >= 64:
             residual = charbonnier(
@@ -516,6 +542,7 @@ def compute_window(
     cfg: EvalConfig,
     *,
     vqa_backend: VQABackend | None = None,
+    recon_cache: dict | None = None,
 ) -> dict[str, float]:
     """Compute two-phase self-reference and time-normalized generic evidence."""
     n = len(bundle.rgb)
@@ -526,9 +553,9 @@ def compute_window(
 
     lag_plan = TemporalLagPlan.build(bundle.times)
     native_comp, native_cycle, native_p90, native_occ = _triplet_features(
-        lag_plan.native_triplets, bundle, flows, cfg)
+        lag_plan.native_triplets, bundle, flows, cfg, recon_cache)
     common_comp, common_cycle, common_p90, common_occ = _triplet_features(
-        lag_plan.common_triplets, bundle, flows, cfg)
+        lag_plan.common_triplets, bundle, flows, cfg, recon_cache)
     out.update({
         "nr_native_self_comp": native_comp,
         "nr_native_self_cycle": native_cycle,
@@ -826,6 +853,7 @@ def compute_window(
 # report renders as heatmaps and what feeds issue-level spatial boxes.
 # ---------------------------------------------------------------------------
 def compute_window_maps(bundle: FrameBundle, flows: WindowFlows, cfg: EvalConfig,
+                        recon_cache: dict | None = None,
                         ) -> dict[str, np.ndarray]:
     """Return named (H, W) diagnostic fields for one window.
 
@@ -880,9 +908,9 @@ def compute_window_maps(bundle: FrameBundle, flows: WindowFlows, cfg: EvalConfig
         bwd = composition_error(f_ba, f_bm, f_ma, weight=weight_b,
                                 tau_px=cfg.charbonnier_tau)
         comp_fields.append(np.maximum(fwd.error_map, bwd.error_map))
-        reconstructed, coverage = _reconstruct_mid(
-            bundle.rgb[a], bundle.rgb[b], f_ab, f_ba,
-            weight_a=weight_a, weight_b=weight_b)
+        reconstructed, coverage = _reconstruction_for(
+            recon_cache, a, b, bundle.rgb, f_ab, f_ba,
+            weight_a, weight_b)
         visible = coverage > 0.25
         field = np.zeros((h, w), np.float32)
         if visible.sum() >= 64:

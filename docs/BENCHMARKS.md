@@ -69,7 +69,7 @@ perf work (synthetic inputs, ~60 s, no repo caches touched):
 | feature_store save/load pair npz | 20 / 9 ms |
 
 Full-run reference (10 s @ 120 FPS 640x360, NR fast, farneback): 97 s ->
-74 s after the forward_splat bincount change (overall score identical);
-forward_splat was 40% of the run. Decode-pass inventory per inspect:
-endpoint 6 -> 3, full-reference 7 -> 5, no-reference 1 (descriptor memo +
-scan reuse; see PROJECT_STRUCTURE §9.11).
+57 s after the splat/bincount, eager error maps and shared-reconstruction
+changes (overall score identical at 80.69). Decode-pass inventory per
+inspect: endpoint 6 -> 3, full-reference 7 -> 5, no-reference 1 (descriptor
+memo + scan reuse; see PROJECT_STRUCTURE §9.11).
