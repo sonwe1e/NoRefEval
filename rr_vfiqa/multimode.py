@@ -159,6 +159,11 @@ def _fr_tier3(candidate, reference, cfg, backend, window_features, worst,
     # USERPLAN §6 P0.2: cap the Tier-3 working resolution.
     tier3_width = min(reference.meta.width, p.tier3_max_width) \
         if p.tier3_max_width > 0 else reference.meta.width
+    if tier3_width <= p.flow_width:
+        # The cap equals tier-2 flow_width for every current preset, so a
+        # re-run would be pure duplicate decode + flow + metric work with
+        # identical values. Skip unless a preset escalates resolution.
+        return
     ranked = sorted(window_features,
                     key=lambda wf: -float(wf.scalars.get("fr_l1_y",
                                                          float("nan"))))
@@ -206,6 +211,11 @@ def _nr_fr_tier3(candidate, cfg, backend, learned, window_features, worst):
     # USERPLAN §6 P0.2: cap the Tier-3 working resolution.
     tier3_width = min(candidate.meta.width, p.tier3_max_width) \
         if p.tier3_max_width > 0 else candidate.meta.width
+    if tier3_width <= p.flow_width:
+        # The cap equals tier-2 flow_width for every current preset, so a
+        # re-run would be pure duplicate decode + flow + metric work with
+        # identical values. Skip unless a preset escalates resolution.
+        return
     ranked = sorted(window_features,
                     key=lambda wf: -float(wf.scalars.get("nr_common_self_cycle",
                                                          float("nan"))))

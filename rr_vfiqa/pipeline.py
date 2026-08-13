@@ -273,6 +273,7 @@ def evaluate_endpoint_reference(
     # GPUs.  Native resolution is only used when the source is already below
     # the cap.
     n_audit = 0
+    audit_notes: list[str] = []
     eff_frac = (p.audit_top_fraction if p.audit_top_fraction > 0
                 else (p.auto_audit_fraction if p.auto_audit else 0.0))
     eff_max = (p.audit_max_windows if p.audit_max_windows > 0
@@ -280,7 +281,7 @@ def evaluate_endpoint_reference(
     # USERPLAN §6 P0.2: cap the Tier-3 working resolution.
     tier3_width = min(source.meta.width, p.tier3_max_width) \
         if p.tier3_max_width > 0 else source.meta.width
-    if eff_frac > 0 and wfs:
+    if eff_frac > 0 and wfs and tier3_width > p.flow_width:
         ranked = sorted(wfs, key=lambda wf: -max(
             _window_category_errors(wf).values(), default=0.0))
         n_audit = min(eff_max,
@@ -319,8 +320,15 @@ def evaluate_endpoint_reference(
                 wf.labels["audited"] = True
             except Exception as exc:
                 wf.labels["error_audit"] = repr(exc)
+    elif eff_frac > 0 and wfs:
+        # With the current 960 px tier-3 cap the audit resolution equals
+        # tier-2 flow_width, so a re-run would be pure duplicate decode +
+        # flow + metric work with identical values. Skip unless a preset
+        # actually escalates resolution (tier3_max_width > flow_width).
+        audit_notes.append(
+            f"tier-3 skipped: tier3_width={tier3_width} equals tier-2 "
+            f"flow_width={p.flow_width}; no higher-res evidence to gain")
 
-    audit_notes: list[str] = []
     if tracker_note is not None and "fell back" in tracker_note:
         audit_notes.append(tracker_note)
     if p.run_depth:

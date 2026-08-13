@@ -317,7 +317,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 8. ~~**`fusion/mode_score_schemas.py` 契约常量是死代码**~~ ✅ 已删除（`METRIC_CONTRACTS` 等 4 个常量 + `exposure_map` + `schema.FlowPair` + `testing.render_streaming` + `visualization.maps.robust_z` 测试专用重复均已移除）。BT.601 luma 收敛到 `imutils.luma` 单一实现（`schema.FrameBundle.y_channel`、`no_reference`、`anchor_integrity`、`cycle_reconstruction` 委托；`timestamp_alignment`/`pseudo_gt` 的 float64 版本按设计保留）。
 9. **语料不可由 provenance 单独复现**：生成时 working-tree 是脏的，`validation*` 又 gitignore。
 10. **ds-torch 缺 pyiqa/cotracker**：vqa、audit 功能当前不可跑（见 §2.4）。
-11. **性能已知项（待办，未动）**：(a) endpoint 对齐阶段 build_alignment 会对候选视频做第二次完整解码（96px 描述符，紧跟在 scan_candidate 之后）——可改为在 scan 中顺带产出 16×9 描述符复用；(b) schema.forward_splat 实测约 170ms/次（float64 累加主导），1-D 扁平化索引几乎无收益（已验证），不要按「索引扁平化」去改；(c) 单次评测可写数 GB cache，必要时删除 cache/ 目录。
+11. **性能已知项**：(a) ✅ Tier-3 同分辨率重复重跑已修——当前所有预设的 `tier3_max_width` 都等于 tier-2 `flow_width`（960/960），tier-3 重跑是纯重复工作，已加守卫跳过（`pipeline.py`/`multimode.py`：`tier3_width <= flow_width` 时跳过并在 audit_notes 说明）；未来若预设 `tier3_max_width > flow_width` 会自动恢复真实审计；(b) ✅ `CameraMotion.warp_flow` 网格已 lru_cache（11.6→2.8ms，bit-identical）；(c) ❌ `phash64` 的 64 位 Python 循环改为 packbits 后实测仅 0.531→0.520ms/帧（瓶颈是 resize+DCT），不值得改；(d) ❌ `schema.forward_splat` 1-D 扁平化索引实测无收益（170.7→168.8ms，float64 累加主导），不要改；(e) 待办：endpoint 对齐阶段 build_alignment 对候选第二次完整解码（96px 描述符，紧跟 scan_candidate）——可改为 scan 中顺带产出 16×9 描述符复用；(f) `full_res_edges` 配置项当前无任何消费方（死配置，保留待未来预设用）；(g) 单次评测可写数 GB cache，必要时删除 cache/ 目录。
 
 ---
 

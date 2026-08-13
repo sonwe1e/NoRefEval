@@ -41,6 +41,8 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
     yc = bundle.y_channel()
     out: dict[str, float] = {}
 
+    # Center gradient is loop-invariant (depends only on yc[center]).
+    gc = cv2.Sobel(yc[center], cv2.CV_32F, 1, 0) + cv2.Sobel(yc[center], cv2.CV_32F, 0, 1)
     for pos in range(5):
         if pos == center:
             continue
@@ -57,7 +59,6 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
 
         # Gradient residual (structure beyond luma).
         gx = cv2.Sobel(warped, cv2.CV_32F, 1, 0) + cv2.Sobel(warped, cv2.CV_32F, 0, 1)
-        gc = cv2.Sobel(yc[center], cv2.CV_32F, 1, 0) + cv2.Sobel(yc[center], cv2.CV_32F, 0, 1)
         out[f"mct_{tag}_grad_mean"] = float(np.abs(np.abs(gx) - np.abs(gc))[vis].mean()) \
             if vis.sum() > 64 else float("nan")
 

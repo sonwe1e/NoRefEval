@@ -7,6 +7,7 @@ All spatial arrays are stored at a documented resolution. Flow arrays are
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Optional
 
 import numpy as np
@@ -123,14 +124,20 @@ class CameraMotion:
 
     def warp_flow(self, h: int, w: int) -> np.ndarray:
         """Dense (H, W, 2) flow implied by the global model at size (h, w)."""
-        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-        pts = np.stack([xx.ravel(), yy.ravel(), np.ones(h * w, np.float32)], 0)
+        pts = _warp_grid(h, w)
         if self.model == "homography":
             p = self.matrix @ pts
             p = p[:2] / np.clip(p[2:3], 1e-6, None)
         else:
             p = self.matrix @ pts
-        return np.stack([p[0] - xx.ravel(), p[1] - yy.ravel()], -1).reshape(h, w, 2)
+        return np.stack([p[0] - pts[0], p[1] - pts[1]], -1).reshape(h, w, 2)
+
+
+@lru_cache(maxsize=8)
+def _warp_grid(h: int, w: int) -> np.ndarray:
+    """(3, H*W) float32 homogeneous grid — cached; warp_flow runs per window."""
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    return np.stack([xx.ravel(), yy.ravel(), np.ones(h * w, np.float32)], 0)
 
 
 # ---------------------------------------------------------------------------
