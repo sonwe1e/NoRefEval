@@ -16,7 +16,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    choices=["fast", "standard", "audit"],
                    help="internal resource preset (see also --speed)")
     p.add_argument("--speed", default=None, choices=sorted(SPEED_ALIASES),
-                   help="USERPLAN §3 speed alias; default balanced")
+                   help="speed alias: fast | balanced | thorough (see --preset)")
     p.add_argument("--cache-dir", default="./cache")
     p.add_argument("--device", default="cuda")
     p.add_argument("--flow-backend", default="auto",
@@ -213,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pins = sub.add_parser(
         "inspect",
-        help="one-command auto-safe evaluation (USERPLAN §1): route the mode, "
+        help="one-command auto-safe evaluation: route the mode, "
              "score, diagnose and write an HTML report")
     pins.add_argument("--candidate", required=True)
     pins.add_argument("--reference", "--source", dest="reference", default=None)
