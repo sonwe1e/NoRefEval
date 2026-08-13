@@ -122,7 +122,7 @@ def _triplet_features(
         visible = coverage > 0.25
         if visible.sum() >= 64:
             residual = charbonnier(
-                np.abs(_luma(reconstructed) - y[m]), cfg.charbonnier_tau)[visible]
+                np.abs(reconstructed - y[m]), cfg.charbonnier_tau)[visible]
             cycle.append(float(np.mean(residual)))
             cycle_p90.append(float(np.percentile(residual, 90)))
     return (
@@ -142,8 +142,15 @@ def _reconstruct_mid(
     weight_a: np.ndarray | None = None,
     weight_b: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    wa, ca = forward_splat(a.astype(np.float32), 0.5 * f_ab)
-    wb, cb = forward_splat(b.astype(np.float32), 0.5 * f_ba)
+    # Luma-only reconstruction: every consumer uses _luma(reconstructed), and
+    # luma is linear in RGB, so splatting the luma fields is exactly
+    # equivalent to splatting RGB and converting (max drift ~3e-5 in 0..255,
+    # float32 rounding).  This turns the two RGB splats into gray splats
+    # (~1.7x cheaper each) — the weight projections were already gray.
+    la = _luma(a.astype(np.float32))
+    lb = _luma(b.astype(np.float32))
+    wa, ca = forward_splat(la, 0.5 * f_ab)
+    wb, cb = forward_splat(lb, 0.5 * f_ba)
     if weight_a is not None:
         projected_a, _ = forward_splat(
             weight_a.astype(np.float32), 0.5 * f_ab)
@@ -153,9 +160,7 @@ def _reconstruct_mid(
             weight_b.astype(np.float32), 0.5 * f_ba)
         cb = cb * np.clip(projected_b, 0.0, 1.0)
     denom = ca + cb + 1e-6
-    reconstructed = (
-        wa * ca[..., None] + wb * cb[..., None]
-    ) / denom[..., None]
+    reconstructed = (wa * ca + wb * cb) / denom
     return reconstructed, np.clip(0.5 * denom, 0.0, 1.0)
 
 
@@ -915,7 +920,7 @@ def compute_window_maps(bundle: FrameBundle, flows: WindowFlows, cfg: EvalConfig
         field = np.zeros((h, w), np.float32)
         if visible.sum() >= 64:
             field[visible] = charbonnier(
-                np.abs(_luma(reconstructed[visible]) - y[m][visible]),
+                np.abs(reconstructed[visible] - y[m][visible]),
                 cfg.charbonnier_tau).astype(np.float32)
         cycle_fields.append(field)
     out["composition_error_map"] = _stack_mean(comp_fields, h, w)
