@@ -367,6 +367,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 | 亮度重建 | `_reconstruct_mid` 改纯 luma（线性等价，漂移 ~4e-5；RGB splat→gray splat 1.7×） | 57.3→52.5s，分数 80.69 不变 |
 | 仿射残差共享 | `dense_affine_residual` 每对只算一次（tile/geometry/maps 三处复用，RANSAC 确定性已验证） | fast 52.5→51.4s；standard 191.1→182.7s，分数不变 |
 | 窗口并行 | NR/endpoint/FR 窗口循环线程池（farneback 释放 GIL，近线性加速；`RR_VFIQA_WORKERS=1` 强制串行；endpoint 限 `run_tracker=False`） | NR 51.7→18.1s(2.85×)；endpoint 28.2→15.9s(1.77×)；FR 43.5→25.3s(1.72×)，全部特征位级一致 |
+| 扫描并行 | `scan_candidate`（NR/endpoint）逐帧统计改为块式线程池，解码与统计重叠（双缓冲） | 扫描 9.6→6.7s；NR fast 19.5→14.3s，14 个扫描字段逐位一致、多次运行确定 |
 | 杂项 | y_channel×1、anchor 对复用、edge npz×1、scene_cuts 提升、gc 提升 | 全绿套件 |
 | 死代码 | 6 个符号 + 4 契约常量 + 测试专用 robust_z | 全仓零引用 grep |
 | luma | 收敛到 `imutils.luma`（4 处委托；2 处 float64 按设计保留） | uint8/float32/float64 位级一致 |
@@ -379,6 +380,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 - `phash64` packbits 向量化：实测 0.531→0.520ms/帧（瓶颈是 resize+DCT）。
 - `--preset balanced` 加入 CLI choices：config.py 注释表明刻意排除（显式预设字节稳定）；改的是文档。
 - `robust_z` 合并：maps 版与 schema 版 NaN 语义不同，保留双实现。
+- `scan_full_reference`（FR 配对扫描）的并发统计尝试：双流配对 + 并发 `_pair_stats` 出现运行间不确定值（连串行分支都受影响），已整体回退；若再试需先定位双流解码的缓冲交互，且收益仅约 3s/25s。
 
 ### 11.3 留待后续（含理由）
 

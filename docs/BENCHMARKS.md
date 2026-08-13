@@ -69,10 +69,11 @@ perf work (synthetic inputs, ~60 s, no repo caches touched):
 | feature_store save/load pair npz | 20 / 9 ms |
 
 Full-run reference (10 s @ 120 FPS 640x360, NR fast, farneback): 97 s ->
-18 s after the splat/bincount, eager error maps, shared reconstructions,
-luma-only reconstruction, shared affine residual and the parallel window
-loop (overall score identical at 80.69, features bit-identical). Endpoint
-fast: 28 s -> 16 s; FR fast: 44 s -> 25 s. Workers default to
-min(8, cpu_count) for farneback; RR_VFIQA_WORKERS=1 forces sequential.
-Decode-pass inventory per inspect: endpoint 6 -> 3, full-reference 7 -> 5,
-no-reference 1 (descriptor memo + scan reuse; see PROJECT_STRUCTURE §9.11).
+14 s after the splat/bincount, eager error maps, shared reconstructions,
+luma-only reconstruction, shared affine residual, the parallel window
+loop and the parallel scan (overall score identical at 80.69, features
+bit-identical). Endpoint fast: 28 s -> 16 s; FR fast: 44 s -> 25 s.
+Workers default to min(8, cpu_count) for farneback; RR_VFIQA_WORKERS=1
+forces sequential. Decode-pass inventory per inspect: endpoint 6 -> 3,
+full-reference 7 -> 5, no-reference 1 (descriptor memo + scan reuse;
+see PROJECT_STRUCTURE §9.11).
