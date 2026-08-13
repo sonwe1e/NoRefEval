@@ -31,6 +31,5 @@ def test_fr_outside_defect_decoded_close(rpg_cfg, rpg_masters, tmp_path):
     ref = decode_all(case_dir / record.files["reference"])
     assert cand.shape == ref.shape
     # frames fully outside the defect window must decode nearly identical
-    a, b = int(spec.start_time * 60) - 2, int(spec.start_time * 60) - 1
-    a = max(0, a)
+    a = max(0, int(spec.start_time * 60) - 2)
     assert np.abs(cand[a].astype(int) - ref[a].astype(int)).mean() < 3.0

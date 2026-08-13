@@ -13,7 +13,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .maps import normalize_map
 
 
 def flow_to_bgr(flow: np.ndarray, *,

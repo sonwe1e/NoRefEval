@@ -13,7 +13,6 @@ import numpy as np
 from .config import EvalConfig, EvaluationMode, parse_mode
 from .calibration.provenance import report_provenance
 from .diagnosis import (
-    affected_duration_fraction,
     build_diagnostics_block,
     cadence_integrity,
     diagnose_windows,

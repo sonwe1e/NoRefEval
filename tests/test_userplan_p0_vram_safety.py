@@ -10,17 +10,14 @@ a real CUDA device.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
 from rr_vfiqa.config import AUDIT, BALANCED, FAST, STANDARD, Preset
 from rr_vfiqa.motion.flow_estimator import (
     CANONICAL_RAFT_POLICY,
     FarnebackBackend,
-    FlowBackend,
     FlowExecutionPolicy,
     FlowTelemetry,
     RaftBackend,

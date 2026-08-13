@@ -6,7 +6,6 @@ from fractions import Fraction
 from pathlib import Path
 
 import av
-import numpy as np
 
 from ..schema import WorstWindow
 

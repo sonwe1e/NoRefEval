@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -24,7 +23,6 @@ import pytest
 from rr_vfiqa.config import EvaluationMode
 from rr_vfiqa.report.artifact_pipeline import (
     ArtifactContext,
-    ArtifactStatus,
     build_report_artifacts,
 )
 from rr_vfiqa.schema import Report, Window, WindowFeatures

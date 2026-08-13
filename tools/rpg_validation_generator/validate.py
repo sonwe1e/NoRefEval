@@ -14,7 +14,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .case_specs import cases_for_mode, spec_by_id
 from .encode import decode_frames, probe
 from .hashing import file_sha256
 from .schema import MODE_DIR

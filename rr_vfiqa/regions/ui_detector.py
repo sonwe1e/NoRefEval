@@ -146,7 +146,6 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
         # spatial pixels — so they are NOT divided by the frame diagonal.
         # (spatial_norm_factor is for geometric pixel distances only.)
         d0 = np.abs(xm - xi).mean(-1)
-        d1 = np.abs(xm - xj).mean(-1)
         diff01m = np.abs(xi - xj).mean(-1)
         ch = m & (diff01m > 12.0)
         n_ch = max(int(ch.sum()), 1)

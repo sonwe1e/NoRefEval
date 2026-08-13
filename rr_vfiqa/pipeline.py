@@ -45,7 +45,6 @@ from .report import (
     build_report_artifacts,
     render_timeline_md,
     render_timeline_png,
-    save_error_heatmap,
 )
 from .sampling.cheap_scan import scan_candidate, scene_cuts_from_scan
 from .sampling.window_selector import select_windows, window_times

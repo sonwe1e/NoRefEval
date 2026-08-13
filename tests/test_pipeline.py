@@ -60,9 +60,9 @@ def test_cache_speeds_second_run(videos, cache_dir, flow_backend):
 
 
 def test_out_dir_reports(videos, cache_dir, flow_backend, tmp_path):
-    rep = evaluate_vfi(str(videos["source"]), str(videos["bad"]), preset="fast",
-                       cache_dir=cache_dir, device="cuda", flow_backend=flow_backend,
-                       out_dir=str(tmp_path), export_clips=True)
+    evaluate_vfi(str(videos["source"]), str(videos["bad"]), preset="fast",
+                  cache_dir=cache_dir, device="cuda", flow_backend=flow_backend,
+                  out_dir=str(tmp_path), export_clips=True)
     assert (tmp_path / "report.json").exists()
     assert (tmp_path / "timeline.md").exists()
     assert (tmp_path / "badcases").exists()

@@ -6,7 +6,6 @@ of (birth, velocity, t).  No per-frame RNG, no integration.
 """
 from __future__ import annotations
 
-import cv2
 import numpy as np
 
 from ..motion import bezier_2d, window

@@ -11,7 +11,7 @@ import numpy as np
 from .case_specs import CaseSpec
 from .config import GeneratorConfig
 from .defects import get_operator
-from .defects.base import DefectContext, MASK_SIZE
+from .defects.base import DefectContext
 from .encode import encode_rgb
 from .hashing import file_sha256, json_sha256, raw_rgb_sha256, raw_rgb_sha256_subset
 from .manifests import _role_fps, build_record
@@ -127,7 +127,6 @@ def build_case(spec: CaseSpec, master: Master, config: GeneratorConfig,
     cand = role_frames["candidate"]
     cand_labels = _labels_for(master, "candidate", spec, config)
     cand_world = _world_for(master, "candidate", spec, config)
-    clean_candidate = cand.copy()
     ctx = DefectContext(fps=spec.candidate_fps, n_frames=len(cand),
                         labels=cand_labels, world_only=cand_world,
                         config=config, rng=np.random.default_rng(case_seed),

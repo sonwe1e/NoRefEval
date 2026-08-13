@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import pytest
 
 from rr_vfiqa.diagnosis import (
@@ -17,7 +16,7 @@ from rr_vfiqa.diagnosis import (
     confirmed_affected_seconds, diagnose_windows, issue_level, merge_issues,
 )
 from rr_vfiqa.diagnosis.rules import (
-    RULES, Condition, Rule, affected_duration_fraction, evaluate_rules,
+    RULES, Condition, affected_duration_fraction, evaluate_rules,
 )
 from rr_vfiqa.diagnosis.schema import quality_level, severity_band
 

@@ -8,7 +8,7 @@ import numpy as np
 
 from tools.rpg_validation_generator.case_specs import CASES
 from tools.rpg_validation_generator.defects import get_operator
-from tools.rpg_validation_generator.defects.base import DefectContext, MASK_SIZE
+from tools.rpg_validation_generator.defects.base import DefectContext
 from tools.rpg_validation_generator.motion import frame_range
 from tools.rpg_validation_generator.timeline import gather, sample_indices
 

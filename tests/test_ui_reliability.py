@@ -9,7 +9,6 @@ scored as UI instability.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from rr_vfiqa.metrics.no_reference import _ui_reliability
 

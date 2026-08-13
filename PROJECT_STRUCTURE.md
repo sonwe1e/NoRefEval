@@ -99,7 +99,7 @@ uv pip install -e ".[dev,fusion,viz]"
 
 ### 2.6 版本号现状（已收敛）
 
-源码 `_version.py`=**0.4.0**（权威）＝`rr_vfiqa.egg-info/PKG-INFO`=0.4.0；`.venv` 已删除。磁盘上唯一的旧值在 gitignore 的构建产物里：`build/lib/rr_vfiqa/_version.py`=0.3.0（`build/` 可整体删除）。
+源码 `_version.py`=**0.4.0**（权威）＝`rr_vfiqa.egg-info/PKG-INFO`=0.4.0；`.venv`、`build/`、`rr_vfiqa.egg-info/` 均已删除，磁盘上不再有旧版本号（egg-info 会在下次构建时按需重建）。
 
 ---
 
@@ -118,7 +118,7 @@ uv pip install -e ".[dev,fusion,viz]"
 | 语料（gitignore，生成物） | `validation/`、`validation_draft/` | RPG 验证语料（见 §8.5） |
 | 缓存（gitignore） | `cache/`、`_std/cache/`、`_b1080/cache/` | 光流特征缓存（见 §9） |
 | 测试语料（gitignore） | `_std/`、`_b1080/` | standard / 1080p 测试视频 |
-| 陈旧产物（可删） | `build/`、`rr_vfiqa.egg-info/`、`.venv/`、`.pytest_cache/`、`.serena/` | build 快照 / 旧元数据 / 死 venv |
+| 陈旧产物（已清） | ~~`build/`、`rr_vfiqa.egg-info/`、`.venv/`~~ | 已删除；`.pytest_cache/`、`.serena/` 已 gitignore |
 
 > `.gitignore` 排除了 `validation/`、`validation_draft/`、`cache/`、`_std/`、`_b1080/`、`.venv/`、`build/`、`*.mp4`、`*.egg-info/` —— **语料和缓存都不进版本库**，CI 在测试时自行用生成器重建。
 
@@ -307,7 +307,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 
 ## 9. 已知不一致与坑（索引）
 
-1. ~~**版本三连**~~ ✅ 已收敛：源码 0.4.0 ＝ egg-info 0.4.0，`.venv` 已删；仅剩 gitignore 的 `build/lib` 里 0.3.0（见 §2.6）。
+1. ~~**版本三连**~~ ✅ 已收敛：源码 0.4.0 ＝ egg-info 0.4.0；`.venv`、`build/`、`rr_vfiqa.egg-info/` 已删，磁盘上无旧版本号（见 §2.6）。
 2. **USERPLAN §N 引用失配**：代码里 `USERPLAN §N` 指旧提交版本；当前 USERPLAN.md 是中文一~十二编号（引用编号 ≠ 文档章节）。
 3. **`--preset balanced` 不是合法 CLI 参数**：argparse 只收 `fast` / `standard` / `audit`；README 曾指导该命令（已改）。带自动审计的 balanced 档 = `inspect` 省略 `--speed`/`--preset`（见 §5.2）。
 4. **`--speed balanced` 撞名**：实际是 `standard` 预设，不含自动审计（见 §5.2）。
@@ -317,7 +317,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 8. ~~**`fusion/mode_score_schemas.py` 契约常量是死代码**~~ ✅ 已删除（`METRIC_CONTRACTS` 等 4 个常量 + `exposure_map` + `schema.FlowPair` + `testing.render_streaming` + `visualization.maps.robust_z` 测试专用重复均已移除）。BT.601 luma 收敛到 `imutils.luma` 单一实现（`schema.FrameBundle.y_channel`、`no_reference`、`anchor_integrity`、`cycle_reconstruction` 委托；`timestamp_alignment`/`pseudo_gt` 的 float64 版本按设计保留）。
 9. **语料不可由 provenance 单独复现**：生成时 working-tree 是脏的，`validation*` 又 gitignore。
 10. **ds-torch 缺 pyiqa/cotracker**：vqa、audit 功能当前不可跑（见 §2.4）。
-11. **性能已知项**：(a) ✅ Tier-3 同分辨率重复重跑已修——当前所有预设的 `tier3_max_width` 都等于 tier-2 `flow_width`（960/960），tier-3 重跑是纯重复工作，已加守卫跳过（`pipeline.py`/`multimode.py`：`tier3_width <= flow_width` 时跳过并在 audit_notes 说明）；未来若预设 `tier3_max_width > flow_width` 会自动恢复真实审计；(b) ✅ `CameraMotion.warp_flow` 网格已 lru_cache（11.6→2.8ms，bit-identical）；(c) ❌ `phash64` 的 64 位 Python 循环改为 packbits 后实测仅 0.531→0.520ms/帧（瓶颈是 resize+DCT），不值得改；(d) ✅ `schema.forward_splat` 已用 `np.bincount` 替换 `np.add.at` 散点累加（60 组随机用例 bit-identical，函数 1.5×，NR fast 实测 97→74s）；注意：**索引扁平化本身无收益**（170.7→168.8ms），收益来自 bincount 的 C 级归约，不要回退成 add.at；(e) ✅ 已修：对齐描述符不再重复解码——`frame_descriptors` 进程级 memo（按 path|size|mtime 键控、上限 8 条）+ `scan_candidate` 顺带产出 16×9 描述符（`CheapScan.descriptors`），`build_alignment`/`build_full_reference_alignment` 接受 `cand_desc`；路由探测还跳过不需要的 scene-cut 解码。实测 inspect 解码遍数：endpoint 6→3、FR 7→5、NR 1（不变）。描述符来源（96px vs scan 384px）在 5 条视频上对齐结果逐位一致；(f) `full_res_edges` 配置项当前无任何消费方（死配置，保留待未来预设用）；(g) 单次评测可写数 GB cache，必要时删除 cache/ 目录。
+11. **性能已知项**：(a) ✅ Tier-3 同分辨率重复重跑已修——当前所有预设的 `tier3_max_width` 都等于 tier-2 `flow_width`（960/960），tier-3 重跑是纯重复工作，已加守卫跳过（`pipeline.py`/`multimode.py`：`tier3_width <= flow_width` 时跳过并在 audit_notes 说明）；未来若预设 `tier3_max_width > flow_width` 会自动恢复真实审计；(b) ✅ `CameraMotion.warp_flow` 网格已 lru_cache（11.6→2.8ms，bit-identical）；(c) ❌ `phash64` 的 64 位 Python 循环改为 packbits 后实测仅 0.531→0.520ms/帧（瓶颈是 resize+DCT），不值得改；(d) ✅ `schema.forward_splat` 已用 `np.bincount` 替换 `np.add.at` 散点累加（60 组随机用例 bit-identical，函数 1.5×，NR fast 实测 97→74s）；注意：**索引扁平化本身无收益**（170.7→168.8ms），收益来自 bincount 的 C 级归约，不要回退成 add.at；(e) ✅ 已修：对齐描述符不再重复解码——`frame_descriptors` 进程级 memo（按 path|size|mtime 键控、上限 8 条）+ `scan_candidate` 顺带产出 16×9 描述符（`CheapScan.descriptors`），`build_alignment`/`build_full_reference_alignment` 接受 `cand_desc`；路由探测还跳过不需要的 scene-cut 解码。实测 inspect 解码遍数：endpoint 6→3、FR 7→5、NR 1（不变）。描述符来源（96px vs scan 384px）在 5 条视频上对齐结果逐位一致；(f) `full_res_edges` 配置项当前无任何消费方（死配置，保留待未来预设用）；(g) 单次评测可写数 GB cache，必要时删除 cache/ 目录；(h) **已知时间/内存权衡（勿轻易改）**：NR/FR 的 dense error map 阶段（`_compute_nr_error_maps`，top-8 窗口）会重新解码并重算窗口光流——fast 档实测 18.8s/75.8s（25%）。复用的前提是把 tier-2 光流保留到排序后，但 fast 档约 37MB/窗口（standard 档 150MB/窗口），32 窗口即 4.7GB，收益仅 ~9%，不值得；如未来出现内存更宽裕或流更小的场景再议。
 
 ---
 

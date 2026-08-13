@@ -1,7 +1,6 @@
 """Expanded coverage: per-defect responses, scene cuts, misalignment, drops,
 and a standard-preset end-to-end run exercising the region branches (§6)."""
 
-import numpy as np
 import pytest
 
 from rr_vfiqa import evaluate_no_reference, evaluate_vfi

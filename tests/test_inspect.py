@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import json
 
-import numpy as np
 import pytest
 
 pytest.importorskip("rr_vfiqa.testing.synth")
 from rr_vfiqa.testing.synth import render_scene, write_video  # noqa: E402
 
 from rr_vfiqa.cli import main as cli_main  # noqa: E402
-from rr_vfiqa.mode_router import RouteResult, route_mode  # noqa: E402
+from rr_vfiqa.mode_router import route_mode  # noqa: E402
 from rr_vfiqa.config import EvaluationMode  # noqa: E402
 
 

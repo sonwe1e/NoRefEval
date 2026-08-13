@@ -12,10 +12,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import pytest
 
 from rr_vfiqa.fusion.mode_score_schemas import (
-    MODE_WEIGHTS,
     compute_mode_scores,
     compute_mode_confidence,
 )

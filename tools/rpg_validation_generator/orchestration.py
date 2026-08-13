@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .case_specs import CASES, cases_for_mode
+from .case_specs import CASES
 from .config import GeneratorConfig
 from .manifests import record_to_manifest, write_case_manifest, write_mode_manifest
 from .schema import MODES, MODE_DIR

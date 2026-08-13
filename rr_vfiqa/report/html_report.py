@@ -17,7 +17,7 @@ import html
 from pathlib import Path
 from typing import Any
 
-from ..diagnosis.schema import issue_level, quality_level, severity_band
+from ..diagnosis.schema import issue_level, quality_level
 from ..diagnosis.rules import TRACKS
 
 _TRACK_COLOR = {

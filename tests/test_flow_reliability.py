@@ -9,7 +9,6 @@ never be scored as motion smoothness failure.  When flow coverage is too low
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from rr_vfiqa.config import EvalConfig, EvaluationMode
 from rr_vfiqa.metrics.no_reference import (

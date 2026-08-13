@@ -7,7 +7,6 @@ not be verified, or too few windows were evaluated.
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
 

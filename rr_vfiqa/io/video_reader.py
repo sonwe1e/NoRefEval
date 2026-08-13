@@ -24,11 +24,11 @@ def _content_hash(path: str) -> str:
 
 
 # Process-level memo of per-frame 16x9 luma descriptors, keyed like the
-# content hash (path | size | mtime_ns).  Alignment is built more than once
-# per video in one process — mode routing probes it and the pipeline builds
-# it again — and every pass decodes the FULL video even though only the tiny
-# descriptors are kept.  Bounded; cleared wholesale when full.
-_DESCRIPTOR_CACHE: dict[tuple[str, int, int], np.ndarray] = {}
+# content hash (path | size | mtime_ns) plus the decode width — alignment is
+# built more than once per video in one process (mode routing probes it, the
+# pipeline builds it again) and every pass decodes the FULL video even though
+# only the tiny descriptors are kept.  Bounded; cleared wholesale when full.
+_DESCRIPTOR_CACHE: dict[tuple[str, int, int, int], np.ndarray] = {}
 _DESCRIPTOR_CACHE_MAX = 8
 
 
@@ -47,7 +47,8 @@ def frame_descriptors(reader: "VideoReader", width: int = 96) -> np.ndarray:
         st = None
     key = None
     if is_file and st is not None:
-        key = (os.path.abspath(reader.path), st.st_size, int(st.st_mtime_ns))
+        key = (os.path.abspath(reader.path), st.st_size,
+               int(st.st_mtime_ns), int(width))
         hit = _DESCRIPTOR_CACHE.get(key)
         if hit is not None:
             return hit

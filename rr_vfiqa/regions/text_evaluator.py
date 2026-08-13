@@ -13,7 +13,6 @@ import numpy as np
 
 from ..config import EvalConfig
 from ..schema import FrameBundle
-from ._common import luma
 from .ui_detector import UIDetector, _edge_fscore
 
 _BLOCK = 16

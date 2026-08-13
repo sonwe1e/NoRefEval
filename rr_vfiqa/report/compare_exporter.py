@@ -22,7 +22,6 @@ import av
 import cv2
 import numpy as np
 
-from ..diagnosis.schema import severity_band
 
 _PAD_SECONDS = 0.5
 _MAX_CLIPS = 12

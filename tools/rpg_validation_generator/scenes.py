@@ -10,7 +10,6 @@ import numpy as np
 from .motion import (ease_in_out_cubic, lerp, sinusoidal, smoothstep, window)
 from .renderer.character import Character, Enemy, NPC, Sword
 from .renderer.effects import Flash, ParticleEmitter, Projectile, ShockRing
-from .renderer.primitives import Canvas
 from .renderer.renderer import Scene
 from .renderer.tilemap import Pillar, Rock, TileMap, Tree
 from .renderer.ui import (CooldownNumber, DialogPanel, FloatingName, HealthBar,

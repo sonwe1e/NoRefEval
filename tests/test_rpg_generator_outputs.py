@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from tools.rpg_validation_generator import __main__ as cli
 from tools.rpg_validation_generator.orchestration import generate

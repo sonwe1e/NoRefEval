@@ -68,8 +68,6 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cache: SourceCache,
 
     sup_tex = (support > 0) & tex
     em_tex = (em > 0) & tex
-    n_sup = max(sup_tex.sum(), 1)
-    n_em = max(em_tex.sum(), 1)
 
     # Half-warped support edges land at subpixel positions, so recall and
     # precision must be Chamfer-tolerant (±2 px), not exact-intersection.

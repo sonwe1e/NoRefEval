@@ -65,7 +65,6 @@ def cache_dir(tmp_path_factory):
 
 
 # ---------------------------------------------------------------- RPG gen ---
-import numpy as np  # noqa: E402
 
 from tools.rpg_validation_generator.config import GeneratorConfig  # noqa: E402
 from tools.rpg_validation_generator.scenes import make_scene  # noqa: E402

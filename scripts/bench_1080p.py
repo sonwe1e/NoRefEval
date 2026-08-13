@@ -4,7 +4,6 @@ import time
 
 import av
 import cv2
-import numpy as np
 
 from rr_vfiqa.testing.synth import _iter_frames, _mux
 

@@ -14,5 +14,5 @@ from . import full_reference, no_reference  # noqa: E402,F811  (``no_reference``
 # Dense error-map accessors (USERPLAN §8) — kept here so callers can do
 # ``from rr_vfiqa.metrics import nr_window_maps`` without importing the
 # heavy metric module directly.
-from .no_reference import compute_window_maps as nr_window_maps  # noqa: E402
-from .full_reference import compute_window_maps as fr_window_maps  # noqa: E402
+from .no_reference import compute_window_maps as nr_window_maps  # noqa: E402,F401
+from .full_reference import compute_window_maps as fr_window_maps  # noqa: E402,F401

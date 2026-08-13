@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import tempfile
 from pathlib import Path
 
@@ -11,7 +10,6 @@ import pytest
 
 from rr_vfiqa.schema import robust_z
 from rr_vfiqa.visualization import (
-    MapNormalization,
     blend_heat,
     flow_to_bgr,
     heat_bgr,

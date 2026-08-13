@@ -33,7 +33,6 @@ def detect_offset(source_meta: VideoMeta, cand_meta: VideoMeta) -> tuple[int, fl
 
     Returns (offset, mean_abs_pts_error_seconds).
     """
-    ratio = cand_meta.fps / max(source_meta.fps, 1e-6)
     best_off, best_err = 0, float("inf")
     n_pairs = min(source_meta.n_frames, cand_meta.n_frames // 2) - 1
     if n_pairs < 4:
