@@ -14,7 +14,11 @@ def _manifests(root, modes=("nr", "endpoint", "fr")):
     out = {}
     for mode in modes:
         p = root / dirmap[mode] / "manifest.jsonl"
-        out[mode] = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+        out[mode] = [
+            json.loads(line)
+            for line in p.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
     return out
 
 

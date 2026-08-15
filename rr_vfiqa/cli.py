@@ -9,6 +9,17 @@ import sys
 from .config import EvaluationMode
 from .mode_router import SPEED_ALIASES, fail_closed_report, preset_from_speed, route_mode
 from .multimode import compare, evaluate
+from ._version import VERSION
+
+
+def _mode_kwargs(mode: str, *, vqa_backend: str, calibrator: str | None,
+                 geometry_policy: str) -> dict:
+    """Per-mode extra kwargs for ``evaluate`` — single source of truth."""
+    if mode == EvaluationMode.NO_REFERENCE.value:
+        return {"vqa_backend": vqa_backend}
+    if mode == EvaluationMode.ENDPOINT_2X.value:
+        return {"calibrator_path": calibrator}
+    return {"geometry_policy": geometry_policy}   # full-reference
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -84,13 +95,9 @@ def _inspect_core(*, candidate: str, reference: str | None, mode: str = "auto",
     if speed is None and resolved == "standard":
         resolved = "balanced"
 
-    extra = {}
-    if mode == EvaluationMode.NO_REFERENCE.value:
-        extra["vqa_backend"] = vqa_backend
-    elif mode == EvaluationMode.ENDPOINT_2X.value:
-        extra["calibrator_path"] = calibrator
-    elif mode == EvaluationMode.FULL_REFERENCE.value:
-        extra["geometry_policy"] = geometry_policy
+    extra = _mode_kwargs(
+        mode, vqa_backend=vqa_backend, calibrator=calibrator,
+        geometry_policy=geometry_policy)
     # USERPLAN P0-R2: any failure past routing must still leave a complete
     # report (report.json + report.html) with status=failed and the reason —
     # never crash the command with an unhandled traceback.
@@ -169,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="rr-vfiqa",
         description="Mode-aware VFI quality assessment")
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {VERSION}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     pe = sub.add_parser("evaluate", help="evaluate one candidate with an explicit contract")
@@ -259,13 +268,9 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--reference is not allowed with --mode no-reference")
         if args.mode != EvaluationMode.NO_REFERENCE.value and not args.reference:
             parser.error(f"--reference is required with --mode {args.mode}")
-        extra = {}
-        if args.mode == EvaluationMode.NO_REFERENCE.value:
-            extra["vqa_backend"] = args.vqa_backend
-        elif args.mode == EvaluationMode.ENDPOINT_2X.value:
-            extra["calibrator_path"] = args.calibrator
-        elif args.mode == EvaluationMode.FULL_REFERENCE.value:
-            extra["geometry_policy"] = args.geometry_policy
+        extra = _mode_kwargs(
+            args.mode, vqa_backend=args.vqa_backend,
+            calibrator=args.calibrator, geometry_policy=args.geometry_policy)
         report = evaluate(
             candidate_video=args.candidate,
             reference_video=args.reference,
@@ -288,11 +293,9 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--reference is not allowed with --mode no-reference")
         if args.mode != EvaluationMode.NO_REFERENCE.value and not args.reference:
             parser.error(f"--reference is required with --mode {args.mode}")
-        compare_extra = {}
-        if args.mode == EvaluationMode.NO_REFERENCE.value:
-            compare_extra["vqa_backend"] = args.vqa_backend
-        elif args.mode == EvaluationMode.FULL_REFERENCE.value:
-            compare_extra["geometry_policy"] = args.geometry_policy
+        compare_extra = _mode_kwargs(
+            args.mode, vqa_backend=args.vqa_backend,
+            calibrator=None, geometry_policy=args.geometry_policy)
         results = compare(
             args.candidates,
             reference_video=args.reference,

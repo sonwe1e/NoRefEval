@@ -110,7 +110,7 @@ uv pip install -e ".[dev,fusion,viz]"
 | 类别 | 条目 | 说明 |
 |---|---|---|
 | 源码（提交） | `rr_vfiqa/` | Python 包本体 |
-| 测试（提交） | `tests/` | pytest 套件（33 个 `test_*.py` + `conftest.py` + `real_corpus/`） |
+| 测试（提交） | `tests/` | pytest 套件（34 个 `test_*.py` + `conftest.py` + `real_corpus/`） |
 | 工具（提交） | `tools/rpg_validation_generator/` | 程序化 RPG 验证数据生成器 |
 | 脚本（提交） | `scripts/bench_1080p.py` | 一次性 1080p 基准 |
 | 文档（提交） | `README.md`、`USERPLAN.md`、`PICPLAN.md`、`docs/` | 见 §7 |
@@ -256,7 +256,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 
 **三个改动测试**：`test_cadence_motion_gate.py`（Cadence v2 三门 + separate/cap15 惩罚模式）、`test_diagnosis.py`（多证据规则、support_spans→confirmed_affected_seconds、全局 vs 最差局部质量级、HTML 报告）、`test_multimode.py`（模式拆分、NR 60/120 时间归一化、FR fail-closed）。
 
-其余按功能：`test_*_rpg_generator_*`（生成器）、`test_artifact_*`（产物失败隔离）、`test_docs_contract`、`test_motion_and_metrics`、`test_userplan_p0*` 等 33 个顶层文件 + `tests/real_corpus/test_metamorphic_regression.py`（15 个 RPG case 的定位+方向回归）。
+其余按功能：`test_config_routing.py`（模式别名/速度预设/EvalConfig 校验纯函数契约）、`test_*_rpg_generator_*`（生成器）、`test_artifact_*`（产物失败隔离）、`test_docs_contract`、`test_motion_and_metrics`、`test_userplan_p0*` 等 34 个顶层文件 + `tests/real_corpus/test_metamorphic_regression.py`（15 个 RPG case 的定位+方向回归）。
 
 ### 7.3 CI 作业（`.github/workflows/ci.yml`）
 
@@ -373,6 +373,10 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 | luma | 收敛到 `imutils.luma`（4 处委托；2 处 float64 按设计保留） | uint8/float32/float64 位级一致 |
 | lint | 全仓 ruff `--select F` 零告警 + CI lint 作业 | c39129d + 49347a6 |
 | 描述符 memo 键 | 补上 width（防撞键） | c39129d |
+| CLI 收敛 | `--version` 旗标 + 三处 mode→kwargs 重复映射收敛为 `cli._mode_kwargs`（compare 的 endpoint 显式传 `calibrator_path=None`，与默认值行为一致） | 本轮 |
+| lint 全量 | `scripts/bench_1080p.py` E402、`test_rpg_generator_outputs.py` E741 修复；CI lint 从 `--select F` 放宽为默认规则集（E4/E7/E9/F）并纳入 `test_config_routing.py` 到 unit 作业 | 本轮 |
+| 指标健壮性 | `edge_structure` 三处空切片 `.mean()` 加守卫（空 support/candidate 集返回 NaN 而非 RuntimeWarning，值与融合层 NaN 语义一致，附回归测试） | 本轮 |
+| 契约测试 | 新增 `test_config_routing.py`（19 例：`parse_mode` 别名/大小写、`preset_from_speed` 优先级、`EvalConfig.build_mode` 全部校验路径） | 本轮 |
 
 ### 11.2 审计主张中被实验推翻的项（勿重复尝试）
 

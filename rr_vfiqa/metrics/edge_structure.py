@@ -74,12 +74,18 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cache: SourceCache,
     dist_to_em = cv2.distanceTransform((em == 0).astype(np.uint8), cv2.DIST_L2, 3)
     dist_to_sup = cv2.distanceTransform((support == 0).astype(np.uint8),
                                         cv2.DIST_L2, 3)
-    out["edge_recall"] = float((dist_to_em[sup_tex] <= 2.0).mean())
-    out["edge_precision"] = float((dist_to_sup[em_tex] <= 2.0).mean())
+    # Empty support/candidate sets make these ratios undefined; return NaN
+    # (fusion drops non-finite features) instead of np.mean's empty-slice
+    # RuntimeWarning — same values, no warning noise.
+    out["edge_recall"] = (float((dist_to_em[sup_tex] <= 2.0).mean())
+                          if sup_tex.any() else float("nan"))
+    out["edge_precision"] = (float((dist_to_sup[em_tex] <= 2.0).mean())
+                             if em_tex.any() else float("nan"))
     # Ghosting / double contour: candidate edges 2–4 px away from support —
     # a parallel second silhouette, not a match and not unrelated structure.
-    out["edge_ghost_frac"] = float(
+    out["edge_ghost_frac"] = (float(
         ((dist_to_sup[em_tex] > 2.0) & (dist_to_sup[em_tex] <= 4.0)).mean())
+        if em_tex.any() else float("nan"))
 
     # --- chamfer distances (USERPLAN §6.2: normalized by frame diagonal) ----
     norm = spatial_norm_factor(h, w)

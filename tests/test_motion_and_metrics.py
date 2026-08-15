@@ -249,3 +249,53 @@ def test_alpha_blend_fit():
     novel = rng.integers(0, 255, (24, 32, 3), np.uint8)
     _, resid = alpha_blend_fit(xi, novel, xj)       # novel mid content
     assert np.median(resid) > 20.0                  # no affine mixture explains it
+
+
+def test_edge_structure_empty_texture_returns_nan_without_warning():
+    """Flat frames (no texture, no edges) must yield NaN edge ratios with no
+    empty-slice RuntimeWarning (regression: unguarded ``.mean()`` on empty
+    boolean masks)."""
+    import warnings
+
+    from rr_vfiqa.config import EvalConfig
+    from rr_vfiqa.metrics import edge_structure
+    from rr_vfiqa.schema import FrameBundle
+
+    h = w = 16
+    frames = np.full((5, h, w, 3), 128, np.uint8)   # flat: no texture, no edges
+    bundle = FrameBundle(
+        indices=np.arange(5, dtype=np.int32),
+        times=np.arange(5) / 60.0,
+        rgb=frames, width=w, height=h)
+
+    class _Edges:
+        edges = np.zeros((h, w), np.uint8)
+        grad_energy = np.zeros((h, w), np.float32)
+
+    class _Cache:
+        def get_edges(self, j):
+            return _Edges()
+
+    class _Flow:
+        def height(self):
+            return h
+
+        def width(self):
+            return w
+
+    class _Pair:
+        pair = 1
+        f_01 = np.zeros((h, w, 2), np.float32)
+        f_10 = np.zeros((h, w, 2), np.float32)
+
+    cfg = EvalConfig(source_video="r.mp4", candidate_video="c.mp4")
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        out = edge_structure.compute(bundle, _Flow(), _Cache(), _Pair(), cfg)
+
+    assert np.isnan(out["edge_recall"])
+    assert np.isnan(out["edge_precision"])
+    assert np.isnan(out["edge_ghost_frac"])
+    # The point of the regression: NaN by design, silence instead of warnings.
+    assert not any(issubclass(r.category, RuntimeWarning) for r in rec), [
+        str(r.message) for r in rec if issubclass(r.category, RuntimeWarning)]

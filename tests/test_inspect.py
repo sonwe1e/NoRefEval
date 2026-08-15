@@ -34,6 +34,16 @@ def test_route_no_reference_without_reference_decode(nr_video):
     assert r.ok and r.mode is EvaluationMode.NO_REFERENCE
 
 
+def test_cli_version_flag(capsys):
+    # ``--version`` prints the source-of-truth version and exits 0.
+    from rr_vfiqa._version import VERSION
+
+    with pytest.raises(SystemExit) as exc:
+        cli_main(["--version"])
+    assert exc.value.code == 0
+    assert VERSION in capsys.readouterr().out
+
+
 def test_route_fail_closed_on_missing_candidate():
     # A missing candidate yields a clear fail-closed refusal, never a guess.
     r = route_mode("___no_such_file___.mp4", None)

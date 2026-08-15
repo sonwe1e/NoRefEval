@@ -5,6 +5,7 @@ import time
 import av
 import cv2
 
+from rr_vfiqa.benchmark import benchmark
 from rr_vfiqa.testing.synth import _iter_frames, _mux
 
 N, W, H, FPS = 7200, 1920, 1080, 120
@@ -46,8 +47,6 @@ with av.open("_b1080/source_60.mp4", "w") as osrc, \
             out.mux(packet)
 t_render = time.perf_counter() - t0
 print(f"render done in {t_render:.0f}s", flush=True)
-
-from rr_vfiqa.benchmark import benchmark
 
 res = benchmark("_b1080/source_60.mp4",
                 ["_b1080/candidate_good_120.mp4", "_b1080/candidate_bad_120.mp4"],
