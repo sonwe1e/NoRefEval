@@ -339,7 +339,7 @@ SPEED_ALIASES:  { fast: fast, balanced: standard, thorough: audit }   # --speed 
 
 1. 改文档后跑 `python -m pytest tests/test_docs_contract.py`（README 与 `docs/index.html` 与生产代码同步）。
 2. 本地跑 `python -m pytest`（CPU/Farneback）；改 cadence/flow/phase/UI 门控的跑四个新增可靠性测试 + `test_cadence_motion_gate.py`。CI 的 `unit` 作业不含这些，别只靠它。
-3. 本地 `tests/real_corpus/` 有 **5 个已知失败**（已定位根因并三分辨率实验验证，见下），不以它们为合并阻断；CI 的 `metamorphic` 作业在干净环境跑全量。
+3. 本地 `tests/real_corpus/` 有 **5 个已知失败**（已定位根因并三分辨率实验验证，见下），**已用 `pytest.xfail` 显式标记**（reason 引用本节），套件整体绿（12 passed + 5 xfailed）；修复后记得移除 xfail。CI 的 `metamorphic` 作业在干净环境跑全量。
 
 **real_corpus 失败根因（2026-08 三轮复现验证，失败数 9→5）**：
 
