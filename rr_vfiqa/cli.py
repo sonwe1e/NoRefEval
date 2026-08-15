@@ -54,6 +54,10 @@ def _run_inspect(args: argparse.Namespace, preset: str, progress) -> int:
         vqa_backend=args.vqa_backend, geometry_policy=args.geometry_policy,
         quiet=args.quiet, progress=progress)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
+    if args.out is None and not args.quiet:
+        print("[rr-vfiqa] 未指定 --out：报告文件（report.html / report.json / "
+              "timeline / heatmaps / badcases）未写入。"
+              "加 --out <目录> 保存完整报告。", file=sys.stderr)
     return rc
 
 
@@ -229,7 +233,10 @@ def main(argv: list[str] | None = None) -> int:
     pins.add_argument("--mode", default="auto",
                       choices=["auto"] + [m.value for m in EvaluationMode],
                       help="auto (default) safely picks the contract")
-    pins.add_argument("--out", default=None, help="report output directory")
+    pins.add_argument("--out", default=None,
+                      help="report output directory (required for report.html "
+                           "/ heatmaps / badcase clips; without it only the "
+                           "JSON summary is printed)")
     pins.add_argument("--calibrator", default=None)
     pins.add_argument("--vqa-backend", default="none",
                       choices=["none", "pyiqa-niqe"])

@@ -75,26 +75,15 @@ def calibrator_provenance(
 
 def _git_state() -> dict[str, Any]:
     root = Path(__file__).resolve().parents[2]
+    # Phase 1: commit + dirtiness.  If git itself is unavailable (sdist
+    # install, non-git checkout), fall back to embedded build metadata.
     try:
         head = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=root, check=True,
             capture_output=True, text=True, timeout=5)
-        diff = subprocess.run(
-            ["git", "diff", "--binary", "--", "."], cwd=root, check=True,
-            capture_output=True, timeout=10)
-        staged = subprocess.run(
-            ["git", "diff", "--cached", "--binary", "--", "."], cwd=root,
-            check=True, capture_output=True, timeout=10)
         status = subprocess.run(
             ["git", "status", "--porcelain"], cwd=root, check=True,
             capture_output=True, text=True, timeout=5)
-        return {
-            "commit_sha": head.stdout.strip(),
-            "working_tree_dirty": bool(status.stdout.strip()),
-            "tracked_diff_sha256": (
-                sha256(diff.stdout + staged.stdout).hexdigest()
-                if diff.stdout or staged.stdout else None),
-        }
     except (OSError, subprocess.SubprocessError):
         embedded = _build_contract()["embedded_commit"]
         return {
@@ -102,6 +91,30 @@ def _git_state() -> dict[str, Any]:
             "working_tree_dirty": None,
             "tracked_diff_sha256": None,
         }
+    dirty = bool(status.stdout.strip())
+    # Phase 2 (only on a dirty tree): hash the tracked diff.  A clean tree has
+    # nothing to hash, so the two expensive binary diffs are skipped entirely.
+    # A diff failure (slow disk, transient lock) must NOT downgrade the dirty
+    # flag — the diff hash is best-effort, dirtiness is not.
+    tracked_diff_sha256 = None
+    if dirty:
+        try:
+            diff = subprocess.run(
+                ["git", "diff", "--binary", "--", "."], cwd=root,
+                check=True, capture_output=True, timeout=10)
+            staged = subprocess.run(
+                ["git", "diff", "--cached", "--binary", "--", "."], cwd=root,
+                check=True, capture_output=True, timeout=10)
+            if diff.stdout or staged.stdout:
+                tracked_diff_sha256 = sha256(
+                    diff.stdout + staged.stdout).hexdigest()
+        except (OSError, subprocess.SubprocessError):
+            tracked_diff_sha256 = None
+    return {
+        "commit_sha": head.stdout.strip(),
+        "working_tree_dirty": dirty,
+        "tracked_diff_sha256": tracked_diff_sha256,
+    }
 
 
 def _versions() -> dict[str, str]:

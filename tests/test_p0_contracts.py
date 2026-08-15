@@ -104,3 +104,62 @@ def test_dynamic_ui_metrics_ignore_world_pixels():
     assert out["ui_mode"] == 1.0
     assert out["ui_dyn_blend_frac"] == 1.0
     assert out["ui_dyn_out_of_range_frac"] == 0.0
+
+
+def test_source_cache_thread_race_computes_each_entry_once(videos, tmp_path):
+    """Cold-cache concurrent access must not corrupt or duplicate entries.
+
+    The window loops evaluate in a thread pool, so several threads race on
+    the same missing pair/edge entry.  Regression: without the double-checked
+    lock + atomic store writes, one thread read a half-written npz and the
+    edges stage failed with ``EOFError('No data left in file')``.
+    """
+    import threading
+
+    reader = VideoReader(str(videos["source"]))
+    cfg = EvalConfig.build(
+        str(videos["source"]), str(videos["good"]), "fast",
+        cache_dir=str(tmp_path), device="cpu", flow_backend="farneback")
+    cache = SourceCache(reader, cfg, backend=FarnebackBackend())
+
+    saves: list[str] = []
+    orig_save = cache.store.save_npz
+
+    def counting_save(key, **arrays):
+        saves.append(key)
+        return orig_save(key, **arrays)
+
+    cache.store.save_npz = counting_save
+
+    errors: list[str] = []
+
+    def worker():
+        try:
+            for j in range(3):
+                if cache.get_edges(j).edges is None:
+                    errors.append("edges None")
+                if cache.get_pair(j).f_01 is None:
+                    errors.append("pair None")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent cache access raised: {errors[:3]}"
+    # Every entry is written exactly once despite 8 racing threads.
+    assert len(saves) == len(set(saves)), (
+        f"duplicated cache writes: {[k for k in saves if saves.count(k) > 1]}")
+
+    # Second wave on the warm cache: reads only, no computation.
+    saves.clear()
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert saves == [], f"warm-cache wave still wrote: {saves}"

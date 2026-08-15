@@ -88,13 +88,25 @@ def rpg_cases(rpg_root: Path) -> list[dict]:
                 continue
             mode = m["mode"]
             # Determine the clean baseline + the reference to pass to inspect.
-            oracle_path = str(case_dir / files["oracle"]) \
-                if "oracle" in files else None
+            # FR's clean baseline is the ``reference`` role itself: a
+            # same-rate 60 FPS GT, so inspecting it against itself exercises
+            # the full-reference contract (self-comparison scores ~100).  The
+            # 30 FPS ``source`` is an endpoint-style anchor, not a same-rate
+            # baseline.
+            oracle_path = str(case_dir / files["reference"]) \
+                if mode == "fr" and "reference" in files else None
+            if oracle_path is None and "oracle" in files:
+                oracle_path = str(case_dir / files["oracle"])
             if oracle_path is None and "source" in files:
                 oracle_path = str(case_dir / files["source"])
-            # For FR, the reference passed to inspect is the clean source.
+            # For FR, the reference passed to inspect is the clean 60 FPS
+            # ``reference`` role (same rate as the candidate); for endpoint
+            # it is the 60 FPS ``source`` (candidate is 2x).  Using source
+            # for FR would route the inspect as endpoint-2x instead.
             reference_for_inspect = None
-            if mode == "fr" and "source" in files:
+            if mode == "fr" and "reference" in files:
+                reference_for_inspect = str(case_dir / files["reference"])
+            elif mode == "endpoint" and "source" in files:
                 reference_for_inspect = str(case_dir / files["source"])
             cases.append({
                 "case_id": m["case_id"],

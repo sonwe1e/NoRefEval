@@ -98,3 +98,87 @@ def test_detection_precision_requires_temporal_overlap():
     assert not _is_temporal_typed_hit(wrong_time, 0.1, 0.4, expected)
     assert not _is_temporal_typed_hit(wrong_type, 0.1, 0.4, expected)
     assert _is_temporal_typed_hit(true_hit, 0.1, 0.4, expected)
+
+
+def test_git_state_clean_tree_skips_diff(monkeypatch):
+    """A clean tree reports dirty=False and skips the expensive binary diffs."""
+    from types import SimpleNamespace
+
+    from rr_vfiqa.calibration import provenance
+
+    calls: list[str] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(" ".join(cmd))
+        if cmd[1] == "rev-parse":
+            return SimpleNamespace(stdout="abc123\n", stderr="")
+        if cmd[1] == "status":
+            return SimpleNamespace(stdout="", stderr="")
+        raise AssertionError(f"unexpected git call: {cmd}")
+
+    monkeypatch.setattr(provenance.subprocess, "run", fake_run)
+    state = provenance._git_state()
+    assert state["commit_sha"] == "abc123"
+    assert state["working_tree_dirty"] is False
+    assert state["tracked_diff_sha256"] is None
+    assert not [c for c in calls if "diff" in c], (
+        f"clean tree must not run git diff: {calls}")
+
+
+def test_git_state_dirty_tree_hashes_diff(monkeypatch):
+    """A dirty tree hashes the tracked diff (best-effort phase 2)."""
+    from types import SimpleNamespace
+
+    from rr_vfiqa.calibration import provenance
+
+    def fake_run(cmd, **kw):
+        if cmd[1] == "rev-parse":
+            return SimpleNamespace(stdout="abc123\n", stderr="")
+        if cmd[1] == "status":
+            return SimpleNamespace(stdout=" M rr_vfiqa/cli.py\n", stderr="")
+        if cmd[1] == "diff":
+            return SimpleNamespace(stdout=b"diff-bytes", stderr=b"")
+        raise AssertionError(f"unexpected git call: {cmd}")
+
+    monkeypatch.setattr(provenance.subprocess, "run", fake_run)
+    state = provenance._git_state()
+    assert state["working_tree_dirty"] is True
+    # Both the working-tree and the staged diff are hashed (two diff calls).
+    assert state["tracked_diff_sha256"] == \
+        provenance.sha256(b"diff-bytes" + b"diff-bytes").hexdigest()
+
+
+def test_git_state_diff_failure_keeps_dirty_flag(monkeypatch):
+    """A failed diff must not downgrade the dirty flag (regression: transient
+    git failures on loaded machines used to set working_tree_dirty=None)."""
+    from types import SimpleNamespace
+
+    from rr_vfiqa.calibration import provenance
+
+    def fake_run(cmd, **kw):
+        if cmd[1] == "rev-parse":
+            return SimpleNamespace(stdout="abc123\n", stderr="")
+        if cmd[1] == "status":
+            return SimpleNamespace(stdout=" M file.py\n", stderr="")
+        if cmd[1] == "diff":
+            raise provenance.subprocess.SubprocessError("boom")
+        raise AssertionError(f"unexpected git call: {cmd}")
+
+    monkeypatch.setattr(provenance.subprocess, "run", fake_run)
+    state = provenance._git_state()
+    assert state["working_tree_dirty"] is True
+    assert state["tracked_diff_sha256"] is None
+
+
+def test_git_state_unavailable_falls_back_to_embedded(monkeypatch):
+    """No git at all -> embedded commit, dirty=None (documented sentinel)."""
+    from rr_vfiqa.calibration import provenance
+
+    def fake_run(cmd, **kw):
+        raise provenance.subprocess.SubprocessError("git missing")
+
+    monkeypatch.setattr(provenance.subprocess, "run", fake_run)
+    state = provenance._git_state()
+    assert state["working_tree_dirty"] is None
+    assert state["tracked_diff_sha256"] is None
+    assert state["commit_sha"]

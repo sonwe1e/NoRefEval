@@ -68,18 +68,23 @@ def _unique_coverage(
 
 
 def _compute_nr_error_maps(candidate, cfg, backend, window_features, worst, *,
-                           top_k: int = 8):
+                           top_k: int = 8, extra_centers: set[int] | None = None):
     """Compute dense error maps for the top-risk NR windows (USERPLAN §8).
 
     Only the windows that feed the worst-issue cards pay this cost; the maps
     are stored on ``wf.error_maps`` and later matched to ``DiagnosticIssue``
-    objects by ``center_index``.  Returns ``{center_index: {name: array}}``.
+    objects by ``center_index``.  ``extra_centers`` extends the coverage
+    beyond the fusion worst-windows to every window that fired a diagnostic
+    issue, so an issue card always has a heatmap/box source.  Returns
+    ``{center_index: {name: array}}``.
     """
     from .metrics import nr_window_maps
     if not worst or not window_features:
         return {}
     # worst windows are already sorted worst-first by the caller.
-    centers = [int(w.center_index) for w in worst[:top_k]]
+    centers = list(dict.fromkeys(
+        [int(w.center_index) for w in worst[:top_k]]
+        + sorted(extra_centers or ())))
     by_center = {int(wf.window.center): wf for wf in window_features}
     out: dict[int, dict[str, np.ndarray]] = {}
     for center in centers:
@@ -106,17 +111,23 @@ def _compute_nr_error_maps(candidate, cfg, backend, window_features, worst, *,
 
 
 def _compute_fr_error_maps(candidate, reference, cfg, backend, window_features,
-                           worst, alignment, geometry_policy, *, top_k: int = 8):
+                           worst, alignment, geometry_policy, *,
+                           top_k: int = 8, extra_centers: set[int] | None = None):
     """Compute dense error maps for the top-risk FR windows (USERPLAN P1).
 
     Uses native-resolution frames for sharper evidence.  Maps are stored on
     ``wf.error_maps`` and later matched to ``DiagnosticIssue`` objects by
-    center_index.
+    center_index.  ``extra_centers`` extends the coverage beyond the fusion
+    worst-windows to every window that fired a diagnostic issue, so an issue
+    card always has a heatmap/box source even when fusion ranked the window
+    below the top-k bar.
     """
     from .metrics import fr_window_maps
     if not worst or not window_features:
         return {}
-    centers = [int(w.center_index) for w in worst[:top_k]]
+    centers = list(dict.fromkeys(
+        [int(w.center_index) for w in worst[:top_k]]
+        + sorted(extra_centers or ())))
     by_center = {int(wf.window.center): wf for wf in window_features}
     out: dict[int, dict[str, np.ndarray]] = {}
     for center in centers:
@@ -905,13 +916,10 @@ def evaluate_no_reference(
     subscores["common_time_quality"] = cad_rep.common_time_quality
     subscores["cadence_integrity"] = cad_rep.cadence_integrity
     # --- USERPLAN §8: dense error maps for the top-risk windows -----------
-    # Computed before diagnosis so issues can carry spatial boxes (USERPLAN
-    # P1).  Scalar metrics run for every window; the heavier dense fields are
-    # only computed for the windows that feed the worst-issue cards.
-    nr_error_maps = _compute_nr_error_maps(
-        candidate, cfg, backend, window_features, worst)
-
-    # Diagnose with error maps so issues carry spatial boxes (USERPLAN P1).
+    # Diagnose first (cheap), then compute maps for the fusion worst-windows
+    # PLUS every window that fired an issue — an issue card must always have
+    # a heatmap/box source (USERPLAN P0-6).  Scalar metrics run for every
+    # window; the heavier dense fields are only computed for those windows.
     diag_ws = [
         (window_times(wf.window, candidate.meta)[0],
          window_times(wf.window, candidate.meta)[1],
@@ -919,12 +927,18 @@ def evaluate_no_reference(
          float(wf.labels.get("metric_confidence", 1.0)))
         for wf in window_features
     ]
-    # Pass every dense field per window to diagnosis; the map best matching
-    # each fired rule's issue type is chosen *inside* diagnose_windows
-    # (preferred_maps_for), so the boxes come from the same field the report
-    # renders (USERPLAN P0-6).  No fixed-priority pre-selection here.
-    nr_issues = diagnose_windows(diag_ws, cfg.preset.temporal_nms_seconds,
-                                 error_maps=nr_error_maps)
+    nr_issues = diagnose_windows(diag_ws, cfg.preset.temporal_nms_seconds)
+    issue_centers = {int(i.center_index) for i in nr_issues}
+    nr_error_maps = _compute_nr_error_maps(
+        candidate, cfg, backend, window_features, worst,
+        extra_centers=issue_centers)
+    # Re-diagnose with the maps so boxes attach to the same issue objects the
+    # report renders; the map best matching each fired rule's issue type is
+    # chosen *inside* diagnose_windows (preferred_maps_for, USERPLAN P0-6).
+    if nr_error_maps:
+        nr_issues = diagnose_windows(
+            diag_ws, cfg.preset.temporal_nms_seconds,
+            error_maps=nr_error_maps)
 
     # Record, for each issue, the map name used for its boxes so the rendered
     # heatmap matches the annotation (USERPLAN P0-6).
@@ -1254,14 +1268,10 @@ def evaluate_full_reference(
     )
 
     # --- USERPLAN P1: dense error maps for the top-risk FR windows -------
-    # Computed before diagnosis so issues can carry spatial boxes (USERPLAN
-    # P1).
-    fr_error_maps = _compute_fr_error_maps(
-        candidate, reference, cfg, backend, window_features, worst,
-        alignment, geometry_policy)
-
-    # USERPLAN §7: structured diagnostic evidence (no cadence term for FR).
-    # Diagnose with error maps so issues carry spatial boxes.
+    # Diagnose first (cheap), then compute maps for the fusion worst-windows
+    # PLUS every window that fired an issue — an issue card must always have
+    # a heatmap/box source (USERPLAN P0-6).  Re-diagnose with the maps so
+    # boxes attach to the same issue objects the report renders.
     fr_diag_ws = [
         (window_times(wf.window, candidate.meta)[0],
          window_times(wf.window, candidate.meta)[1],
@@ -1269,12 +1279,16 @@ def evaluate_full_reference(
          float(wf.labels.get("metric_confidence", 1.0)))
         for wf in window_features
     ]
-    # Pass every dense field per window to diagnosis; the map best matching
-    # each fired rule's issue type is chosen *inside* diagnose_windows
-    # (preferred_maps_for), so the boxes come from the same field the report
-    # renders (USERPLAN P0-6).  No fixed-priority pre-selection here.
-    fr_issues = diagnose_windows(fr_diag_ws, cfg.preset.temporal_nms_seconds,
-                                 error_maps=fr_error_maps)
+    # USERPLAN §7: structured diagnostic evidence (no cadence term for FR).
+    fr_issues = diagnose_windows(fr_diag_ws, cfg.preset.temporal_nms_seconds)
+    issue_centers = {int(i.center_index) for i in fr_issues}
+    fr_error_maps = _compute_fr_error_maps(
+        candidate, reference, cfg, backend, window_features, worst,
+        alignment, geometry_policy, extra_centers=issue_centers)
+    if fr_error_maps:
+        fr_issues = diagnose_windows(
+            fr_diag_ws, cfg.preset.temporal_nms_seconds,
+            error_maps=fr_error_maps)
 
     # Record, for each FR issue, the map name used for its boxes so the
     # rendered heatmap matches the annotation (USERPLAN P0-6).
