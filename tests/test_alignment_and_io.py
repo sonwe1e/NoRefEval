@@ -59,3 +59,22 @@ def test_random_access_consistency(videos):
     rnd = cand.read_frames([0, 5, 17, 63, 159], width=160)
     for pos, idx in enumerate(rnd.indices):
         assert np.mean(np.abs(seq[idx].astype(int) - rnd.rgb[pos].astype(int))) < 2.0
+
+
+def test_local_monotonic_match_recovers_after_dropped_generated_frame():
+    from rr_vfiqa.io.timestamp_alignment import _monotonic_anchor_match
+
+    source = np.stack([np.full((8, 16), i * 30, np.float32)
+                       for i in range(5)])
+    mids = [(source[i] + source[i + 1]) / 2 for i in range(4)]
+    candidate = np.stack([
+        source[0], mids[0], source[1],
+        # mids[1] is locally dropped
+        source[2], mids[2], source[3], mids[3], source[4],
+    ])
+    src_pts = np.arange(5) / 60.0
+    cand_pts = np.arange(len(candidate)) / 120.0
+    mapping, errors = _monotonic_anchor_match(
+        source, candidate, src_pts, cand_pts)
+    assert mapping.tolist() == [0, 2, 3, 5, 7]
+    assert np.max(errors) == 0.0

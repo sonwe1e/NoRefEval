@@ -1,16 +1,34 @@
-"""rr_vfiqa — Endpoint-Referenced / Reduced-Reference VFI Quality Assessment.
+"""Mode-aware VFI quality assessment.
 
-Quality evaluation for 60→120 FPS game frame interpolation: the original
-60 FPS frames are anchors; generated frames are judged by endpoint flow
-composition, motion-compensated temporal stability, reverse anchor cycle,
-and local structural integrity (see USERPLAN.md).
+The public API separates single-video artifact risk, 2× endpoint-reference
+evaluation, and same-rate full-reference fidelity.  Scores from different
+modes intentionally use different schemas and must not be compared directly.
 """
 
-from .config import EvalConfig, PRESETS
-from .pipeline import compare_models, evaluate_vfi
+from .config import EvalConfig, EvaluationMode, PRESETS
+from .multimode import (
+    compare,
+    evaluate,
+    evaluate_full_reference,
+    evaluate_no_reference,
+)
+from .pipeline import compare_models, evaluate_endpoint_reference, evaluate_vfi
 from .schema import Report
+from ._version import VERSION
 
-__version__ = "0.1.0"
+__version__ = VERSION
 
-__all__ = ["evaluate_vfi", "compare_models", "EvalConfig", "PRESETS", "Report",
-           "__version__"]
+__all__ = [
+    "evaluate",
+    "evaluate_no_reference",
+    "evaluate_endpoint_reference",
+    "evaluate_full_reference",
+    "compare",
+    "evaluate_vfi",
+    "compare_models",
+    "EvaluationMode",
+    "EvalConfig",
+    "PRESETS",
+    "Report",
+    "__version__",
+]

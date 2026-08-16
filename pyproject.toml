@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rr-vfiqa"
-version = "0.1.0"
-description = "Endpoint-Referenced / Reduced-Reference VFI Quality Assessment for 60->120 FPS game frame interpolation"
+dynamic = ["version"]
+description = "Mode-aware no-reference, endpoint-reference, and full-reference VFI quality assessment"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -21,13 +21,17 @@ torch = ["torch>=2.1", "torchvision>=0.16"]
 fusion = ["lightgbm>=4.0"]
 viz = ["matplotlib>=3.7"]
 audit = ["cotracker>=0.3"]     # audit-tier point tracker (USERPLAN §8.5)
-dev = ["pytest>=7.0"]
+vqa = ["torch>=2.1", "pyiqa>=0.1.13"]
+dev = ["pytest>=7.0", "ruff>=0.6"]
 
 [project.scripts]
 rr-vfiqa = "rr_vfiqa.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["rr_vfiqa*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "rr_vfiqa._version.VERSION"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

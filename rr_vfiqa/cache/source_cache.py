@@ -14,7 +14,10 @@ Total cost over N candidate models: T_source + N · T_candidate.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from pathlib import Path
+import threading
 from typing import Callable, Iterable
 
 import cv2
@@ -26,8 +29,11 @@ from ..motion.flow_estimator import FlowBackend, get_flow_backend, compute_pair_
 from ..motion.occlusion import cycle_occlusion
 from ..motion.global_camera_motion import estimate_camera_motion
 from ..schema import CameraMotion, OcclusionMasks
-from .cache_schema import is_valid, read_meta, write_meta
+from .cache_schema import SCHEMA_VERSION, is_valid, read_meta, write_meta
 from .feature_store import FeatureStore
+
+CAMERA_ALGORITHM_VERSION = "orb-affine-homography-ransac-v1"
+EDGE_ALGORITHM_VERSION = "canny-multiscale-sobel-v1"
 
 
 @dataclass
@@ -36,10 +42,10 @@ class SourcePairData:
     f_01: np.ndarray            # (Hf, Wf, 2) float32
     f_10: np.ndarray
     occ: OcclusionMasks
-    camera: CameraMotion        # X_i -> X_{i+1}, native-resolution pixels
+    camera: CameraMotion        # X_i -> X_{i+1}, coordinates of cached flow grid
     flow_height: int
     flow_width: int
-    scale: float                # flow res / native res
+    scale: float                # additional compute resize relative to cached frames
 
     @property
     def conf_visible_01(self) -> np.ndarray:
@@ -55,22 +61,50 @@ class SourceEdges:
 
 class SourceCache:
     def __init__(self, reader: VideoReader, cfg: EvalConfig,
-                 flow_width: int | None = None):
+                 flow_width: int | None = None,
+                 backend: FlowBackend | None = None):
         self.reader = reader
         self.cfg = cfg
         self.flow_width = flow_width or cfg.preset.flow_width
-        root = Path(cfg.cache_dir) / reader.meta.content_hash / f"flow_w{self.flow_width}"
+        self._backend = backend or get_flow_backend(cfg.flow_backend, cfg.device)
+        backend_id = self._backend.cache_identity()
+        contract = {
+            "evaluator_schema": SCHEMA_VERSION,
+            "flow": backend_id,
+            "flow_width": self.flow_width,
+            "occlusion_cycle_threshold": cfg.occlusion_cycle_threshold,
+            "camera_algorithm_version": CAMERA_ALGORITHM_VERSION,
+            "edge_algorithm_version": EDGE_ALGORITHM_VERSION,
+        }
+        contract_json = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+        contract_hash = sha256(contract_json.encode("utf-8")).hexdigest()[:12]
+        backend_slug = "".join(c if c.isalnum() or c in "-_" else "_"
+                               for c in backend_id["backend"])
+        weights_slug = "".join(c if c.isalnum() or c in "-_" else "_"
+                               for c in backend_id["weights_hash"])
+        root = (Path(cfg.cache_dir) / reader.meta.content_hash /
+                f"flow_{backend_slug}_{weights_slug}_w{self.flow_width}_{contract_hash}")
         self.store = FeatureStore(root)
-        self._backend: FlowBackend | None = None
         self._frames_at_flow_res: dict[int, np.ndarray] = {}
+        # Serialises cache-miss computation.  The window loops evaluate in a
+        # thread pool, so several threads can race on the same missing pair /
+        # edge entry; the double-checked lock makes exactly one thread compute
+        # while the others wait and then read the finished entry (the store's
+        # atomic writes guarantee they never read a half-written file).  RLock
+        # because computing a pair re-enters source_frame_flow_res.
+        self._cache_lock = threading.RLock()
+        self.contract = contract
+        self.root = root
 
         meta = read_meta(root)
         if not is_valid(root) or meta.get("video_hash") != reader.meta.content_hash \
-                or meta.get("flow_width") != self.flow_width:
+                or meta.get("cache_contract") != contract:
             write_meta(root, {
                 "video_hash": reader.meta.content_hash,
                 "video_path": str(reader.meta.path),
                 "flow_width": self.flow_width,
+                "cache_contract": contract,
+                "cache_contract_hash": contract_hash,
                 "source_fps": reader.meta.fps,
                 "source_frames": reader.meta.n_frames,
                 "width": reader.meta.width,
@@ -81,21 +115,21 @@ class SourceCache:
 
     @property
     def backend(self) -> FlowBackend:
-        if self._backend is None:
-            self._backend = get_flow_backend(self.cfg.flow_backend, self.cfg.device)
         return self._backend
 
     # -- frames ---------------------------------------------------------------
 
     def source_frame_flow_res(self, i: int) -> np.ndarray:
         """Source frame X_i at the flow working resolution (cached in memory)."""
-        if i not in self._frames_at_flow_res:
+        with self._cache_lock:
+            if i in self._frames_at_flow_res:
+                return self._frames_at_flow_res[i]
             img = self.reader.read_one(i, width=self.flow_width)
             self._frames_at_flow_res[i] = img
             if len(self._frames_at_flow_res) > 48:  # bounded LRU-ish
                 oldest = next(iter(self._frames_at_flow_res))
                 del self._frames_at_flow_res[oldest]
-        return self._frames_at_flow_res[i]
+            return img
 
     # -- pairs ----------------------------------------------------------------
 
@@ -149,7 +183,9 @@ class SourceCache:
 
     def get_pair(self, i: int) -> SourcePairData:
         if not self.has_pair(i):
-            self._compute_pair(i)
+            with self._cache_lock:
+                if not self.has_pair(i):          # double-checked: another
+                    self._compute_pair(i)         # thread may have won
         fl = self.store.load_npz(f"{self.pair_key(i)}_flow")
         h, w, scale = (float(v) for v in fl["meta"])
         occ = OcclusionMasks(
@@ -182,16 +218,19 @@ class SourceCache:
     def get_edges(self, j: int) -> SourceEdges:
         key = self.edge_key(j)
         if not self.store.has(key, "npz"):
-            img = self.source_frame_flow_res(j)
-            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            e1 = cv2.Canny(gray, 60, 160)
-            blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
-            e2 = cv2.Canny(blur, 30, 100)
-            edges = ((e1 > 0) | (e2 > 0)).astype(np.uint8)
-            gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-            gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-            grad = np.sqrt(gx * gx + gy * gy)
-            self.store.save_npz(key, edges=edges, grad=grad.astype(np.float16))
+            with self._cache_lock:
+                if not self.store.has(key, "npz"):  # double-checked lock
+                    img = self.source_frame_flow_res(j)
+                    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    e1 = cv2.Canny(gray, 60, 160)
+                    blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
+                    e2 = cv2.Canny(blur, 30, 100)
+                    edges = ((e1 > 0) | (e2 > 0)).astype(np.uint8)
+                    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+                    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+                    grad = np.sqrt(gx * gx + gy * gy)
+                    self.store.save_npz(key, edges=edges,
+                                        grad=grad.astype(np.float16))
         z = self.store.load_npz(key)
         return SourceEdges(frame=j, edges=z["edges"].astype(np.uint8),
                            grad_energy=z["grad"].astype(np.float32))

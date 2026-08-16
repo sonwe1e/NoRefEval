@@ -1,607 +1,706 @@
-# NoRefEval 完整验收结论
+核心判断
 
-**结论：当前项目尚未达到我们之前预期的“可用于真实游戏插帧模型排序与质量门禁”的状态。**
+这两次 no-reference 结果的 Overall Quality 8.8 和 8.0 当前都不具备有效解释性。它们几乎完全是被错误偏高的 Cadence 风险压低的：
 
-它已经较完整地实现了技术路线的**架构性原型**：端点参考、风险采样、光流组合、运动补偿时序指标、奇偶帧分析、局部语义分支、融合评分和坏例报告均有对应模块。但当前 GitHub 提交存在阻断性文件缺失、多处指标实现错误、语义分支仍是弱代理、缺少真实数据标定和性能验证。
+69.1 \times 12.8\% \approx 8.8
 
-按当前远端仓库估算：
+64.9 \times 12.3\% \approx 8.0
 
-| 维度         |       达成度 | 判断                       |
-| ---------- | --------: | ------------------------ |
-| 技术架构与模块划分  |       80% | 基本符合原路线                  |
-| 远端仓库可运行性   |       10% | 当前 clean checkout 无法正常导入 |
-| 核心运动与时序指标  |       50% | 主体存在，但有坐标与方向错误           |
-| 游戏特定坏例覆盖   |       30% | 多数是启发式代理，并非可靠语义检测        |
-| 主观标定与排序可信度 |       10% | 仍是合成数据 bootstrap         |
-| 评测效率       |       30% | 有级联思想，但解码和光流路径不高效        |
-| 报告、CLI 与文档 |       70% | 基础体验较完整                  |
-| **综合达成度**  | **约 40%** | **优秀原型，但未达到生产验收标准**      |
+因此，这不是“原始视频只有 8.8 分、插帧视频只有 8.0 分”，而是：
 
-目前输出的 `overall_score` **不建议直接用于模型上线门禁、回归验收或模型能力定论**。
+当前 60 FPS Cadence 判定把正常战斗运动、特效和相位变化误识别成了接近完全的帧率塌缩。
 
----
+短期内应忽略这两项结果中的：
 
-# 一、阻断级问题：当前 GitHub 仓库不能自洽运行
+* Overall Quality
+* Cadence Integrity
+* cadence risk
+* Quality Level
+* Affected
 
-最严重的问题不是指标效果，而是源码包没有完整提交。
+更有参考价值的是 Common-time 和各子分数，但其中 phase_consistency 也存在明显的 60 FPS 适用性问题。
 
-`pipeline.py` 和多个指标模块依赖：
+⸻
 
-```python
-from .cache.source_cache import SourceCache
-from ..cache.source_cache import SourcePairData
-```
+一、这组结果实际说明了什么
 
-但我直接读取当前仓库中的：
+先排除 Cadence 惩罚，原始视频与插帧视频的基础分数是：
 
-```text
-rr_vfiqa/cache/
-rr_vfiqa/cache/source_cache.py
-```
+指标	原始 60 FPS	插帧 60 FPS	变化
+Common-time	69.1	64.9	-4.2
+Temporal stability	88.4	87.5	基本相同
+Motion smoothness	37.3	38.5	插帧略高
+Phase consistency	42.7	24.5	插帧明显更低
+UI/text stability	27.7	27.9	基本相同
+Technical quality	56.3	49.0	插帧略差
 
-均得到 GitHub 404。
+当前 NR 融合权重为：
 
-根因基本明确：`.gitignore` 中写了未锚定的：
+temporal 35%
+motion   30%
+phase    20%
+UI       10%
+technical 5%
 
-```gitignore
-cache/
-```
+子分数和总分又都通过指数函数融合。
 
-这会同时忽略运行缓存目录和源码目录 `rr_vfiqa/cache/`。
+按照当前公式从你提供的子分数逆算：
 
-而主流程在导入阶段就依赖该包。
+如果暂时去掉 phase category，两个视频的基础分数约为 70.86 和 70.84，几乎完全相同。
 
-这意味着很可能出现了：
+也就是说，原始与插帧视频 4.2 分的 Common-time 差距，几乎全部来自：
 
-> 本地工作区存在未跟踪的 `rr_vfiqa/cache/`，所以本地测试通过；提交 GitHub 时该源码目录被 `.gitignore` 整体过滤。
+phase_consistency：42.7 → 24.5
 
-因此，当前远端提交无法证明 README 或提交信息中所称的测试结果。对应提交也没有可见的 CI 状态检查。
+而不是运动平滑度或时序稳定性。
 
-应立即改成：
+对当前视频的合理解释
 
-```gitignore
-/cache/
-```
+从这组数据能够相对可信地得出：
 
-然后强制提交遗漏源码：
+* 插帧没有明显降低普通的时间连续性，temporal_stability 基本不变。
+* 插帧没有让当前光流运动指标明显恶化，motion_smoothness 反而略高。
+* 插帧帧与原始帧之间存在明显的奇偶相位差异，可能表现为生成帧更模糊、边缘密度不同、锐度不同或编码特征不同。
+* 插帧视频的绝对技术质量略差，可能有锐度损失、压缩损失或噪声差异。
+* UI 分数对两个视频都异常低，说明它主要反映当前检测器对战斗特效和动态 HUD 的误判，而不是插帧引入的差异。
 
-```bash
-git add -f rr_vfiqa/cache
-git commit -m "fix: include source cache package"
-```
+因此，当前唯一值得重点检查的真实差异是相位一致性和技术质量，而不是 Cadence 或 Motion。
 
-发布前必须在全新目录执行：
+⸻
 
-```bash
-git clone ...
-cd NoRefEval
-pip install -e ".[dev]"
-python -c "import rr_vfiqa"
-pytest
-```
+二、为什么两个 60 FPS 视频都会得到 0.93～0.95 Cadence Risk
 
----
+这是当前实现中的结构性问题。
 
-# 二、已经正确落地的部分
+1. 60 FPS 下 native 和 1/60 实际是同一个时间尺度
 
-项目并不是完全不可用的草稿。整体设计方向是正确的，而且代码组织与原技术路线高度一致。
+当前时间规划同时构造：
 
-主流程已经串联了：
+native：相邻帧
+lag_1_60：相隔 1/60 秒的帧
+lag_1_30：相隔 1/30 秒的帧
 
-* PTS 与锚点对齐；
-* 全视频低成本扫描；
-* 均匀采样与高风险采样；
-* 源端特征缓存接口；
-* 光流组合一致性；
-* 反向锚点闭环；
-* 运动补偿时序残差；
-* 奇偶帧频率；
-* 边缘结构；
-* UI、人物、细物体、武器、文字和转场分支；
-* 分类子分、总分、置信度和坏例报告。
+对 60 FPS 视频：
 
-这些模块在 `pipeline.py` 中已经形成完整调用链。
+native       = t → t+1
+lag_1_60     = t → t+1
+lag_1_30     = t → t+2
 
-其中值得保留的设计包括：
+但 Cadence motion gate 当前传入的是：
 
-1. **Endpoint-Referenced 定义正确。**没有错误地把任务当成纯 NR-VQA，而是充分使用原始 60 FPS 锚点。
-2. **统一的 Schema 和模块边界较清晰。**后续替换光流、分割、跟踪和融合模型较方便。
-3. **全片廉价扫描 + 风险窗口精评的方向正确。**
-4. **运动补偿时序残差的主体实现基本合理。**中心帧到邻帧的 backward warp 及前后向循环可见性逻辑是当前实现中相对扎实的一部分。
-5. **README 对标定状态相对诚实。**文档明确说明当前尺度和权重只是 synthetic bootstrap，仍需真实高帧率数据和人工 A/B 排序标定。
+nr_raw_diff_1_60
 
-因此不需要推翻整个项目，主要需要修复数学实现、补齐语义能力并完成真实标定。
+并把它称作“较长时间尺度运动”。
 
----
+对 60 FPS 视频，它根本不是较长尺度，而就是原生相邻帧。
 
-# 三、核心指标存在的正确性问题
+正确设计应该是：
 
-## 1. 颜色变换方向写反
+输入 FPS	Native cadence	Parent/common cadence
+60 FPS	1/60 秒	1/30 秒
+120 FPS	1/120 秒	1/60 秒
 
-`estimate_color_transform(src, cand)` 拟合的是：
+所以在 60 FPS 下，Cadence gate 应使用 1/30 的运动证据，而不是 1/60。
 
-[
-\text{cand}\approx gain\cdot \text{src}+offset
-]
+2. 低运动补偿误差被错误当成 Cadence 塌缩证据
 
-代码也确实以 source 为自变量、candidate 为目标拟合。
+当前 Cadence 风险把以下现象视为“没有新内容”：
 
-但锚点评测中却直接执行：
+MCT residual 很低
+self composition error 很低
+self cycle error 很低
 
-```python
-c_norm = color.apply(c)
-```
+并且两个信号一致就可以产生很高风险。
 
-即再次对 candidate 应用 `gain * candidate + offset`，然后拿去与 source 比较。
+但对一段正常、连续、光流估计准确的战斗视频：
 
-正确的 candidate→source 归一化应该是：
+运动越平滑
+光流越准确
+MCT / composition / cycle residual 越低
 
-[
-\text{src}\approx
-\frac{\text{cand}-offset}{gain}
-]
+这些本来也是高质量运动的表现。
 
-这会影响颜色漂移残差、锚点完整性和对齐告警。
+只有在存在明显的奇偶帧信息不对称时，低 residual 才可能支持“复制帧或帧率塌缩”的结论。它们不能独立作为塌缩证据。
 
----
+3. Cadence 在高风险采样窗口上聚合
 
-## 2. 多处半程投影混淆了 forward flow 与 backward warp
+NR 先选择 Uniform + Risk 窗口，然后只在这些窗口上计算 Cadence。Balanced 默认风险窗口数量比均匀窗口还多。
 
-项目定义的：
+战斗特效、镜头震动、闪光、粒子和遮挡本来就容易被 Risk Selector 选中。
 
-```python
-warp_image(img, flow)
-```
+随后 Cadence 使用：
 
-语义是：
+max(P80, median)
 
-[
-out(x)=img(x+flow(x))
-]
+聚合窗口风险。
 
-也就是 backward sampling。
+因此它实际回答的接近：
 
-但反向锚点闭环使用：
-
-```python
-wa = warp_image(img_a, 0.5 * f_ab)
-```
-
-其中 `f_ab` 是从 A 指向 B 的 forward flow。对于一个向右平移的物体，这会把 A 向错误方向移动。
-
-相同模式也存在于：
-
-* endpoint edge support；
-* 人物预期 mask 投影；
-* 人物 endpoint leak 计算。
-
-例如边缘支持直接执行：
-
-```python
-s0 = warp_image(e0, 0.5 * f_01)
-```
-
-同样把 forward flow 当成了目标网格 backward flow。
-
-人物分支中也使用相同方式生成中间 mask，并使用定义在 anchor 网格上的 flow 去对齐 generated-frame 网格。
-
-建议彻底禁止模糊的 `warp_image(img, flow)` 调用方式，明确拆成：
-
-```python
-backward_warp(source, target_to_source_flow)
-forward_splat(source, source_to_target_flow)
-```
-
-并对恒定平移建立数学单元测试。
-
----
-
-## 3. 双向光流组合使用了错误坐标系的遮挡权重
-
-forward composition 位于 (X_i) 网格，backward composition 位于 (X_{i+1}) 网格。
-
-但当前实现给 forward 和 backward 两个方向使用同一张 `conf_01/occ_01` 权重图。
-
-backward 分支应使用：
-
-```python
-conf_ba
-occ_ba
-```
-
-否则遮挡边界和显露区域的权重会被映射到错误空间，尤其会影响大幅旋转和人物遮挡场景。
-
----
-
-## 4. UI 边缘 F-score 基本退化为恒定 1
-
-当前实现中：
-
-```python
-da = distance_to_edges_a
-db = distance_to_edges_b
-
-prec = db[edges_b]
-rec  = da[edges_a]
-```
-
-而边缘 B 上到边缘 B 自身的距离必然为零，边缘 A 上到边缘 A 自身的距离也必然为零。因此，只要双方都有边缘，precision 和 recall 基本都会变成 1。
-
-正确写法应是：
-
-```python
-precision = mean(distance_to_a[edges_b] <= tol)
-recall    = mean(distance_to_b[edges_a] <= tol)
-```
-
-这个错误同时影响：
-
-* UI 边缘完整性；
-* 文字边缘完整性；
-* UI/text 子分；
-* 坏例分类。
-
----
-
-## 5. UI 和转场的“双重曝光”条件数学上几乎不可能触发
-
-UI 动态分支要求：
-
-```python
-d0 < 8
-d1 < 8
-diff01 > 24
-```
-
-但根据三角不等式：
-
-[
-d(X_i,X_{i+1})
-\leq d(X_i,M)+d(M,X_{i+1})<16
-]
-
-因此不可能同时大于 24。
-
-转场分支同样要求：
-
-```python
-d0 < 10
-d1 < 10
-diff01 > 24
-```
-
-也基本不可能在同一 changed pixel 上成立。
-
-真实 Alpha 混合帧的特征不是“同时非常接近两个端点”，而是：
-
-[
-M\approx \alpha X_i+(1-\alpha)X_{i+1}
-]
-
-应通过最优 (\alpha) 拟合、双边缘、局部梯度衰减和残差结构检测。
-
----
-
-## 6. UI regression 的方向相反
-
-当前动态 UI 逻辑在中间帧逐渐远离初始状态 (X_i) 时增加惩罚：
-
-```python
-sim_cur_to_xi - sim_prev_to_xi
-```
-
-但对于正常的前向状态变化，当前生成帧本来就应比之前的生成帧更远离 (X_i)。这段代码实际上会把正常推进识别为回退。
-
----
-
-## 7. 武器跟踪从错误帧初始化
-
-武器分支在 `grays[1]` 上提取关键点：
-
-```python
-pts = _corner_points(grays[1], ...)
-```
-
-随后把这些点传给 KLT。
-
-但 KLT 实现把传入点当作 `frames_gray[0]` 上的初始点，并直接从 frame 0 跟踪到 frame 1。
-
-这使整条轨迹从第一步开始就处于错误坐标系。
-
-此外，pipeline 没有把人物 ROI mask 传给武器分支，所以它实际跟踪的是画面中央的普通角点，而非武器点。当前 `weapon_dev_p90` 更准确的名称应是“中央区域局部点轨迹偏差”，不能可靠解释成剑尖或剑柄抖动。
-
----
-
-## 8. LightGBM 校准器存在 100 倍量纲错误
-
-测试使用的是 0～100 的主观分数：
-
-```python
-y = 100 * exp(...)
-cal.fit(X, y)
-```
-
-但推理时又将模型输出乘以 100：
-
-```python
-raw = model.predict(...)
-return clip(raw * 100, 0, 100)
-```
-
-因此如果模型学到的是 60、80、90 这样的 MOS，最终全部会被裁剪到 100。当前 monotonic test 可能因为 `base` 和 `worse` 都饱和为 100 而表面通过。
-
-此外，`fit_pairwise()` 并没有实现真正的 pairwise ranking loss，只是把 winner 标为 1、loser 标为 0 后做普通回归。
-
----
-
-# 四、语义坏例覆盖情况
-
-## 人物身体缺失：只有弱代理
-
-目前没有真正的人体、部位或游戏角色分割模型。默认分割器是“残余运动 + 局部对比度”的 classical proxy。代码本身也明确说明训练好的游戏域模型尚不存在。
-
-因此它不能稳定区分：
-
-* 人物和其他移动前景；
-* 头部、手臂、腿部；
-* 武器和角色本体；
-* 静止人物和静止背景；
-* 同相机运动的人物。
-
-当前只能认为“人物完整性接口已建立”，不能认为“人物缺头、缺腿检测已经实现”。
-
-## 柱子和细物体：有启发式能力，但泛化不足
-
-薄物体模块使用 LSD 长线段和线段内外光流差，方向上符合之前提出的运动层归属误差。
-
-但当前问题包括：
-
-* 所有长直线都会进入，包括建筑纹理和道路边缘；
-* 只从前端点检测，只检查前半程；
-* 没有双向遮挡处理；
-* 没有实例时序关联；
-* line count 是全画面统计，不是同一个柱子或武器的持续跟踪；
-* 输出的 `box` 实际是线段端点，未必满足标准 bbox 格式。
-
-所以这一分支适合风险触发，不足以作为可靠的细物体质量分。
-
-## UI 和文字：框架存在，但关键计算当前不可用
-
-UI mask 使用跨视频静态像素和持久边缘构建，适合固定 HUD，但无法可靠覆盖：
-
-* 技能冷却动画；
-* 临时商店与弹窗；
-* 持续变化的数字；
-* 场景切换后的不同 UI；
-* 只在局部片段出现的文字。
-
-文字分支依赖已经出错的 `_edge_fscore`；而所谓 ROI 内 Otsu 实际是在整张灰度图上进行阈值分割，并非 ROI 内阈值。
-
-## 卡牌和商店转场：尚未达到预期
-
-当前没有：
-
-* 卡牌四角或 homography；
-* 翻牌角度单调性；
-* 商店组件级状态跟踪；
-* 可靠 Alpha 混合检测；
-* 前进/回退状态序列建模。
-
-因此只能检测一部分大面积像素变化，不能宣称已完成棋牌和商店状态劣化评测。
-
----
-
-# 五、三级级联与评测效率并未真正实现
-
-配置中定义了：
-
-* `audit_top_fraction`；
-* `audit_max_windows`；
-* `full_res_edges`；
-* `run_tracker`；
-* `run_depth`。
-
-但 pipeline 没有真正执行“二级筛选后再升级少量窗口”的 Audit 流程。只要开启 region branches，就会对所有选中窗口运行人物、薄物体、文字、转场和 weapon tracker。
-
-这意味着：
-
-* `standard` 的 `run_tracker=False` 没有生效；
-* `audit_top_fraction` 没有生效；
-* `audit_max_windows` 没有生效；
-* `full_res_edges` 没有生效；
-* 深度分支没有接入；
-* CoTracker 仍然只是抛出 `NotImplementedError` 的占位接口。
-* VQA 后端默认直接返回 `None`，FAST-VQA、DOVER、VFIPQA 均未接入。
-* 深度后端同样只是接口占位。
-
-## 解码路径会成为严重瓶颈
-
-`read_frames()` 每次随机读取都从视频开头解码，直到所需的最后一帧才停止。
-
-项目中以下操作都会反复调用它：
-
-* 锚点校验；
-* UI 14 帧采样；
-* 每个评测窗口读取；
-* compare 多候选重复初始化。
-
-长视频靠后的窗口会重复解码前面的大量帧，实际复杂度接近：
-
-[
-O(N_{\text{windows}}\cdot N_{\text{video frames}})
-]
-
-而不是预期的一次顺序解码。
-
-RAFT 也没有批处理；每个 flow pair 会分别执行正向和反向两次模型推理。
-
-标准模式最多约 48 个窗口，每个窗口需要多个 pair，单卡上很可能远慢于方案目标。目前仓库中没有 1080p、4K、长视频、单卡显存或多候选缓存收益的实测报告。
-
-所谓 `test_cache_speeds_second_run` 也没有测量速度，只检查两次分数差小于 2。
-
----
-
-# 六、测试和“充分评测”结论不成立
-
-当前端到端测试全部使用 `fast` 预设。
-
-而 `fast` 明确关闭全部 region branches。
-
-因此端到端测试没有覆盖：
-
-* 人物分支；
-* 细小物体分支；
-* 武器跟踪；
-* UI；
-* 文字；
-* 卡牌或商店转场；
-* Audit 流程。
-
-合成坏例也只有三类：
-
-* 高斯模糊；
-* 前后帧 crossfade ghost；
-* 直接复制前帧 freeze。
-
-没有覆盖最初提出的关键坏例：
-
-* 大幅旋转背景撕裂；
-* 背景显露区域丢失；
-* 头部或腿部缺失；
-* 柱子跟随背景；
-* 剑尖局部闪烁；
-* UI 亚像素漂移；
-* 文字笔画粘连；
-* 卡牌翻转；
-* 商店状态跳变；
-* 场景切换；
-* VFR、丢帧和时间戳偏移。
-
-项目 README 自己也明确承认：
-
-* 当前尺度只是 synthetic bootstrap；
-* 还没有真实 120/240 FPS 伪 GT 标定；
-* 还没有真实 60→120 人工 A/B 排序标定。
-
-所以当前测试只能证明：
-
-> 在一个约 1.3 秒、320×192、单一合成场景上，fast 模式可以把混合了 blur/ghost/freeze 的候选排在 perfect interleave 之后。
-
-它不能证明评测器能够可靠评价真实游戏插帧。
-
----
-
-# 七、评分与置信度还有“失败反而高分”的风险
-
-pipeline 对每个指标阶段使用：
-
-```python
-try:
-    wf.scalars.update(fn())
-except Exception:
-    wf.labels["error_xxx"] = ...
-```
-
-失败阶段产生的错误不会进入最终报告，也不会直接降低分数。由于 fusion 只聚合已有 feature，某个困难分支失败后，它的坏分数反而消失。
-
-更严重的是，如果没有任何窗口成功：
-
-* 各类别误差会变成 NaN；
-* 总分函数为缺失类别使用默认误差 0.15；
-* 总分仍约为 86；
-* confidence 对空窗口也没有加入明确的“零窗口”惩罚。
-
-默认缺失类别参与总分的逻辑见：
-置信度逻辑见：
-
-这会导致严重的 fail-open：
-
-> 评测没有真正完成，却仍可能得到较高总分和较高置信度。
-
-生产评测必须改成 fail-closed：核心指标缺失时不输出有效总分，或者将 confidence 降到接近零。
-
----
-
-# 八、建议的整改顺序
-
-## P0：恢复远端仓库可运行性
-
-必须先完成：
-
-1. 将 `.gitignore` 的 `cache/` 改为 `/cache/`；
-2. 提交 `rr_vfiqa/cache/` 全部源码；
-3. 添加 clean-checkout CI；
-4. CI 中执行安装、import、CPU 测试和 GPU 可选测试；
-5. 将指标阶段异常写入报告；
-6. 核心阶段失败时禁止输出正常总分。
-
-在这一步完成前，不应继续调整指标权重。
-
-## P1：修复数学和坐标实现
-
-按优先级修复：
-
-1. 统一 forward splat 与 backward warp 语义；
-2. 修复 cycle、edge、character 的半程投影；
-3. 修复双向 composition 的 backward 遮挡权重；
-4. 修复颜色变换方向；
-5. 修复 UI edge F-score；
-6. 重写 UI/transition 的 Alpha 混合检测；
-7. 修复 UI regression 符号；
-8. 修复 KLT 初始化帧；
-9. 修复 calibrator 的 0～1 / 0～100 量纲；
-10. 将 `char_leak_mean` 的归一化方向重新定义。
-
-每一项都应增加确定性单元测试，而不是只测试分数单调性。
-
-## P2：真正实现语义能力
-
-需要至少接入：
-
-* 游戏域人物/角色分割模型；
-* 人物部位或关键区域检测；
-* character mask 向 weapon tracker 传递；
-* 细物体双向实例跟踪；
-* UI 组件级模板或检测器；
-* 卡牌四边形和 homography；
-* CoTracker 或等价的审核级跟踪器；
-* 高视差窗口的深度分层。
-
-启发式分支可以保留为 Fast 模式，但不能用语义名称包装弱代理结果。
-
-## P3：完成真实标定和性能验收
-
-至少需要三套数据：
-
-1. **真实 120/240 FPS 伪 GT：**用于验证端点指标与真实中间帧误差的关系；
-2. **真实模型输出：**覆盖不同游戏、不同运动和多个插帧模型；
-3. **人工 A/B 排序：**用于最终融合和阈值标定。
-
-最终报告应包含：
-
-* SRCC；
-* PLCC；
-* Pairwise Accuracy；
-* 各坏例类别 AP/F1；
-* 最差 10% 坏例召回率；
-* Leave-One-Game-Out；
-* Leave-One-Model-Out；
-* 60 秒 1080p/4K 单卡耗时；
-* 峰值显存；
-* 第 2、3、N 个候选相对于首候选的缓存加速比。
-
----
-
-# 最终判断
-
-**NoRefEval 已经完成了一个较好的技术方案代码化原型，但没有完成一个经过充分验证的无中间帧参考插帧质量指标。**
-
-当前最适合的定位是：
-
-> **Research prototype / metric development framework**
+在一批故意挑出的高风险战斗片段中，Cadence 风险有多高？
 
 而不是：
 
-> **Validated VFI quality metric / production evaluation gate**
+整条视频有多少区域真正发生了帧率塌缩？
 
-核心架构可以保留，尤其是风险采样、运动补偿、光流组合和可解释报告设计；但在修复仓库完整性、坐标数学错误、UI/转场逻辑、武器跟踪、校准器和真实数据验证之前，现有总分还不具备可信的模型排序意义。
+这会系统性放大战斗视频的 Cadence Risk。
+
+4. 战斗特效天然会产生奇偶相位能量
+
+当前 Phase 使用绝对帧索引的奇偶性，将视频拆成：
+
+偶数帧 phase A
+奇数帧 phase B
+
+再比较锐度、边缘和交替能量。
+
+对 30→60 的插帧视频，这种相位拆分可能有意义；因为一组可能是原帧，另一组可能是生成帧。
+
+但对真实 60 FPS 战斗视频，以下内容也可能产生周期性奇偶差：
+
+-技能特效闪烁；
+-粒子隔帧生成；
+-屏幕震动；
+
+* Bloom 或曝光变化；
+    -游戏内部动画采样频率；
+    -编码 GOP 和量化变化。
+
+所以原始视频也得到了很低的 phase_consistency=42.7。
+
+⸻
+
+三、对当前结果的临时使用规则
+
+在代码整改前，建议按以下方式阅读本次报告。
+
+原始视频
+
+可信：
+Temporal stability 88.4
+部分可信：
+Technical quality 56.3
+需要谨慎：
+Motion smoothness 37.3
+Phase consistency 42.7
+UI/text stability 27.7
+当前无效：
+Cadence risk 0.93
+Cadence integrity 12.8
+Overall 8.8
+Affected 52.3%
+
+一个正常原始战斗视频出现：
+
+22 Issues
+52.3% Affected
+严重问题
+
+本身已经可以作为负对照证明：当前诊断阈值和持续时间估计明显过于激进。
+
+插帧视频
+
+相对于原始视频，最值得检查的是：
+
+Phase consistency：42.7 → 24.5
+Technical quality：56.3 → 49.0
+
+建议打开相应 Issue 的 Compare Clip，逐帧查看：
+
+-是否一帧清晰、一帧模糊；
+-生成帧是否明显更软；
+-细线、角色轮廓和技能特效是否隔帧变化；
+-输出编码是否只对生成帧产生更严重的压缩；
+-是否存在原帧和生成帧不同的锐化或降噪处理。
+
+由于 Motion 和 Temporal 基本相同，目前没有证据证明插帧让运动连续性显著变差。
+
+⸻
+
+四、下一步评分逻辑的具体整改方案
+
+P0：重写 60/120 FPS Cadence
+
+这是最优先的修改。
+
+1. 使用 FPS 自适应 Parent Lag
+
+新增：
+
+native_dt = median(diff(pts))
+parent_dt = 2.0 * native_dt
+
+对应：
+
+60 FPS  → parent lag = 1/30
+120 FPS → parent lag = 1/60
+
+新增特征：
+
+nr_raw_diff_native
+nr_raw_diff_parent
+nr_parent_motion_p90
+nr_parent_moving_pixel_fraction
+
+不要再固定使用 nr_raw_diff_1_60 作为所有 FPS 的 motion gate。
+
+2. Cadence 必须以奇偶信息不对称为硬门槛
+
+建议在移动区域计算相邻帧差：
+
+d_t =
+\operatorname{mean}_{x\in M_t}
+|Y_{t+1}(x)-Y_t(x)|
+
+父尺度运动：
+
+p_t =
+\operatorname{mean}_{x}
+|Y_{t+2}(x)-Y_t(x)|
+
+然后计算：
+
+even median difference
+odd median difference
+phase asymmetry
+phase coherence
+moving duplicate fraction
+
+例如：
+
+A =
+\frac{|\operatorname{median}(d_{\text{even}})
+-\operatorname{median}(d_{\text{odd}})|}
+{\operatorname{median}(d_{\text{even}})
++\operatorname{median}(d_{\text{odd}})+\epsilon}
+
+Cadence Risk 只有在以下条件同时成立时才能大于零：
+
+parent-scale motion 足够大
+AND 奇偶相邻差明显不对称
+AND 不对称方向在多个窗口内稳定
+AND 某一相位缺少新的时序信息
+
+低 MCT、低 composition、低 cycle 只能作为辅助证据，不能作为主要证据。
+
+3. 增加 Phase Coherence
+
+真实战斗特效可能在局部产生奇偶差，但这种差异通常：
+
+-方向不稳定；
+-只出现在少量区域；
+-不同时间段相位会变化。
+
+插帧输出的原帧/生成帧差异通常在整段视频中保持同一个相位。
+
+应记录：
+
+phase_gap_signed
+phase_coherence
+phase_coverage
+dominant_phase
+
+例如：
+
+C =
+\frac{
+\left|\sum_i w_i\,g_i\right|
+}{
+\sum_i w_i|g_i|+\epsilon
+}
+
+其中 g_i 是带正负号的 phase gap。
+
+没有高 coherence 时，不允许触发严重 Cadence 惩罚。
+
+4. Cadence 应从全片低分辨率扫描估计
+
+不要再从 Risk-selected windows 估计全片 Cadence。
+
+建议在 Tier-1 低分辨率扫描中直接维护：
+
+native adjacent differences
+parent-lag differences
+even/odd phase statistics
+moving-pixel fractions
+scene ID
+
+风险窗口只用于：
+
+-生成 Issue；
+-输出 Heatmap；
+-做精细诊断。
+
+全局 Cadence 应从全片或每个场景的均匀序列统计。
+
+⸻
+
+五、暂时取消当前指数 Cadence 乘法
+
+当前：
+
+S = S_{\text{base}}\exp(-2.2R)
+
+当 R=0.93 时，倍率只有约 0.13。
+
+对于一个尚未完成真实视频标定的 NR Cadence 检测器，这个惩罚强度过于危险。
+
+推荐的短期输出
+
+在 Cadence v2 完成前：
+
+artifact_quality = 69.1
+cadence_integrity = diagnostic_only
+overall_score = artifact_quality
+
+报告显示两条独立轴：
+
+字段	含义
+Artifact Quality	画面、运动、技术和结构风险
+Cadence Integrity	有效新增帧和奇偶相位风险
+Final Quality	暂不提供或标记 uncalibrated
+
+更保守的替代方案是最多只允许 Cadence 扣 15 分：
+
+S_{\text{final}}
+=
+S_{\text{base}}
+\left(0.85+0.15\frac{S_{\text{cadence}}}{100}\right)
+
+但在完成真实视频标定前，分开报告比继续构造单一总分更诚实。
+
+⸻
+
+六、Phase Consistency 的具体整改
+
+当前原始与插帧的主要差异完全由 Phase 驱动，因此必须提高它的解释能力。
+
+增加 Two-phase Applicability
+
+先判断视频是否真的具有稳定的双相位结构：
+
+source_phase_likelihood
+phase_coherence
+phase_sharpness_direction
+phase_edge_direction
+
+只有当：
+
+source_phase_likelihood >= 0.7
+phase_coherence >= 0.6
+
+时，Phase Consistency 才进入总分。
+
+否则：
+
+phase_consistency = N/A
+phase_weight = 0
+
+真实 60 FPS 原始视频通常不应被强制解释为“原帧相位 + 生成帧相位”。
+
+提供可解释字段
+
+报告中增加：
+
+{
+  "phase": {
+    "applicable": true,
+    "phase_a_sharpness": 312.4,
+    "phase_b_sharpness": 205.7,
+    "sharpness_ratio": 0.66,
+    "phase_a_edge_density": 0.083,
+    "phase_b_edge_density": 0.061,
+    "coherence": 0.84,
+    "dominant_bad_phase": "B"
+  }
+}
+
+Issue Clip 应展示：
+
+phase A frame | phase B frame | difference/edge map
+
+而不是笼统地说“生成帧模糊”，因为 NR 模式实际上不知道哪一组一定是生成帧。
+
+⸻
+
+七、Motion Smoothness 对战斗特效的鲁棒性整改
+
+原始视频只有 37.3，说明当前 Motion 分数也明显偏低。
+
+战斗特效会导致：
+
+-粒子出现和消失；
+-透明叠加；
+-大面积闪光；
+-非刚体能量扩散；
+-遮挡和显露；
+-低纹理 Bloom；
+-光流估计失效。
+
+这些情况应先被判定为“光流证据不可靠”，而不是直接判定为运动不平滑。
+
+增加 Flow Reliability Gate
+
+每个窗口记录：
+
+flow_valid_fraction
+forward_backward_consistency
+photometric_support_fraction
+persistent_track_fraction
+effect_transient_fraction
+
+只有可靠区域进入：
+
+fold
+divergence
+curl
+acceleration
+jerk
+reversal
+
+若有效覆盖不足，例如：
+
+flow_valid_fraction < 0.25
+
+则：
+
+motion_smoothness = N/A 或低置信度
+
+而不是给出 37 分。
+
+区分运动错误和外观变化
+
+新增两类：
+
+trackable_motion_error
+appearance_change_uncertainty
+
+粒子、爆炸、闪光应主要增加 uncertainty，而不是直接增加 motion error。
+
+验收标准应是：
+
+真实 60 FPS 战斗视频：
+motion_smoothness ≥70
+或 flow coverage 不足时显示 N/A
+
+不能继续稳定输出 30～40 分。
+
+⸻
+
+八、UI/Text 分支需要增加可靠性门控
+
+两个视频都是约 27.8，说明 UI 分支没有提供比较价值。
+
+当前战斗特效可能被 UI detector 误认为：
+
+-屏幕固定边缘；
+-文字笔画；
+-持久组件；
+-静态 HUD。
+
+建议新增：
+
+ui_detection_confidence
+ui_persistence_seconds
+ui_screen_motion
+ui_component_area_ratio
+ui_transient_rejection
+
+只有满足：
+
+长时间屏幕坐标固定
+组件面积合理
+跨帧持续存在
+不属于全屏闪光或粒子
+
+才进入 UI 分数。
+
+动态但合法的内容，例如：
+
+-技能冷却数字；
+-血条变化；
+-伤害数字；
+-技能亮起；
+-状态图标变化；
+
+不能仅凭变化就判为不稳定，应区分：
+
+内容更新
+几何漂移
+轮廓破损
+双重曝光
+
+⸻
+
+九、Issues 和 Affected 比例需要重写
+
+原始视频：
+
+22 issues
+52.3% affected
+
+插帧视频：
+
+19 issues
+77.8% affected
+
+这两个结果明显不可信。
+
+当前同类 Issue 在间隔不超过 0.5 秒时会被聚合成一个长区间，然后 Affected 直接计算这些合并区间的并集。
+
+这会把未实际采样和未确认的问题间隙也算成 affected。
+
+正确设计
+
+Issue Card 的合并区间和受影响时长必须分开。
+
+每个 Issue 保存：
+
+{
+  "display_span": [10.0, 12.5],
+  "support_spans": [
+    [10.02, 10.09],
+    [10.51, 10.58],
+    [12.31, 12.38]
+  ]
+}
+
+其中：
+
+* display_span 用于将相近问题合并成一张卡；
+* support_spans 才用于计算受影响时长；
+    -未采样的 0.4 秒间隙不能自动计入。
+
+更好的方案是使用 Tier-1 全片扫描估计 prevalence：
+
+sampled_issue_fraction
+estimated_affected_fraction
+confirmed_affected_seconds
+
+分开呈现。
+
+⸻
+
+十、Quality Level 需要拆分
+
+当前页面显示“严重问题”，容易被理解为整条视频质量严重不合格。
+
+应拆成：
+
+Global Quality Level
+Worst Local Issue Level
+
+例如：
+
+Global Quality：中等 / 未标定
+Worst Local Issue：严重
+
+一段 60 秒视频中存在一个严重局部 Issue，不等于整条视频是“严重问题”。
+
+⸻
+
+十一、针对这两条视频建立最小真实回归集
+
+这两条视频非常适合作为下一阶段负对照和差异对照。
+
+建议截取一段包含：
+
+-大量战斗特效；
+-角色运动；
+-镜头运动；
+
+* UI；
+    -文字；
+    -粒子和遮挡；
+
+长度约 10～20 秒的片段。
+
+构造以下版本：
+
+版本	目标
+True 60 FPS original	负对照
+30 FPS 下采样后重复帧升到 60	明确 Cadence collapse
+30→60 线性混合	模糊插帧
+当前模型 30→60 或 60→60 输出	实际候选
+原始 60 加压缩/模糊	技术质量对照
+
+Cadence 验收
+
+视频	目标
+True 60 original	risk ≤0.10
+Duplicate 30→60	risk ≥0.70
+Linear blend 30→60	risk 0.20～0.60
+好的插帧 60	risk ≤0.30
+
+其他验收
+
+原始视频 Affected ≤10%
+原始视频不得出现全局 Severe
+原始 Motion ≥70 或显示 N/A
+原始 UI ≥70 或显示 N/A
+插帧 Phase 应低于原始，但差异应能由 Phase A/B 证据解释
+
+⸻
+
+十二、当前最合适的评测方式
+
+如果两条 60 FPS 视频是同一内容、逐帧时间对齐，并且原始视频是真实 60 FPS Ground Truth，不应只运行两个独立 NR。
+
+应该运行：
+
+rr-vfiqa inspect \
+  --reference original_60.mp4 \
+  --candidate interpolated_60.mp4 \
+  --out runs/full_reference \
+  --flow-backend farneback \
+  --device cpu
+
+自动路由应进入 full-reference，直接比较对应帧。Full Reference 比两个独立 NR 更适合判断插帧帧是否正确。
+
+如果实际插帧输入是 30 FPS、输出是 60 FPS，则应该使用：
+
+rr-vfiqa inspect \
+  --reference source_30.mp4 \
+  --candidate interpolated_60.mp4 \
+  --out runs/endpoint
+
+此时进入 Endpoint 模式。
+
+NR 更适合：
+
+只有一条视频时的风险筛查
+
+不适合作为有 Ground Truth 或端点参考时的主要模型评价手段。项目文档也明确说明三种模式使用不同标尺，不能跨模式或脱离输入契约解释。
+
+⸻
+
+最终优先级
+
+P0：立即修正
+
+1. 60 FPS Cadence parent lag 改为 1/30。
+2. 低 MCT/comp/cycle 不再独立构成 Cadence Risk。
+3. Cadence 增加 phase asymmetry 和 phase coherence 硬门控。
+4. Cadence 从全片均匀扫描统计，不使用风险窗口分布。
+5. 暂停 Cadence 指数乘法，分别报告 Artifact Quality 和 Cadence。
+6. Phase 增加双相位适用性判断。
+
+P1：真实战斗视频鲁棒性
+
+1. Motion 增加 Flow Reliability Gate。
+2. 粒子、闪光和外观变化不直接作为运动错误。
+3. UI 增加检测置信度和动态内容区分。
+4. Affected 改为 support spans 或全片 prevalence。
+5. Global Quality 与 Worst Issue 分离。
+
+P2：效果验证
+
+1. 将这条原始战斗视频作为负对照。
+2. 建立 True 60、Duplicate 60、Blend 60、Model 60 梯度。
+3. 使用 FR 或 Endpoint 结果标定 NR Phase/Cadence。
+4. 达成原始视频 Cadence Risk ≤0.1 后，再恢复单一 Overall。
+
+⸻
+
+当前这两份报告最可靠的结论不是“8.8 对 8.0”，而是：
+
+两条视频在普通时序和运动指标上几乎相同；插帧视频主要出现了更明显的奇偶相位质量差异和少量技术质量下降。当前 Cadence、UI、Affected 和全局严重等级存在明显误判，必须先整改后才能用于模型质量门禁。

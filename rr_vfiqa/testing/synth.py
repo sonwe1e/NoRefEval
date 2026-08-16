@@ -182,38 +182,6 @@ def render_scene(n_frames: int = 480, w: int = 640, h: int = 360, fps: int = 120
     return (frames, meta) if return_meta else frames
 
 
-def render_streaming(source_path: str | Path, candidate_path: str | Path,
-                     n_frames: int = 7200, w: int = 1920, h: int = 1080,
-                     fps: int = 120, seed: int = 7,
-                     odd_defect=None) -> None:
-    """Write source (even frames, fps/2) and candidate (all frames, fps)
-    directly to disk — constant memory at any resolution/duration.
-
-    ``odd_defect(t, frame, last_even)`` may mutate/replace each odd frame in
-    place to inject stateless defects (blur, freeze-copy of last_even, …).
-    """
-    source_path, candidate_path = Path(source_path), Path(candidate_path)
-    source_path.parent.mkdir(parents=True, exist_ok=True)
-    candidate_path.parent.mkdir(parents=True, exist_ok=True)
-    with av.open(str(candidate_path), "w") as oc, av.open(str(source_path), "w") as osrc:
-        sc = oc.add_stream("h264", rate=fps)
-        ss = osrc.add_stream("h264", rate=fps // 2)
-        for st in (sc, ss):
-            st.width, st.height, st.pix_fmt = w, h, "yuv420p"
-            st.options = {"crf": "18", "preset": "medium"}
-        last_even = None
-        for t, frame, _rot, _c, _p, _card in _iter_frames(n_frames, w, h, seed):
-            if t % 2 == 0:
-                last_even = frame.copy()
-                _mux(osrc, ss, frame)
-            elif odd_defect is not None:
-                frame = odd_defect(t, frame, last_even)
-            _mux(oc, sc, frame)
-        for st, out in ((sc, oc), (ss, osrc)):
-            for packet in st.encode():
-                out.mux(packet)
-
-
 def _mux(container, stream, frame_rgb: np.ndarray) -> None:
     frame = av.VideoFrame.from_ndarray(frame_rgb, format="rgb24")
     for packet in stream.encode(frame):

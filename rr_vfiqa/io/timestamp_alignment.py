@@ -14,6 +14,8 @@ from .video_reader import VideoReader
 
 _VERIFY_WIDTH = 320
 _N_VERIFY = 12
+_DESCRIPTOR_WIDTH = 96
+_MATCH_RADIUS = 4
 
 
 def _y_l1(a: np.ndarray, b: np.ndarray) -> float:
@@ -31,7 +33,6 @@ def detect_offset(source_meta: VideoMeta, cand_meta: VideoMeta) -> tuple[int, fl
 
     Returns (offset, mean_abs_pts_error_seconds).
     """
-    ratio = cand_meta.fps / max(source_meta.fps, 1e-6)
     best_off, best_err = 0, float("inf")
     n_pairs = min(source_meta.n_frames, cand_meta.n_frames // 2) - 1
     if n_pairs < 4:
@@ -50,6 +51,77 @@ def detect_offset(source_meta: VideoMeta, cand_meta: VideoMeta) -> tuple[int, fl
         if err < best_err:
             best_err, best_off = err, off
     return best_off, best_err
+
+
+def _frame_descriptors(reader: VideoReader) -> np.ndarray:
+    """One-pass low-resolution luma descriptors for local anchor matching.
+
+    Delegates to the process-level memo so routing and the pipeline share a
+    single full decode per video.
+    """
+    from .video_reader import frame_descriptors
+
+    return frame_descriptors(reader, width=_DESCRIPTOR_WIDTH)
+
+
+def _monotonic_anchor_match(
+        src_desc: np.ndarray, cand_desc: np.ndarray,
+        src_pts: np.ndarray, cand_pts: np.ndarray,
+        max_step: int = 4,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Constrained-DTW match of each source anchor to a candidate frame.
+
+    Candidate states are restricted to a small PTS neighbourhood. Transitions
+    of 1/2/3 frames recover a dropped/normal/duplicated frame locally; a wider
+    step is retained only so the caller can detect and invalidate that event.
+    """
+    n_src, n_cand = len(src_desc), len(cand_desc)
+    if n_src == 0 or n_cand == 0:
+        return np.zeros(0, np.int32), np.zeros(0, np.float32)
+    src_t = src_pts[:n_src] - src_pts[0]
+    cand_t = cand_pts[:n_cand] - cand_pts[0]
+    src_fps = 1.0 / max(float(np.median(np.diff(src_t))) if n_src > 1 else 1.0,
+                        1e-6)
+
+    states: list[dict[int, tuple[float, int, float]]] = []
+    for i in range(n_src):
+        nearest = int(np.clip(np.searchsorted(cand_t, src_t[i]), 0, n_cand - 1))
+        lo = max(0, nearest - _MATCH_RADIUS)
+        hi = min(n_cand, nearest + _MATCH_RADIUS + 1)
+        candidates = range(lo, hi)
+        cur: dict[int, tuple[float, int, float]] = {}
+        for k in candidates:
+            image_err = float(np.mean(np.abs(src_desc[i] - cand_desc[k])))
+            pts_frames = abs(float(cand_t[k] - src_t[i])) * src_fps
+            local_cost = image_err + 4.0 * pts_frames
+            if i == 0:
+                cur[k] = (local_cost, -1, image_err)
+                continue
+            best: tuple[float, int, float] | None = None
+            for pk, (prev_cost, _, _) in states[-1].items():
+                step = k - pk
+                if not (1 <= step <= max_step):
+                    continue
+                # Step 2 is the normal 60→120 cadence. Other steps are allowed
+                # to recover after a local event, but pay a small regularizer.
+                total = prev_cost + local_cost + 1.5 * abs(step - 2)
+                if best is None or total < best[0]:
+                    best = (total, pk, image_err)
+            if best is not None:
+                cur[k] = best
+        if not cur:
+            return np.zeros(0, np.int32), np.zeros(0, np.float32)
+        states.append(cur)
+
+    k = min(states[-1], key=lambda kk: states[-1][kk][0])
+    mapping = np.zeros(n_src, np.int32)
+    errors = np.zeros(n_src, np.float32)
+    for i in range(n_src - 1, -1, -1):
+        mapping[i] = k
+        _, prev, image_err = states[i][k]
+        errors[i] = image_err
+        k = prev
+    return mapping, errors
 
 
 def detect_scene_cuts(reader: VideoReader, width: int = 256,
@@ -103,7 +175,8 @@ def detect_scene_cuts(reader: VideoReader, width: int = 256,
 
 
 def build_alignment(cfg: EvalConfig, source: VideoReader, candidate: VideoReader,
-                    scene_cuts_cand: np.ndarray | None = None) -> Alignment:
+                    scene_cuts_cand: np.ndarray | None = None,
+                    cand_desc: np.ndarray | None = None) -> Alignment:
     sm, cm = source.meta, candidate.meta
     warnings: list[str] = []
 
@@ -123,14 +196,52 @@ def build_alignment(cfg: EvalConfig, source: VideoReader, candidate: VideoReader
     anchor_of = np.full(n_cand, -1, np.int32)
     pair_of = np.full(n_cand, -1, np.int32)
 
-    # Candidate frame 2i+offset -> source i ; odd neighbour -> pair i.
-    i_max = min(n_src - 1, (n_cand - 1 - offset) // 2)
-    for i in range(max(0, i_max + 1)):
-        k = 2 * i + offset
-        if 0 <= k < n_cand:
-            anchor_of[k] = i
-        if 0 <= k + 1 < n_cand and i + 1 < n_src:
-            pair_of[k + 1] = i
+    # Local monotonic anchor matching recovers after isolated drops/duplicates
+    # instead of applying one global phase offset to the rest of the video.
+    src_desc = _frame_descriptors(source)
+    if cand_desc is None:
+        cand_desc = _frame_descriptors(candidate)
+    mapping, match_errs = _monotonic_anchor_match(
+        src_desc, cand_desc, sm.pts_seconds, cm.pts_seconds)
+    events: list[dict[str, int | str]] = []
+    reliable = len(mapping) == n_src
+    if reliable:
+        offset = int(mapping[0])
+        for i, k in enumerate(mapping):
+            anchor_of[int(k)] = i
+        for i, (ka, kb) in enumerate(zip(mapping[:-1], mapping[1:])):
+            gap = int(kb - ka)
+            if gap == 2:
+                pair_of[int(ka) + 1] = i
+            else:
+                kind = "drop" if gap == 1 else "duplicate_or_gap"
+                events.append({
+                    "source_pair": i,
+                    "candidate_from": int(ka),
+                    "candidate_to": int(kb),
+                    "candidate_gap": gap,
+                    "type": kind,
+                })
+        max_events = max(2, int(round(0.05 * max(n_src - 1, 1))))
+        median_match = float(np.median(match_errs)) if len(match_errs) else float("inf")
+        reliable = len(events) <= max_events and median_match <= 20.0
+    else:
+        # Fail-closed fallback mapping is retained only for diagnostics; the
+        # caller must not publish a quality score when `reliable` is false.
+        i_max = min(n_src - 1, (n_cand - 1 - offset) // 2)
+        for i in range(max(0, i_max + 1)):
+            k = 2 * i + offset
+            if 0 <= k < n_cand:
+                anchor_of[k] = i
+            if 0 <= k + 1 < n_cand and i + 1 < n_src:
+                pair_of[k + 1] = i
+    if events:
+        warnings.append(
+            f"local alignment recovered {len(events)} drop/duplicate event(s); "
+            "affected source pairs were excluded")
+    if not reliable:
+        warnings.append(
+            "local monotonic alignment is unreliable; evaluation must fail closed")
 
     if offset < 0:
         warnings.append(f"detected negative first-anchor offset {offset}: candidate "
@@ -183,4 +294,6 @@ def build_alignment(cfg: EvalConfig, source: VideoReader, candidate: VideoReader
         anchor_error=anchor_err,
         scene_cuts=scene_pairs,
         warnings=warnings,
+        events=events,
+        reliable=reliable,
     )

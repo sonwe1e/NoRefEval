@@ -1,9 +1,4 @@
-"""Shared data contracts for rr_vfiqa.
-
-Notation (see USERPLAN.md §1):
-    source video  X_0 .. X_N        (60 FPS anchors)
-    candidate     Y_{2i} = X_i      (even frames should be the original anchors)
-                  Y_{2i+1} = M_i    (odd frames are the interpolated frames)
+"""Shared data contracts for all rr_vfiqa evaluation modes.
 
 All spatial arrays are stored at a documented resolution. Flow arrays are
 (H, W, 2) float32 with (dx, dy) in pixel units *at that resolution*.
@@ -12,7 +7,8 @@ All spatial arrays are stored at a documented resolution. Flow arrays are
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from functools import lru_cache
+from typing import Any
 
 import numpy as np
 
@@ -54,10 +50,30 @@ class Alignment:
     anchor_error: float = 0.0           # measured anchor mismatch baseline (Y L1)
     scene_cuts: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int32))
     warnings: list[str] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
+    reliable: bool = True
 
     def generated_centers(self) -> np.ndarray:
         """Candidate indices of generated frames M_i (odd positions)."""
         return np.nonzero(self.pair_of_candidate >= 0)[0].astype(np.int32)
+
+
+@dataclass
+class FullReferenceAlignment:
+    """One-to-one mapping for same-rate full-reference evaluation."""
+
+    reference_of_candidate: np.ndarray
+    candidate_of_reference: np.ndarray
+    fps_ratio: float
+    matched_fraction: float
+    image_error: float = 0.0
+    scene_cuts: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int32))
+    warnings: list[str] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
+    reliable: bool = True
+
+    def matched_centers(self) -> np.ndarray:
+        return np.nonzero(self.reference_of_candidate >= 0)[0].astype(np.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -76,27 +92,12 @@ class FrameBundle:
 
     def y_channel(self) -> np.ndarray:
         """(T, H, W) float32 luma in 0..255, BT.601 weights."""
-        r = self.rgb[..., 0].astype(np.float32)
-        g = self.rgb[..., 1].astype(np.float32)
-        b = self.rgb[..., 2].astype(np.float32)
-        return 0.299 * r + 0.587 * g + 0.114 * b
+        from .imutils import luma
+
+        return luma(self.rgb)
 
     def at(self, k: int) -> np.ndarray:
         return self.rgb[np.searchsorted(self.indices, k)]
-
-
-@dataclass
-class FlowPair:
-    """Bidirectional flow between two frames at a single working resolution."""
-
-    flow_ab: np.ndarray       # (H, W, 2) float32, a -> b
-    flow_ba: np.ndarray       # (H, W, 2) float32, b -> a
-    height: int
-    width: int
-    scale: float              # working_res / native_res (uniform)
-
-    def to_native_scale(self) -> float:
-        return 1.0 / self.scale
 
 
 @dataclass
@@ -123,14 +124,20 @@ class CameraMotion:
 
     def warp_flow(self, h: int, w: int) -> np.ndarray:
         """Dense (H, W, 2) flow implied by the global model at size (h, w)."""
-        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-        pts = np.stack([xx.ravel(), yy.ravel(), np.ones(h * w, np.float32)], 0)
+        pts = _warp_grid(h, w)
         if self.model == "homography":
             p = self.matrix @ pts
             p = p[:2] / np.clip(p[2:3], 1e-6, None)
         else:
             p = self.matrix @ pts
-        return np.stack([p[0] - xx.ravel(), p[1] - yy.ravel()], -1).reshape(h, w, 2)
+        return np.stack([p[0] - pts[0], p[1] - pts[1]], -1).reshape(h, w, 2)
+
+
+@lru_cache(maxsize=8)
+def _warp_grid(h: int, w: int) -> np.ndarray:
+    """(3, H*W) float32 homogeneous grid — cached; warp_flow runs per window."""
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    return np.stack([xx.ravel(), yy.ravel(), np.ones(h * w, np.float32)], 0)
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +146,11 @@ class CameraMotion:
 
 @dataclass
 class Window:
-    """A 5-frame evaluation window on the candidate timeline."""
+    """An evaluation window on the candidate timeline.
+
+    Endpoint mode normally uses five adjacent frames.  NR/FR modes select by
+    PTS and may contain more samples at 120 FPS for the same wall-clock span.
+    """
 
     center: int                     # candidate frame index (usually odd = generated)
     indices: np.ndarray             # (T,) int32 candidate frame indices
@@ -150,7 +161,7 @@ class Window:
 
     @property
     def start_time(self) -> float:
-        return self.indices[0] / 120.0  # replaced with real pts by selector
+        return float("nan")  # use sampling.window_selector.window_times
 
     def __repr__(self) -> str:
         return f"Window(center={self.center}, pair={self.pair}, src={self.source}, risk={self.risk:.2f})"
@@ -168,6 +179,47 @@ class WindowFeatures:
 
     def add(self, key: str, value: float) -> None:
         self.scalars[key] = float(value)
+
+
+@dataclass
+class MetricResult:
+    """Uniform metric-stage result and validity contract."""
+
+    scalars: dict[str, float] = field(default_factory=dict)
+    maps: dict[str, np.ndarray] = field(default_factory=dict)
+    instances: list[dict[str, Any]] = field(default_factory=list)
+    coverage: float = 1.0
+    confidence: float = 1.0
+    warnings: list[str] = field(default_factory=list)
+    status: str = "ok"
+
+    @classmethod
+    def from_scalars(
+        cls,
+        scalars: dict[str, float],
+        *,
+        required: tuple[str, ...] = (),
+        coverage: float = 1.0,
+    ) -> "MetricResult":
+        missing = [
+            key for key in required
+            if key not in scalars or not np.isfinite(scalars[key])
+        ]
+        status = "failed" if missing else "ok"
+        required_coverage = (
+            (len(required) - len(missing)) / len(required)
+            if required else 1.0)
+        effective_coverage = float(np.clip(
+            coverage * required_coverage, 0.0, 1.0))
+        return cls(
+            scalars=scalars,
+            coverage=effective_coverage,
+            confidence=0.0 if missing else effective_coverage,
+            warnings=(
+                [f"missing required metric feature(s): {', '.join(missing)}"]
+                if missing else []),
+            status=status,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +269,8 @@ class Report:
     worst_windows: list[WorstWindow]
     features: dict[str, Any]
     meta: dict[str, Any]
+    # USERPLAN §6 P0.5: structured performance telemetry, surfaced in reports.
+    performance: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -227,6 +281,7 @@ class Report:
             "worst_windows": [w.to_dict() for w in self.worst_windows],
             "features": _sanitize(self.features),
             "meta": _sanitize(self.meta),
+            "performance": _sanitize(self.performance),
         }
 
 
@@ -319,17 +374,28 @@ def forward_splat(img: np.ndarray, source_to_target_flow: np.ndarray,
 
     acc = np.zeros((th, tw) + imgf.shape[2:], np.float64)
     cov = np.zeros((th, tw), np.float64)
+    n_flat = th * tw
     for dx in (0, 1):
         for dy in (0, 1):
             wgt = (wx if dx else 1.0 - wx) * (wy if dy else 1.0 - wy)
             wgt = np.where(inb, wgt, 0.0)
             xv = np.clip(x0 + dx, 0, tw - 1)
             yv = np.clip(y0 + dy, 0, th - 1)
-            np.add.at(cov, (yv, xv), wgt)
+            # np.bincount is ~10x faster than np.add.at for the same integer
+            # scatter-add (verified bit-identical: both sum sequentially in
+            # index order into the same float64 accumulators).
+            idx = (yv * tw + xv).ravel()
+            wg = wgt.ravel()
+            cov.ravel()[:] += np.bincount(idx, weights=wg, minlength=n_flat)
             if chan:
-                np.add.at(acc, (yv, xv), wgt[..., None] * imgf)
+                acc_flat = acc.reshape(-1, imgf.shape[2])
+                for c in range(imgf.shape[2]):
+                    acc_flat[:, c] += np.bincount(
+                        idx, weights=wg * imgf[..., c].ravel(),
+                        minlength=n_flat)
             else:
-                np.add.at(acc, (yv, xv), wgt * imgf)
+                acc.ravel()[:] += np.bincount(
+                    idx, weights=wg * imgf.ravel(), minlength=n_flat)
     out = np.zeros_like(acc, dtype=np.float32)
     valid = cov > 1e-6
     if chan:

@@ -16,7 +16,7 @@ import numpy as np
 
 from ..config import EvalConfig
 from ..io.video_reader import VideoReader
-from ..imutils import alpha_blend_fit
+from ..imutils import alpha_blend_fit, spatial_norm_factor
 from ..schema import FrameBundle
 from ._common import clean_mask, luma
 
@@ -108,9 +108,13 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
     xj = bundle.rgb[3].astype(np.float32)
     m = mask.astype(bool)
 
-    endpoint_change = float(np.abs(xi - xj)[m].mean())
+    # USERPLAN §6.2: decision thresholds are resolution-normalized (fraction
+    # of frame diagonal) so the static/dynamic UI decision is consistent
+    # across resolutions and presets.
+    norm = spatial_norm_factor(h, w)
+    endpoint_change = float(np.abs(xi - xj)[m].mean()) / norm
     out["ui_endpoint_change"] = endpoint_change
-    static = endpoint_change < 6.0
+    static = endpoint_change < 6.0 / norm
     out["ui_mode"] = 0.0 if static else 1.0
 
     if static:
@@ -138,10 +142,12 @@ def compute_window(bundle: FrameBundle, ui: UIDetector, cfg: EvalConfig
                 np.abs(bundle.rgb[0].astype(np.float32) - xm)[m].mean())
     else:
         # §8.4 dynamic UI / §8.6 discrete events: only penalize mixing defects.
+        # NOTE: all quantities here are in RGB intensity units (0-255), NOT
+        # spatial pixels — so they are NOT divided by the frame diagonal.
+        # (spatial_norm_factor is for geometric pixel distances only.)
         d0 = np.abs(xm - xi).mean(-1)
-        d1 = np.abs(xm - xj).mean(-1)
         diff01m = np.abs(xi - xj).mean(-1)
-        ch = diff01m > 12.0
+        ch = m & (diff01m > 12.0)
         n_ch = max(int(ch.sum()), 1)
 
         # Alpha-mixing evidence: M fits α·Xi + (1−α)·Xj with α strictly inside

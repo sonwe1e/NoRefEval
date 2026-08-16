@@ -59,8 +59,115 @@ def compute_global(scan: CheapScan) -> dict[str, float]:
     return out
 
 
-def _sharpness_series(bundle: FrameBundle) -> np.ndarray:
-    y = bundle.y_channel()
+# ------------------------------------------------------------------ v2 (§6)
+# Two-phase applicability: a Phase-Consistency subscore only enters the total
+# when the video genuinely has a stable two-phase structure.  A true 60 FPS
+# combat clip has local, direction-unstable sharpness/edge flicker; an
+# interpolated clip has a global, phase-locked blur on one phase.
+_BLOCK_FRAMES = 16
+_PHASE_LIKELIHOOD_SCALE = 0.20   # |sharp gap| above this saturates likelihood
+_PHASE_LIKELIHOOD_MIN = 0.7      # USERPLAN §6
+_PHASE_COHERENCE_MIN = 0.6       # USERPLAN §6
+
+
+def _signed_phase_gap(values: np.ndarray, k: np.ndarray) -> float:
+    """Signed even/odd median gap in [-1, 1]; +1 => odd phase larger."""
+    even = values[k % 2 == 0]
+    odd = values[k % 2 == 1]
+    if len(even) < 2 or len(odd) < 2:
+        return float("nan")
+    me, mo = float(np.median(even)), float(np.median(odd))
+    return float((mo - me) / (me + mo + 1e-6))
+
+
+def _block_signed_gaps(values: np.ndarray, k: np.ndarray) -> list[float]:
+    out: list[float] = []
+    n = len(k)
+    for s in range(0, n, _BLOCK_FRAMES):
+        sl = slice(s, min(s + _BLOCK_FRAMES, n))
+        g = _signed_phase_gap(values[sl], k[sl])
+        if np.isfinite(g):
+            out.append(g)
+    return out
+
+
+def _coherence(gaps: list[float]) -> float:
+    if not gaps:
+        return float("nan")
+    w = np.abs(gaps)
+    return float(abs(np.sum(gaps)) / (np.sum(w) + 1e-6))
+
+
+def scan_phase_applicability(scan: CheapScan) -> dict:
+    """Decide whether a two-phase interpretation is applicable (USERPLAN §6).
+
+    ``source_phase_likelihood`` and ``phase_coherence`` come from the *sharpness*
+    and *edge-density* parity structure of the full-film scan, not motion: a
+    blended interpolation blurs one phase coherently (high likelihood, high
+    coherence) while combat effects flicker with an unstable direction (low
+    coherence).  Returns the likelihood, coherence and the interpretable
+    per-phase sharpness / edge-density fields the report should surface.
+    """
+    k = np.asarray(scan.indices, np.int64)
+    sharp = np.asarray(scan.sharpness, np.float64)
+    edge = np.asarray(scan.edge_frac, np.float64)
+
+    sharp_gaps = _block_signed_gaps(sharp, k)
+    edge_gaps = _block_signed_gaps(edge, k)
+
+    sharp_mag = float(np.median(np.abs(sharp_gaps))) if sharp_gaps else float("nan")
+    edge_mag = float(np.median(np.abs(edge_gaps))) if edge_gaps else float("nan")
+    # Likelihood of a genuine two-phase structure: how strong the coherent
+    # sharpness/edge alternation is, whichever signal is clearer.
+    mag = float(np.nanmax([sharp_mag, edge_mag])) if np.isfinite(
+        sharp_mag) or np.isfinite(edge_mag) else 0.0
+    likelihood = float(np.clip(mag / _PHASE_LIKELIHOOD_SCALE, 0.0, 1.0))
+    # Coherence is only meaningful for signals that actually alternate; a
+    # constant signal (zero gaps) would dilute it to ~0.5.
+    cohs: list[float] = []
+    if np.isfinite(sharp_mag) and sharp_mag > 1e-3:
+        cohs.append(_coherence(sharp_gaps))
+    if np.isfinite(edge_mag) and edge_mag > 1e-3:
+        cohs.append(_coherence(edge_gaps))
+    coherence = float(np.mean(cohs)) if cohs else float("nan")
+
+    applicable = bool(
+        np.isfinite(likelihood) and np.isfinite(coherence)
+        and likelihood >= _PHASE_LIKELIHOOD_MIN
+        and coherence >= _PHASE_COHERENCE_MIN)
+
+    # Interpretable fields: global sharpness / edge density per phase.
+    even_sel = (k % 2 == 0)
+    sharp_e = float(np.median(sharp[even_sel])) if even_sel.any() else float("nan")
+    sharp_o = float(np.median(sharp[~even_sel])) if (~even_sel).any() else float("nan")
+    edge_e = float(np.median(edge[even_sel])) if even_sel.any() else float("nan")
+    edge_o = float(np.median(edge[~even_sel])) if (~even_sel).any() else float("nan")
+
+    def _dom(se, so):
+        if not np.isfinite(se) or not np.isfinite(so):
+            return "unknown"
+        if se < so:
+            return "A"          # even phase is the blurry one
+        if so < se:
+            return "B"
+        return "none"
+
+    return {
+        "applicable": applicable,
+        "source_phase_likelihood": round(likelihood, 4),
+        "phase_coherence": round(coherence, 4),
+        "phase_a_sharpness": round(sharp_e, 2) if np.isfinite(sharp_e) else None,
+        "phase_b_sharpness": round(sharp_o, 2) if np.isfinite(sharp_o) else None,
+        "sharpness_ratio": (round(min(sharp_e, sharp_o) / max(sharp_e, sharp_o), 4)
+                            if np.isfinite(sharp_e) and np.isfinite(sharp_o)
+                            and max(sharp_e, sharp_o) > 0 else None),
+        "phase_a_edge_density": round(edge_e, 4) if np.isfinite(edge_e) else None,
+        "phase_b_edge_density": round(edge_o, 4) if np.isfinite(edge_o) else None,
+        "dominant_bad_phase": _dom(sharp_e, sharp_o),
+    }
+
+
+def _sharpness_series(y: np.ndarray) -> np.ndarray:
     return np.asarray([float(cv2.Laplacian(y[t].astype(np.float32), cv2.CV_32F).var())
                        for t in range(y.shape[0])])
 
@@ -69,8 +176,11 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
                    ) -> dict[str, float]:
     out: dict[str, float] = {}
 
+    # One luma pass for the whole window (y_channel per call was 4x/window).
+    y = bundle.y_channel()
+
     # Sharpness alternation inside the 5-frame window.
-    sh = _sharpness_series(bundle)
+    sh = _sharpness_series(y)
     med = np.median(sh) + 1e-6
     k = bundle.indices.astype(np.int64)
     out["parity_window_sharp_gap"] = float(
@@ -81,8 +191,8 @@ def compute_window(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig
     # subsequence (anchors pos 1↔3) should be at least as stable as the
     # generated subsequence (pos 0↔2 and 2↔4).
     def mc_diff(a: int, b: int) -> float:
-        ya = bundle.y_channel()[a]
-        yb = bundle.y_channel()[b]
+        ya = y[a]
+        yb = y[b]
         f_ab, f_ba = flow.pair(a, b)
         # Resample b onto a's grid: target a, source b, so the target→source
         # flow is f_ab (a→b) itself.

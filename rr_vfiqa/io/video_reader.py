@@ -23,6 +23,49 @@ def _content_hash(path: str) -> str:
     return hashlib.sha1(key.encode()).hexdigest()[:16]
 
 
+# Process-level memo of per-frame 16x9 luma descriptors, keyed like the
+# content hash (path | size | mtime_ns) plus the decode width — alignment is
+# built more than once per video in one process (mode routing probes it, the
+# pipeline builds it again) and every pass decodes the FULL video even though
+# only the tiny descriptors are kept.  Bounded; cleared wholesale when full.
+_DESCRIPTOR_CACHE: dict[tuple[str, int, int, int], np.ndarray] = {}
+_DESCRIPTOR_CACHE_MAX = 8
+
+
+def frame_descriptors(reader: "VideoReader", width: int = 96) -> np.ndarray:
+    """One-pass (N, 9, 16) float32 luma descriptors, memoized per file.
+
+    Identical to decoding with reader.iter_frames(width=width) and
+    downscaling each gray frame to 16x9 (INTER_AREA).  Only file-backed paths
+    are cached; anything else (pipes/urls) is decoded without memoization.
+    """
+    try:
+        st = os.stat(reader.path)
+        is_file = os.path.isfile(reader.path)
+    except OSError:
+        is_file = False
+        st = None
+    key = None
+    if is_file and st is not None:
+        key = (os.path.abspath(reader.path), st.st_size,
+               int(st.st_mtime_ns), int(width))
+        hit = _DESCRIPTOR_CACHE.get(key)
+        if hit is not None:
+            return hit
+
+    desc: list[np.ndarray] = []
+    for _, rgb in reader.iter_frames(width=width):
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        desc.append(cv2.resize(gray, (16, 9), interpolation=cv2.INTER_AREA)
+                    .astype(np.float32))
+    out = np.stack(desc) if desc else np.zeros((0, 9, 16), np.float32)
+    if key is not None:
+        if len(_DESCRIPTOR_CACHE) >= _DESCRIPTOR_CACHE_MAX:
+            _DESCRIPTOR_CACHE.clear()
+        _DESCRIPTOR_CACHE[key] = out
+    return out
+
+
 class VideoReader:
     """Random + sequential frame access with PTS. Frames are RGB uint8."""
 

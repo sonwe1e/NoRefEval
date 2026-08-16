@@ -3,7 +3,7 @@ import pytest
 
 from rr_vfiqa.fusion.feature_normalizer import normalize_error
 from rr_vfiqa.fusion.score_schema import aggregate_errors, compute_scores
-from rr_vfiqa.config import PRESETS, EvalConfig
+from rr_vfiqa.config import EvalConfig
 
 
 def test_normalize_forward_monotone():

@@ -1,0 +1,700 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "evidence_kind": "synthetic_defect_localization",
+    "scope": "synthetic_bootstrap",
+    "environment": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "python": "3.12.8",
+      "device": "cpu",
+      "packages": {
+        "rr-vfiqa": "0.1.0",
+        "numpy": "2.5.1",
+        "opencv-python-headless": "5.0.0.93",
+        "av": "18.0.0",
+        "torch": "not-installed",
+        "torchvision": "not-installed",
+        "scipy": "1.18.0",
+        "lightgbm": "not-installed"
+      }
+    },
+    "evaluation": {
+      "preset": "standard",
+      "flow_backend": {
+        "backend": "farneback",
+        "algorithm_version": "flow-contract-v2:opencv-5.0.0",
+        "weights_id": "farneback-params",
+        "weights_hash": "2a2177b4c4e2"
+      }
+    },
+    "dataset": {
+      "defects": [
+        "blur",
+        "ghost",
+        "freeze",
+        "rotation_tear",
+        "head_erase",
+        "pole_wrong_motion",
+        "sword_flicker",
+        "ui_drift",
+        "text_merge",
+        "shop_jump",
+        "card_freeze",
+        "disocc_fill"
+      ],
+      "n_frames": 160,
+      "width": 320,
+      "height": 192,
+      "seed": 7
+    },
+    "commit_sha": "bd456e84778720ec8d4aafe0dbd3249b17f52406",
+    "working_tree_dirty": true,
+    "tracked_diff_sha256": "64a001019c8fc3967cdd66e74561b132cf83095bdf31154fac9b991b14390fdd"
+  },
+  "per_defect": {
+    "blur": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "parity_flicker",
+        "structure_loss",
+        "temporal_instability"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9465,
+          "true_positive": false
+        },
+        {
+          "start": 0.6417,
+          "end": 0.675,
+          "types": [
+            "parity_flicker",
+            "motion_inconsistent",
+            "character_missing"
+          ],
+          "severity": 0.8986,
+          "confidence": 0.9465,
+          "true_positive": true
+        },
+        {
+          "start": 1.1917,
+          "end": 1.225,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "ui_unstable",
+            "thin_object_stick"
+          ],
+          "severity": 0.7246,
+          "confidence": 0.9465,
+          "true_positive": false
+        }
+      ]
+    },
+    "ghost": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "parity_flicker",
+        "temporal_instability",
+        "transition_ghost"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9699,
+          "true_positive": false
+        },
+        {
+          "start": 0.6583,
+          "end": 0.6917,
+          "types": [
+            "card_flip_error",
+            "freeze_copy",
+            "ui_unstable",
+            "transition_ghost"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9699,
+          "true_positive": true
+        },
+        {
+          "start": 1.1917,
+          "end": 1.225,
+          "types": [
+            "card_flip_error",
+            "thin_object_stick",
+            "transition_ghost",
+            "ui_unstable"
+          ],
+          "severity": 0.7246,
+          "confidence": 0.9699,
+          "true_positive": false
+        }
+      ]
+    },
+    "freeze": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "freeze_copy",
+        "parity_flicker",
+        "temporal_instability"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9488,
+          "true_positive": false
+        },
+        {
+          "start": 0.775,
+          "end": 0.8083,
+          "types": [
+            "card_flip_error",
+            "freeze_copy",
+            "character_missing",
+            "ui_unstable"
+          ],
+          "severity": 0.8333,
+          "confidence": 0.9488,
+          "true_positive": true
+        },
+        {
+          "start": 1.2917,
+          "end": 1.325,
+          "types": [
+            "ui_unstable",
+            "motion_inconsistent",
+            "thin_object_stick"
+          ],
+          "severity": 0.5642,
+          "confidence": 0.9488,
+          "true_positive": false
+        }
+      ]
+    },
+    "rotation_tear": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": false,
+      "typed_windows_in_segment": 0,
+      "expected_types": [
+        "background_tear",
+        "motion_inconsistent",
+        "structure_loss"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9483,
+          "true_positive": false
+        },
+        {
+          "start": 0.775,
+          "end": 0.8083,
+          "types": [
+            "card_flip_error",
+            "freeze_copy",
+            "ui_unstable",
+            "character_missing"
+          ],
+          "severity": 0.8333,
+          "confidence": 0.9483,
+          "true_positive": false
+        },
+        {
+          "start": 1.2917,
+          "end": 1.325,
+          "types": [
+            "ui_unstable",
+            "motion_inconsistent",
+            "transition_ghost"
+          ],
+          "severity": 0.5804,
+          "confidence": 0.9483,
+          "true_positive": false
+        }
+      ]
+    },
+    "head_erase": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": false,
+      "typed_windows_in_segment": 0,
+      "expected_types": [
+        "character_missing"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9471,
+          "true_positive": false
+        },
+        {
+          "start": 0.775,
+          "end": 0.8083,
+          "types": [
+            "card_flip_error",
+            "motion_inconsistent",
+            "ui_unstable",
+            "transition_ghost"
+          ],
+          "severity": 0.8816,
+          "confidence": 0.9471,
+          "true_positive": false
+        },
+        {
+          "start": 1.2917,
+          "end": 1.325,
+          "types": [
+            "card_flip_error",
+            "ui_unstable",
+            "thin_object_stick",
+            "transition_ghost"
+          ],
+          "severity": 0.7246,
+          "confidence": 0.9471,
+          "true_positive": false
+        }
+      ]
+    },
+    "pole_wrong_motion": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": false,
+      "typed_windows_in_segment": 0,
+      "expected_types": [
+        "thin_object_stick"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9607,
+          "true_positive": false
+        },
+        {
+          "start": 0.775,
+          "end": 0.8083,
+          "types": [
+            "card_flip_error",
+            "ui_unstable",
+            "transition_ghost",
+            "motion_inconsistent"
+          ],
+          "severity": 0.875,
+          "confidence": 0.9607,
+          "true_positive": false
+        },
+        {
+          "start": 1.2917,
+          "end": 1.325,
+          "types": [
+            "card_flip_error",
+            "ui_unstable",
+            "transition_ghost",
+            "motion_inconsistent"
+          ],
+          "severity": 0.7246,
+          "confidence": 0.9607,
+          "true_positive": false
+        }
+      ]
+    },
+    "sword_flicker": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": false,
+      "typed_windows_in_segment": 0,
+      "expected_types": [
+        "temporal_instability",
+        "weapon_jitter"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9473,
+          "true_positive": false
+        },
+        {
+          "start": 0.775,
+          "end": 0.8083,
+          "types": [
+            "card_flip_error",
+            "ui_unstable",
+            "transition_ghost",
+            "thin_object_stick"
+          ],
+          "severity": 0.8748,
+          "confidence": 0.9473,
+          "true_positive": false
+        },
+        {
+          "start": 1.2917,
+          "end": 1.325,
+          "types": [
+            "thin_object_stick",
+            "ui_unstable",
+            "motion_inconsistent"
+          ],
+          "severity": 0.5816,
+          "confidence": 0.9473,
+          "true_positive": false
+        }
+      ]
+    },
+    "ui_drift": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "text_degraded",
+        "ui_unstable"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9471,
+          "true_positive": false
+        },
+        {
+          "start": 0.775,
+          "end": 0.8083,
+          "types": [
+            "card_flip_error",
+            "ui_unstable",
+            "thin_object_stick",
+            "transition_ghost"
+          ],
+          "severity": 0.796,
+          "confidence": 0.9471,
+          "true_positive": true
+        },
+        {
+          "start": 1.2917,
+          "end": 1.325,
+          "types": [
+            "card_flip_error",
+            "thin_object_stick",
+            "ui_unstable",
+            "transition_ghost"
+          ],
+          "severity": 0.7246,
+          "confidence": 0.9471,
+          "true_positive": false
+        }
+      ]
+    },
+    "text_merge": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "text_degraded",
+        "ui_unstable"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9613,
+          "true_positive": false
+        },
+        {
+          "start": 0.8583,
+          "end": 0.8917,
+          "types": [
+            "ui_unstable",
+            "motion_inconsistent",
+            "transition_ghost"
+          ],
+          "severity": 0.9375,
+          "confidence": 0.9613,
+          "true_positive": true
+        }
+      ]
+    },
+    "shop_jump": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "transition_ghost"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9473,
+          "true_positive": false
+        },
+        {
+          "start": 0.775,
+          "end": 0.8083,
+          "types": [
+            "card_flip_error",
+            "ui_unstable",
+            "transition_ghost",
+            "thin_object_stick"
+          ],
+          "severity": 0.8682,
+          "confidence": 0.9473,
+          "true_positive": true
+        },
+        {
+          "start": 1.2917,
+          "end": 1.325,
+          "types": [
+            "card_flip_error",
+            "ui_unstable",
+            "transition_ghost",
+            "motion_inconsistent"
+          ],
+          "severity": 0.7246,
+          "confidence": 0.9473,
+          "true_positive": false
+        }
+      ]
+    },
+    "card_freeze": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "card_flip_error"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9475,
+          "true_positive": false
+        },
+        {
+          "start": 0.775,
+          "end": 0.8083,
+          "types": [
+            "card_flip_error",
+            "motion_inconsistent",
+            "transition_ghost",
+            "thin_object_stick"
+          ],
+          "severity": 0.9006,
+          "confidence": 0.9475,
+          "true_positive": true
+        },
+        {
+          "start": 1.2917,
+          "end": 1.325,
+          "types": [
+            "ui_unstable",
+            "thin_object_stick",
+            "motion_inconsistent"
+          ],
+          "severity": 0.5766,
+          "confidence": 0.9475,
+          "true_positive": false
+        }
+      ]
+    },
+    "disocc_fill": {
+      "status": "evaluated",
+      "segment_s": [
+        0.675,
+        0.892
+      ],
+      "tolerance_s": 0.1333,
+      "detected": true,
+      "typed_windows_in_segment": 1,
+      "expected_types": [
+        "motion_inconsistent",
+        "structure_loss"
+      ],
+      "raw_fired_windows": [
+        {
+          "start": 0.0083,
+          "end": 0.0417,
+          "types": [
+            "card_flip_error",
+            "transition_ghost",
+            "character_missing",
+            "motion_inconsistent"
+          ],
+          "severity": 1.0,
+          "confidence": 0.9473,
+          "true_positive": false
+        },
+        {
+          "start": 0.775,
+          "end": 0.8083,
+          "types": [
+            "card_flip_error",
+            "ui_unstable",
+            "transition_ghost",
+            "motion_inconsistent"
+          ],
+          "severity": 0.8333,
+          "confidence": 0.9473,
+          "true_positive": true
+        },
+        {
+          "start": 1.2917,
+          "end": 1.325,
+          "types": [
+            "ui_unstable",
+            "thin_object_stick",
+            "motion_inconsistent"
+          ],
+          "severity": 0.5764,
+          "confidence": 0.9473,
+          "true_positive": false
+        }
+      ]
+    }
+  },
+  "recall": 0.6667,
+  "precision": 0.2286,
+  "f1": 0.3404,
+  "fired_windows": 35
+}

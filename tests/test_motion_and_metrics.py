@@ -206,6 +206,28 @@ def test_audit_tracker_degrades_to_klt():
     assert abs(tracks[-1, 0, 0] - 46) < 4
 
 
+def test_cotracker_video_layout_is_btchw():
+    from rr_vfiqa.models.tracker_backend import _cotracker_video_array
+
+    frames = [np.full((12, 20), t, np.uint8) for t in range(5)]
+    video = _cotracker_video_array(frames)
+    assert video.shape == (1, 5, 3, 12, 20)
+    assert np.all(video[0, 3] == 3)
+
+
+def test_audit_tracker_falls_back_on_constructor_error(monkeypatch):
+    import rr_vfiqa.models.tracker_backend as tracker_backend
+
+    class BrokenCoTracker:
+        def __init__(self, **_):
+            raise RuntimeError("checkpoint unavailable")
+
+    monkeypatch.setattr(tracker_backend, "CoTrackerBackend", BrokenCoTracker)
+    backend, note = tracker_backend.get_audit_tracker(device="cpu")
+    assert isinstance(backend, tracker_backend.KLTTracker)
+    assert "RuntimeError" in note and "fell back" in note
+
+
 def test_alpha_blend_fit():
     """Optimal-α fit: a real 50/50 mix is detected; hard switches and novel
     content are not (§3.5)."""
@@ -227,3 +249,53 @@ def test_alpha_blend_fit():
     novel = rng.integers(0, 255, (24, 32, 3), np.uint8)
     _, resid = alpha_blend_fit(xi, novel, xj)       # novel mid content
     assert np.median(resid) > 20.0                  # no affine mixture explains it
+
+
+def test_edge_structure_empty_texture_returns_nan_without_warning():
+    """Flat frames (no texture, no edges) must yield NaN edge ratios with no
+    empty-slice RuntimeWarning (regression: unguarded ``.mean()`` on empty
+    boolean masks)."""
+    import warnings
+
+    from rr_vfiqa.config import EvalConfig
+    from rr_vfiqa.metrics import edge_structure
+    from rr_vfiqa.schema import FrameBundle
+
+    h = w = 16
+    frames = np.full((5, h, w, 3), 128, np.uint8)   # flat: no texture, no edges
+    bundle = FrameBundle(
+        indices=np.arange(5, dtype=np.int32),
+        times=np.arange(5) / 60.0,
+        rgb=frames, width=w, height=h)
+
+    class _Edges:
+        edges = np.zeros((h, w), np.uint8)
+        grad_energy = np.zeros((h, w), np.float32)
+
+    class _Cache:
+        def get_edges(self, j):
+            return _Edges()
+
+    class _Flow:
+        def height(self):
+            return h
+
+        def width(self):
+            return w
+
+    class _Pair:
+        pair = 1
+        f_01 = np.zeros((h, w, 2), np.float32)
+        f_10 = np.zeros((h, w, 2), np.float32)
+
+    cfg = EvalConfig(source_video="r.mp4", candidate_video="c.mp4")
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        out = edge_structure.compute(bundle, _Flow(), _Cache(), _Pair(), cfg)
+
+    assert np.isnan(out["edge_recall"])
+    assert np.isnan(out["edge_precision"])
+    assert np.isnan(out["edge_ghost_frac"])
+    # The point of the regression: NaN by design, silence instead of warnings.
+    assert not any(issubclass(r.category, RuntimeWarning) for r in rec), [
+        str(r.message) for r in rec if issubclass(r.category, RuntimeWarning)]

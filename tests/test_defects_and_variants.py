@@ -1,10 +1,9 @@
 """Expanded coverage: per-defect responses, scene cuts, misalignment, drops,
 and a standard-preset end-to-end run exercising the region branches (§6)."""
 
-import numpy as np
 import pytest
 
-from rr_vfiqa import evaluate_vfi
+from rr_vfiqa import evaluate_no_reference, evaluate_vfi
 
 
 def _eval(source, candidate, cache_dir, flow_backend, preset="fast"):
@@ -12,6 +11,17 @@ def _eval(source, candidate, cache_dir, flow_backend, preset="fast"):
                         cache_dir=cache_dir, device="cuda",
                         flow_backend=flow_backend, out_dir=None,
                         export_clips=False)
+
+
+def _eval_nr(candidate, flow_backend):
+    return evaluate_no_reference(
+        str(candidate),
+        preset="fast",
+        device="cpu",
+        flow_backend=flow_backend,
+        vqa_backend="none",
+        export_clips=False,
+    )
 
 
 def test_standard_preset_end_to_end(videos, cache_dir, flow_backend):
@@ -62,6 +72,16 @@ def test_flicker_defects_lower_temporal_and_ui(defect_videos, cache_dir,
                     "parity_flicker", "temporal_instability"}
 
 
+def test_nr_ui_text_defect_corpus_lowers_ui_subscore(
+    defect_videos,
+    flow_backend,
+):
+    """The combined corpus validates its UI/text branch, not NR truth."""
+    good = _eval_nr(defect_videos["good"], flow_backend)
+    bad = _eval_nr(defect_videos["flicker"], flow_backend)
+    assert bad.scores["ui_text_stability"] < good.scores["ui_text_stability"]
+
+
 def test_proxy_branches_declared(videos, cache_dir, flow_backend):
     """The report must declare which branches are heuristic proxies (§P2)."""
     rep = _eval(videos["source"], videos["good"], cache_dir + "/proxy",
@@ -101,6 +121,8 @@ def test_dropped_frames_survive(videos, cache_dir, flow_backend, tmp_path):
     rep = _eval(videos["source"], dropped, cache_dir + "/drop", flow_backend)
     assert rep.meta["status"] in ("ok", "degraded")
     assert rep.confidence > 0
+    assert rep.meta["alignment"]["reliable"]
+    assert rep.meta["alignment"]["events"]
 
 
 def test_vfr_candidate_survives(videos, cache_dir, flow_backend, tmp_path):

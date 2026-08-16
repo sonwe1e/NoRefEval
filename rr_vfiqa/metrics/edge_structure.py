@@ -13,6 +13,7 @@ import numpy as np
 
 from ..cache.source_cache import SourceCache, SourcePairData
 from ..config import EvalConfig
+from ..imutils import spatial_norm_factor
 from ..schema import FrameBundle, forward_splat, resize_flow
 from .window_flows import WindowFlows
 
@@ -43,10 +44,12 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cache: SourceCache,
         interp = _cv2.INTER_NEAREST if arr.dtype == np.uint8 else _cv2.INTER_LINEAR
         return _cv2.resize(arr, (w, h), interpolation=interp)
 
-    e0 = _to_res(cache.get_edges(pair.pair).edges)
-    e1 = _to_res(cache.get_edges(pair.pair + 1).edges)
-    g0 = _to_res(cache.get_edges(pair.pair).grad_energy)
-    g1 = _to_res(cache.get_edges(pair.pair + 1).grad_energy)
+    se0 = cache.get_edges(pair.pair)
+    se1 = cache.get_edges(pair.pair + 1)
+    e0 = _to_res(se0.edges)
+    e1 = _to_res(se1.edges)
+    g0 = _to_res(se0.grad_energy)
+    g1 = _to_res(se1.grad_energy)
     f_01 = resize_flow(pair.f_01, h, w)
     f_10 = resize_flow(pair.f_10, h, w)
 
@@ -65,24 +68,31 @@ def compute(bundle: FrameBundle, flow: WindowFlows, cache: SourceCache,
 
     sup_tex = (support > 0) & tex
     em_tex = (em > 0) & tex
-    n_sup = max(sup_tex.sum(), 1)
-    n_em = max(em_tex.sum(), 1)
 
     # Half-warped support edges land at subpixel positions, so recall and
     # precision must be Chamfer-tolerant (±2 px), not exact-intersection.
     dist_to_em = cv2.distanceTransform((em == 0).astype(np.uint8), cv2.DIST_L2, 3)
     dist_to_sup = cv2.distanceTransform((support == 0).astype(np.uint8),
                                         cv2.DIST_L2, 3)
-    out["edge_recall"] = float((dist_to_em[sup_tex] <= 2.0).mean())
-    out["edge_precision"] = float((dist_to_sup[em_tex] <= 2.0).mean())
+    # Empty support/candidate sets make these ratios undefined; return NaN
+    # (fusion drops non-finite features) instead of np.mean's empty-slice
+    # RuntimeWarning — same values, no warning noise.
+    out["edge_recall"] = (float((dist_to_em[sup_tex] <= 2.0).mean())
+                          if sup_tex.any() else float("nan"))
+    out["edge_precision"] = (float((dist_to_sup[em_tex] <= 2.0).mean())
+                             if em_tex.any() else float("nan"))
     # Ghosting / double contour: candidate edges 2–4 px away from support —
     # a parallel second silhouette, not a match and not unrelated structure.
-    out["edge_ghost_frac"] = float(
+    out["edge_ghost_frac"] = (float(
         ((dist_to_sup[em_tex] > 2.0) & (dist_to_sup[em_tex] <= 4.0)).mean())
+        if em_tex.any() else float("nan"))
 
-    # --- chamfer distances -----------------------------------------------------
-    out["edge_chamfer_sup_to_em"] = float(dist_to_em[sup_tex].mean()) if sup_tex.any() else float("nan")
-    out["edge_chamfer_em_to_sup"] = float(dist_to_sup[em_tex].mean()) if em_tex.any() else float("nan")
+    # --- chamfer distances (USERPLAN §6.2: normalized by frame diagonal) ----
+    norm = spatial_norm_factor(h, w)
+    out["edge_chamfer_sup_to_em"] = (float(dist_to_em[sup_tex].mean()) / norm) \
+        if sup_tex.any() else float("nan")
+    out["edge_chamfer_em_to_sup"] = (float(dist_to_sup[em_tex].mean()) / norm) \
+        if em_tex.any() else float("nan")
 
     # --- per-instance aggregation (§7.2) ---------------------------------------
     n_lab, labels, stats, _ = cv2.connectedComponentsWithStats(support, connectivity=8)

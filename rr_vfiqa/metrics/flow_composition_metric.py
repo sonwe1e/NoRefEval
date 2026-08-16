@@ -13,7 +13,7 @@ import numpy as np
 from ..cache.source_cache import SourcePairData
 from ..config import EvalConfig
 from ..motion.flow_composition import bidirectional_composition
-from ..motion.flow_geometry import geometry_stats, residual_flow
+from ..motion.flow_geometry import geometry_stats, jacobian_det as _jacobian_det, residual_flow
 from ..schema import flow_magnitude, resize_flow
 from .window_flows import WindowFlows
 
@@ -21,6 +21,20 @@ from .window_flows import WindowFlows
 def compute(flow: WindowFlows, pair: SourcePairData, cfg: EvalConfig
             ) -> dict[str, float]:
     """Window positions: 1 = X_i, 2 = M_i, 3 = X_{i+1}."""
+    out, _ = compute_with_maps(flow, pair, cfg)
+    return out
+
+
+def compute_with_maps(flow: WindowFlows, pair: SourcePairData, cfg: EvalConfig
+                      ) -> tuple[dict[str, float], dict[str, np.ndarray]]:
+    """Like ``compute`` but also returns named dense error maps (USERPLAN P1).
+
+    Maps returned (all (H, W) float32 at the window/flow resolution):
+
+    * ``composition_error_map`` — max of forward/backward composition error;
+    * ``flow_fold_map`` — ``max(0, 1 - det(I + ∇F))`` of the camera-residual
+      candidate leg (folding/tearing).
+    """
     h, w = flow.height(), flow.width()
 
     # Cached source flows → window resolution.
@@ -65,7 +79,14 @@ def compute(flow: WindowFlows, pair: SourcePairData, cfg: EvalConfig
         stats["comp_leg_ratio"] = float(abs(ratio - 0.5))
     else:
         stats["comp_leg_ratio"] = 0.0
-    return stats
+
+    # Dense error maps (USERPLAN P1).
+    maps: dict[str, np.ndarray] = {
+        "composition_error_map": np.maximum(fwd_map, bwd_map).astype(np.float32),
+        "flow_fold_map": np.clip(
+            1.0 - _jacobian_det(res), 0.0, None).astype(np.float32),
+    }
+    return stats, maps
 
 
 def _resize_mask(mask: np.ndarray, h: int, w: int) -> np.ndarray:

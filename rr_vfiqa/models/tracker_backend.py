@@ -9,9 +9,34 @@ to KLT with a logged note.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import cv2
 import numpy as np
+
+_COTRACKER_URL = (
+    "https://huggingface.co/facebook/cotracker2/resolve/main/cotracker2.pth"
+)
+
+
+def _cotracker_video_array(frames_gray: list[np.ndarray]) -> np.ndarray:
+    """Build CoTracker's documented ``[B,T,C,H,W]`` video tensor layout."""
+    frames = np.stack(frames_gray)
+    return np.repeat(frames[None, :, None, :, :], 3, axis=2)
+
+
+def _resolve_checkpoint(torch, checkpoint: str | None) -> str:
+    """Return a real checkpoint path; never stringify a loaded state dict."""
+    if checkpoint is not None:
+        path = Path(checkpoint).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"CoTracker checkpoint not found: {path}")
+        return str(path)
+    path = Path(torch.hub.get_dir()) / "checkpoints" / "cotracker2.pth"
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.hub.download_url_to_file(_COTRACKER_URL, str(path), progress=False)
+    return str(path)
 
 
 class TrackerBackend(ABC):
@@ -72,15 +97,7 @@ class CoTrackerBackend(TrackerBackend):
 
         self._torch = torch
         self.device = device if torch.cuda.is_available() else "cpu"
-        if checkpoint is None:
-            # Fetch the default pretrained checkpoint on first use.
-            checkpoint = str(
-                torch.hub.load_state_dict_from_url(
-                    "https://huggingface.co/facebook/cotracker2/resolve/main/"
-                    "cotracker2.pth",
-                    map_location=self.device,
-                )
-            )
+        checkpoint = _resolve_checkpoint(torch, checkpoint)
         self._model = CoTrackerPredictor(checkpoint=checkpoint).to(self.device)
 
     def track(self, frames_gray: list[np.ndarray], points: np.ndarray
@@ -89,8 +106,8 @@ class CoTrackerBackend(TrackerBackend):
         T, N = len(frames_gray), len(points)
         if N == 0:
             return np.zeros((T, 0, 2), np.float32), np.zeros((T, 0), bool)
-        video = torch.from_numpy(np.stack(frames_gray))[None, None]       # (1,1,T,H,W)
-        video = video.repeat(1, 3, 1, 1, 1).float().to(self.device)
+        video = torch.from_numpy(_cotracker_video_array(frames_gray))
+        video = video.float().to(self.device)                             # (1,T,3,H,W)
         queries = torch.zeros(1, N, 3, device=self.device)                # t,x,y
         queries[0, :, 1:] = torch.from_numpy(points.reshape(N, 2)).to(self.device)
         with torch.no_grad():
@@ -115,7 +132,7 @@ def get_audit_tracker(device: str = "cuda") -> tuple[TrackerBackend, str]:
     """
     try:
         return CoTrackerBackend(device=device), "cotracker"
-    except ImportError as exc:
+    except Exception as exc:
         return KLTTracker(), f"cotracker unavailable ({exc.__class__.__name__}); " \
                              f"fell back to KLT — install with: pip install " \
                              f"\"rr-vfiqa[audit]\""

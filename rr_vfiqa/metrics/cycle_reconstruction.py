@@ -45,7 +45,9 @@ def _half_warp_blend(img_a: np.ndarray, img_b: np.ndarray,
 
 
 def _luma(rgb: np.ndarray) -> np.ndarray:
-    return (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2])
+    from ..imutils import luma
+
+    return luma(rgb)
 
 
 def compute(bundle: FrameBundle, flow: WindowFlows, cfg: EvalConfig,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def read_meta(cache_dir: Path) -> dict:

@@ -44,9 +44,12 @@ def geometry_stats(flow: np.ndarray, mask: np.ndarray | None = None
     if mask.sum() < 16:
         return {"flow_fold_frac": float("nan"), "flow_div_std": float("nan"),
                 "flow_curl_std": float("nan"), "flow_jdet_low_frac": float("nan")}
-    jdet = jacobian_det(flow)[mask]
-    div = divergence(flow)[mask]
-    cur = curl(flow)[mask]
+    # One gradient pass instead of one per statistic (jacobian/div/curl each
+    # used to recompute flow_derivatives). Same expressions, bit-identical.
+    d = flow_derivatives(flow)
+    jdet = ((1.0 + d["dudx"]) * (1.0 + d["dvdy"]) - d["dudy"] * d["dvdx"])[mask]
+    div = (d["dudx"] + d["dvdy"])[mask]
+    cur = (d["dvdx"] - d["dudy"])[mask]
     return {
         "flow_fold_frac": float(np.mean(jdet < 0.0)),
         "flow_jdet_low_frac": float(np.mean(jdet < 0.5)),

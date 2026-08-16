@@ -13,6 +13,13 @@ import math
 
 import numpy as np
 
+# USERPLAN §6.2: pixel-distance features are now reported as a fraction of
+# the frame diagonal (see ``imutils.spatial_norm_factor``).  Scales for those
+# features are expressed in the same normalized unit, i.e. the old pixel
+# scale divided by the reference diagonal of the resolution the bootstrap
+# scales were tuned on (fast-preset working resolution: 480 x 288).
+REFERENCE_DIAGONAL = 559.7713819051488
+
 FEATURE_SCALES: dict[str, tuple] = {
     # motion composition
     "comp_mean": (0.18, False),
@@ -50,13 +57,13 @@ FEATURE_SCALES: dict[str, tuple] = {
     "edge_precision": (0.90, 0.30, True),
     "edge_inst_recall_med": (0.30, 0.35, True),
     "edge_inst_recall_p10": (0.15, 0.35, True),
-    "edge_chamfer_sup_to_em": (6.0, False),
+    "edge_chamfer_sup_to_em": (6.0 / REFERENCE_DIAGONAL, False),  # normalized
     "edge_ghost_frac": (0.20, False),
     "edge_count_odd_even_ratio": (0.0, False),  # special-cased below
     # character
     "char_missing_frac": (0.45, False),
     "char_extra_frac": (0.30, False),
-    "char_chamfer": (150.0, False),
+    "char_chamfer": (150.0 / REFERENCE_DIAGONAL, False),  # normalized
     "char_components_delta": (3.0, False),
     "char_leak_mean": (10.0, 10.0, True),       # inverted: small leak = copy-like
     "char_ring_edge_frac": (0.35, False),
@@ -68,11 +75,11 @@ FEATURE_SCALES: dict[str, tuple] = {
     "weapon_dev_p90": (0.60, False),
     "weapon_dir_change_p90": (1.0, False),
     # UI / text
-    "ui_static_l1": (6.0, False),
+    "ui_static_l1": (6.0, False),    # RGB intensity units (0-255)
     "ui_static_grad": (20.0, False),
     "ui_static_edge_f": (0.85, 0.35, True),
-    "ui_comp_drift_p90": (8.0, False),
-    "ui_gen_drift": (6.0, False),
+    "ui_comp_drift_p90": (8.0, False),  # RGB intensity units (0-255)
+    "ui_gen_drift": (6.0, False),    # RGB intensity units (0-255)
     "ui_dyn_blend_frac": (0.15, False),
     "ui_dyn_out_of_range_frac": (0.15, False),
     "ui_dyn_regression": (0.20, False),
